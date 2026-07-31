@@ -24,7 +24,7 @@ class Settings:
     uv: Path | None = None
     index_url: str | None = None
     extra_index_url: tuple[str, ...] = ()
-    log_level: str = "WARNING"
+    log_level: str = "INFO"
 
 
 _configured: dict[str, Any] = {}

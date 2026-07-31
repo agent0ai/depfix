@@ -41,6 +41,9 @@ The async wrappers run blocking preparation in a worker thread and share the syn
 `depfix.configure(...)` accepts `manifest`, `frozen`, `offline`, `cache_dir`, `uv`, `index_url`, `extra_index_url`, and
 `log_level`. Precedence is per-call, `configure`, environment, optional project config/manifest discovery, defaults.
 
+`log_level` defaults to `INFO`. At `INFO` or `DEBUG`, cold preparation writes secret-redacted resolution, uv summary,
+download, materialization, and ready lines to stderr. `WARNING`, `ERROR`, `CRITICAL`, and `OFF` suppress progress.
+
 Supported variables are `DEPFIX_MANIFEST`, `DEPFIX_FROZEN`, `DEPFIX_OFFLINE`, `DEPFIX_CACHE_DIR`, `DEPFIX_UV`,
 `DEPFIX_INDEX_URL`, `DEPFIX_EXTRA_INDEX_URL`, and `DEPFIX_LOG_LEVEL`.
 

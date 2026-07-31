@@ -76,7 +76,8 @@ raises a typed discovery error instead of guessing. Use `module=` to select a kn
 lazy package handle.
 
 Importing `depfix` itself performs no resolution, network, cache, or subprocess work. Those begin only when a load or
-preparation API is called.
+preparation API is called. Cold preparation reports resolution, uv summaries, downloads, and materialization
+on stderr. Set `DEPFIX_LOG_LEVEL=WARNING` or call `configure(log_level="WARNING")` to silence progress.
 
 ## How it works
 

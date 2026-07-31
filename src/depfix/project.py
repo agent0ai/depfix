@@ -34,6 +34,7 @@ from .manifest import (
     write_manifest,
 )
 from .models import LockedGraph
+from .progress import ProgressReporter
 from .resolver import Resolver
 from .scanner import DynamicRequest, scan_project
 from .settings import resolve_settings
@@ -123,6 +124,7 @@ def export_project(
         discovery_start=project_root,
     )
     cache = Cache(settings.cache_dir)
+    progress = ProgressReporter(settings.log_level)
     policy = _config_policy(config_path)
     policy.update(
         {
@@ -132,7 +134,9 @@ def export_project(
             "extra-indexes": tuple(_sanitized_index(item) for item in settings.extra_index_url),
         }
     )
-    graph = Resolver(cache, settings=settings).resolve(ProjectConfig(config_path, declarations, policy))
+    graph = Resolver(cache, settings=settings, progress=progress).resolve(
+        ProjectConfig(config_path, declarations, policy)
+    )
     diagnostics = tuple(_format_dynamic(item) for item in result.dynamic_requests)
     graph = replace(graph, dynamic_diagnostics=diagnostics)
     graph = replace(graph, graph_id=computed_graph_id(graph))
@@ -141,7 +145,7 @@ def export_project(
         destination = project_root / destination
     destination = destination.resolve()
     write_manifest(graph, destination)
-    sync_graph(graph, cache, offline=False)
+    sync_graph(graph, cache, offline=False, progress=progress)
     ide_path = cache.root / "ide" / graph.graph_id.removeprefix("sha256:")
     generate_aliases(graph, cache, ide_path)
     if destination.parent == project_root / ".depfix":
@@ -171,11 +175,14 @@ def install_manifest(
         manifest=source, frozen=frozen, offline=offline or cached_only, cache_dir=cache_dir, discover=False
     )
     cache = Cache(settings.cache_dir)
+    progress = ProgressReporter(settings.log_level)
     allowed_hosts = _policy_strings(graph.policy.get("allowed-hosts"))
     allow_insecure = bool(graph.policy.get("allow-insecure-transport", False))
     marker = cache.root / "manifests" / graph.graph_id.removeprefix("sha256:") / "installed.json"
     warm = marker.is_file()
     for artifact in graph.artifacts:
+        if not cache.has_blob(artifact.sha256):
+            progress.emit("download", f"{artifact.distribution}=={artifact.version}")
         try:
             cache.fetch_artifact(
                 artifact,
@@ -197,7 +204,7 @@ def install_manifest(
                     remediation="install from a complete bundle or fetch artifacts on a connected host",
                 ) from exc
             raise
-    sync_graph(graph, cache, offline=True)
+    sync_graph(graph, cache, offline=True, progress=progress)
     ide_path = cache.root / "ide" / graph.graph_id.removeprefix("sha256:")
     generate_aliases(graph, cache, ide_path)
     if compile_bytecode:
@@ -221,6 +228,8 @@ def install_manifest(
         + "\n",
         encoding="utf-8",
     )
+    count = len(graph.artifacts)
+    progress.emit("ready", f"{count} {'artifact' if count == 1 else 'artifacts'}")
     return InstallResult(source, graph.graph_id, len(graph.artifacts), destination, warm)
 
 

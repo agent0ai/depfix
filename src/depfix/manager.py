@@ -16,6 +16,7 @@ from .config import ImportDeclaration, ProjectConfig
 from .errors import FrozenManifestError, ManifestMismatchError, NativeIsolationRequired
 from .manifest import assert_compatible_environment, load_manifest, write_manifest
 from .models import Alias, LockedGraph
+from .progress import ProgressReporter
 from .resolver import Resolver
 from .runtime import DepfixRuntime
 from .settings import Settings, resolve_settings
@@ -64,6 +65,7 @@ def prepare_request(
             return _memory_requests[identity]
         request_lock = _request_locks.setdefault(identity, RLock())
     cache = Cache(settings.cache_dir)
+    progress = ProgressReporter(settings.log_level)
     with request_lock, cache.lock("resolution:" + identity):
         with _guard:
             if not refresh and identity in _memory_requests:
@@ -79,7 +81,7 @@ def prepare_request(
                 selected_isolation,
                 settings,
             )
-            sync_graph(graph, cache, offline=settings.offline)
+            sync_graph(graph, cache, offline=settings.offline, progress=progress)
             runtime = _runtime(graph, cache, settings.manifest)
         else:
             resolution_path = cache.root / "resolutions" / identity / "imports.lock"
@@ -89,7 +91,7 @@ def prepare_request(
                 alias = graph.aliases[0]
                 # A warm resolution may refetch an evicted exact artifact, but
                 # it never asks uv to resolve the request again.
-                sync_graph(graph, cache, offline=settings.offline)
+                sync_graph(graph, cache, offline=settings.offline, progress=progress)
                 runtime = _runtime(graph, cache, resolution_path)
             else:
                 if settings.frozen:
@@ -108,7 +110,7 @@ def prepare_request(
                     assignment="",
                     base_dir=Path.cwd(),
                 )
-                graph = Resolver(cache, settings=settings).resolve(
+                graph = Resolver(cache, settings=settings, progress=progress).resolve(
                     ProjectConfig(
                         Path("<live>"),
                         (declaration,),
@@ -116,12 +118,14 @@ def prepare_request(
                     )
                 )
                 alias = graph.aliases[0]
-                sync_graph(graph, cache, offline=settings.offline)
+                sync_graph(graph, cache, offline=settings.offline, progress=progress)
                 resolution_path.parent.mkdir(parents=True, exist_ok=True)
                 write_manifest(graph, resolution_path)
                 runtime = _runtime(graph, cache, resolution_path)
         with _guard:
             _memory_requests[identity] = (runtime, alias)
+        root = graph.node_index[alias.node]
+        progress.emit("ready", f"{root.distribution}=={root.version}")
     return runtime, alias
 
 

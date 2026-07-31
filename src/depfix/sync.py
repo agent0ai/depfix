@@ -11,16 +11,32 @@ from pathlib import Path
 
 from .cache import Cache
 from .models import LockedGraph
+from .progress import ProgressReporter
 from .wheel import extract_wheel
 
 
-def sync_graph(graph: LockedGraph, cache: Cache, *, offline: bool = False, verify: bool = True) -> None:
+def sync_graph(
+    graph: LockedGraph,
+    cache: Cache,
+    *,
+    offline: bool = False,
+    verify: bool = True,
+    progress: ProgressReporter | None = None,
+) -> None:
     allowed_hosts = _policy_strings(graph.policy.get("allowed-hosts"))
     allow_insecure = bool(graph.policy.get("allow-insecure-transport", False))
     nodes_by_artifact: dict[str, list[str]] = {}
     for node in graph.nodes:
         nodes_by_artifact.setdefault(node.artifact, []).extend(node.provided_modules)
+    pending = [
+        artifact for artifact in graph.artifacts if not _valid_target(cache.unpacked_path(artifact.id), artifact.sha256)
+    ]
+    if progress is not None and pending:
+        count = len(pending)
+        progress.emit("prepare", f"{count} {'artifact' if count == 1 else 'artifacts'}")
     for artifact in graph.artifacts:
+        if progress is not None and not cache.has_blob(artifact.sha256):
+            progress.emit("download", f"{artifact.distribution}=={artifact.version}")
         blob = cache.fetch_artifact(
             artifact,
             offline=offline,

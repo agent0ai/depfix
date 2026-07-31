@@ -39,6 +39,7 @@ from .errors import (
 )
 from .manifest import computed_graph_id, current_environment
 from .models import Alias, Artifact, LockedGraph, Node
+from .progress import ProgressReporter
 from .settings import Settings, resolve_settings
 from .sources import SourceInfo, hash_local_source, parse_source
 from .uv_backend import UvBackend
@@ -88,12 +89,14 @@ class Resolver:
         *,
         settings: Settings | None = None,
         backend: UvBackend | None = None,
+        progress: ProgressReporter | None = None,
         index_url: str | None = None,
         allow_yanked: bool = False,
     ) -> None:
         self.cache = cache
         self.settings = settings or resolve_settings(cache_dir=cache.root.parent, discover=False)
-        self.backend = backend or UvBackend(self.settings, cache)
+        self.progress = progress or ProgressReporter(self.settings.log_level)
+        self.backend = backend or UvBackend(self.settings, cache, progress=self.progress)
         # The JSON endpoint is used only to turn uv-selected versions into exact
         # compatible wheel records. A custom endpoint remains injectable for
         # deterministic local-index tests.
@@ -119,6 +122,7 @@ class Resolver:
         aliases: list[Alias] = []
         for declaration in config.imports:
             source = parse_source(declaration.specifier, base_dir=declaration.base_dir or config.path.parent)
+            self.progress.emit("resolve", source.normalized)
             node = self._resolve_declaration(declaration, source, path=f"request:{declaration.name}", ancestors={})
             selected_module = self._select_module(declaration, source, node)
             aliases.append(
@@ -208,6 +212,7 @@ class Resolver:
             assert source.distribution is not None and source.requirement is not None
             self._uv_version = self.backend.version()
             exact_version = self.backend.resolve_root_version(source.requirement, source.distribution)
+            self.progress.emit("fetch", f"{source.distribution}=={exact_version} dependency graph")
             constraint = SpecifierSet(f"=={exact_version}")
             candidate = self._select_pypi(source.distribution, constraint)
             candidate.source = source

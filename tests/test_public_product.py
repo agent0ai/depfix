@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import warnings
@@ -12,6 +13,7 @@ from packaging.version import Version
 
 import depfix
 from depfix.cache import Cache, _validate_network_url
+from depfix.cli import main as cli_main
 from depfix.config import ImportDeclaration, ProjectConfig
 from depfix.errors import CacheError, MultipleImportModulesError, NoImportModulesError, ResolutionError, SourceError
 from depfix.manager import reset_runtime_state
@@ -22,7 +24,7 @@ from depfix.scanner import scan_project
 from depfix.settings import Settings, reset_configuration, resolve_settings
 from depfix.sources import parse_source
 from depfix.sync import sync_graph
-from depfix.uv_backend import UvBackend
+from depfix.uv_backend import UvBackend, UvExecutable
 from depfix.wheel import inspect_wheel
 
 
@@ -117,6 +119,76 @@ def test_stable_module_and_lazy_package_handle_contracts(tmp_path: Path, wheel_f
     assert package.modules["second"].VALUE == "second"
     with pytest.raises(MultipleImportModulesError):
         package.only_module()
+
+
+def test_live_load_reports_preparation_and_warning_level_silences_it(
+    tmp_path: Path,
+    wheel_factory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    wheel = wheel_factory("progress-demo", "1.0.0", {"progress_demo.py": "VALUE = 1\n"})
+    cache_dir = tmp_path / "cache"
+    depfix.configure(cache_dir=cache_dir, log_level="INFO")
+
+    assert depfix.import_module(file_spec(wheel), module="progress_demo").VALUE == 1
+    visible = capsys.readouterr()
+    assert visible.out == ""
+    assert "depfix  resolve" in visible.err
+    assert "depfix  prepare  1 artifact" in visible.err
+    assert "depfix  ready    progress-demo==1.0.0" in visible.err
+
+    reset_runtime_state()
+    reset_configuration()
+    depfix.configure(cache_dir=cache_dir, log_level="WARNING")
+    assert depfix.import_module(file_spec(wheel), module="progress_demo").VALUE == 1
+    muted = capsys.readouterr()
+    assert muted.out == ""
+    assert muted.err == ""
+
+
+def test_uv_success_summary_is_forwarded_to_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    backend = UvBackend(Settings(cache_dir=tmp_path / "cache", log_level="INFO"), Cache(tmp_path / "cache"))
+    executable = UvExecutable(Path("/fake/uv"), Version("0.11.0"), "test")
+    monkeypatch.setattr(backend, "ensure_available", lambda: executable)
+
+    def completed(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="",
+            stderr=(
+                "Resolved 2 packages\n"
+                "Installed 2 packages\n"
+                " + demo==1.0.0\n"
+                "Index https://user:password@example.test/simple\n"
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", completed)
+    backend.run(["pip", "install", "demo"], forward_output=True)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "depfix  uv       Resolved 2 packages" in captured.err
+    assert "depfix  uv       Installed 2 packages" in captured.err
+    assert "depfix  uv       + demo==1.0.0" in captured.err
+    assert "password" not in captured.err
+    assert "https://<redacted>@example.test/simple" in captured.err
+
+
+def test_json_cli_suppresses_progress(tmp_path: Path, wheel_factory, capsys: pytest.CaptureFixture[str]) -> None:
+    wheel = wheel_factory("json-progress-demo", "1.0.0", {"json_progress_demo.py": "VALUE = 1\n"})
+
+    result = cli_main(["fetch", file_spec(wheel), "--json", "--cache-dir", str(tmp_path / "cache")])
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.err == ""
+    assert json.loads(captured.out)["name"] == "json-progress-demo"
 
 
 def test_no_module_package_handle_is_still_representable(tmp_path: Path, wheel_factory) -> None:

@@ -11,6 +11,7 @@ the current interpreter and pip in a temporary virtual environment, a cross-proc
 It never writes to application `site-packages`, never runs a downloaded shell script, and is disabled by frozen/offline
 policy.
 
-Commands use isolated targets/build directories, the current Python, no Python downloads, no config discovery, no progress,
-captured output, credential redaction, first-index behavior, and configured indexes. The manifest records the executing uv
-version. CI tests the minimum and a current compatible release.
+Commands use isolated targets/build directories, the current Python, no Python downloads, no config discovery, first-index
+behavior, and configured indexes. Depfix disables uv's animated progress, captures its output for reliable errors, and
+forwards successful package summaries through its secret-redacted stderr progress channel. The manifest records the
+executing uv version. CI tests the minimum and a current compatible release.

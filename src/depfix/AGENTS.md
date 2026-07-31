@@ -14,6 +14,7 @@
 - `import_module` returns exactly one selected module; `load_package` returns a lazy package handle.
 - Resolved artifacts are hash-pinned and materialized outside ambient `site-packages`.
 - Realm imports preserve module identity and prevent undeclared cross-realm leakage.
+- Cold package preparation reports secret-safe progress on stderr by default; warning and higher log levels remain quiet.
 - Native extensions fail with a typed isolation error unless a future backend provides honest isolation.
 - Public failures use typed, credential-redacted `DepfixError` subclasses.
 

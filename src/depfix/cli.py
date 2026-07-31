@@ -165,6 +165,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.cache_dir is not None:
         configure(cache_dir=args.cache_dir)
+    if args.quiet or args.json:
+        configure(log_level="WARNING")
+    elif args.verbose:
+        configure(log_level="DEBUG")
     try:
         result = _dispatch(args)
         if isinstance(result, int):

@@ -29,3 +29,5 @@ active virtual environment and writes a graph-specific `.pth`; `detach` removes 
 
 Expected errors have no traceback unless `--verbose` is requested. JSON failures contain `ok`, exception type, and a
 secret-redacted message. Argument-parser errors use exit code 2; delegated `depfix pip` returns uv's exit code.
+Interactive resolution and installation progress is written to stderr. `--quiet` and `--json` suppress progress;
+`--verbose` retains it and enables tracebacks for failures.

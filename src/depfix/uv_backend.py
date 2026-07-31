@@ -30,6 +30,7 @@ from .errors import (
     UvNotFoundError,
     redact,
 )
+from .progress import ProgressReporter
 from .settings import Settings
 
 MINIMUM_UV_VERSION = Version("0.11.0")
@@ -51,9 +52,10 @@ class PreparedEnvironment:
 
 
 class UvBackend:
-    def __init__(self, settings: Settings, cache: Cache) -> None:
+    def __init__(self, settings: Settings, cache: Cache, *, progress: ProgressReporter | None = None) -> None:
         self.settings = settings
         self.cache = cache
+        self.progress = progress or ProgressReporter(settings.log_level)
         self._executable: UvExecutable | None = None
         self.invocation_count = 0
 
@@ -90,6 +92,7 @@ class UvBackend:
         cwd: Path | None = None,
         check: bool = True,
         extra_env: dict[str, str] | None = None,
+        forward_output: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         executable = self.ensure_available()
         command = [str(executable.path), *arguments]
@@ -120,6 +123,8 @@ class UvBackend:
             capture_output=True,
             check=False,
         )
+        if forward_output and result.returncode == 0:
+            self.progress.forward_uv(result.stdout, result.stderr)
         if check and result.returncode != 0:
             raise UvBackendError(
                 "uv command failed",
@@ -155,7 +160,7 @@ class UvBackend:
         for index in self.settings.extra_index_url:
             arguments.extend(["--index", index])
         arguments.append(requirement)
-        self.run(arguments)
+        self.run(arguments, forward_output=True)
         distributions = _installed_distributions(target)
         if not distributions:
             raise UvBackendError("uv completed without preparing a distribution", request=requirement)
@@ -184,7 +189,7 @@ class UvBackend:
         arguments = ["build", "--wheel", "--out-dir", str(output), "--no-python-downloads", str(source)]
         if offline if offline is not None else self.settings.offline:
             arguments.append("--offline")
-        self.run(arguments, cwd=source if source.is_dir() else source.parent)
+        self.run(arguments, cwd=source if source.is_dir() else source.parent, forward_output=True)
         wheels = sorted(output.glob("*.whl"), key=lambda path: path.name)
         if len(wheels) != 1:
             raise UvBackendError(
