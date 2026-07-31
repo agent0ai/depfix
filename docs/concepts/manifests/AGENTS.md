@@ -10,7 +10,8 @@
 
 ## Local Contracts
 
-- Manifests contain no credentials and bind requests to exact target, resolver, artifact, node, module, and policy state.
+- Manifests contain no credentials and bind requests and grouped standard-import declarations to exact target, resolver,
+  artifact, node, module, source, isolation, and policy state.
 - Unknown format versions and non-canonical graph identities are rejected.
 
 ## Work Guidance

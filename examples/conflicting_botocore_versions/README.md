@@ -9,7 +9,8 @@ Shared C:  botocore
 ```
 
 Those constraints have no overlap. Depfix resolves a separate dependency realm for each root, imports both packages in
-one process, constructs an AWS CLI driver and a Boto3 session, and proves that each object uses its own Botocore module.
+one grouped `using()` scope with ordinary imports, constructs an AWS CLI driver and a Boto3 session, and proves that each
+object uses its own Botocore module.
 The script disables EC2 metadata lookup and makes no AWS service call, so it needs no credentials.
 
 From the repository root:

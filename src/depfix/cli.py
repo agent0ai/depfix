@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import runpy
@@ -302,15 +303,27 @@ def _check(project: Path, manifest: Path, offline: bool) -> dict[str, object]:
         (request.normalized_specifier, request.api, request.explicit_module and request.module or None)
         for request in graph.aliases
     }
-    actual = {(request.normalized_specifier, request.api, request.module) for request in scan.requests}
+    actual = {
+        (request.normalized_specifier, request.api, request.module) for request in scan.requests if not request.group_id
+    }
     missing = sorted(actual - declared)
     if missing:
         raise ValueError(f"manifest is missing or differs from {len(missing)} static requests: {missing}")
-    if graph.dynamic_diagnostics:
+    declared_groups = {(group.mode, tuple(sorted(group.normalized_specifiers))) for group in graph.groups}
+    actual_groups = {(group.mode, tuple(sorted(group.normalized_specifiers))) for group in scan.groups}
+    missing_groups = sorted(actual_groups - declared_groups)
+    if missing_groups:
+        raise ValueError(
+            f"manifest is missing or differs from {len(missing_groups)} standard-import groups: {missing_groups}"
+        )
+    has_dynamic_includes = any(
+        request.source_file in {"<explicit>", ".depfix/config.toml"} for request in graph.aliases
+    )
+    if graph.dynamic_diagnostics and not has_dynamic_includes:
         raise ValueError("manifest records unresolved dynamic requests: " + "; ".join(graph.dynamic_diagnostics))
     if offline:
         verify_manifest(path)
-    return {"ok": True, "manifest_id": graph.graph_id, "requests": len(actual)}
+    return {"ok": True, "manifest_id": graph.graph_id, "requests": len(actual), "groups": len(actual_groups)}
 
 
 def _tree(graph: Any) -> dict[str, object]:
@@ -495,7 +508,14 @@ def _ide(args: argparse.Namespace) -> object:
         if args.ide_command == "path":
             return {"path": str(output)}
         if args.ide_command == "configure":
-            return {"extraPaths": [str(output)], "mypy_path": str(output), "pycharm_source_root": str(output)}
+            overlay = output / "default_imports"
+            paths = [str(overlay), str(output)] if overlay.is_dir() else [str(output)]
+            return {
+                "extraPaths": paths,
+                "mypy_path": os.pathsep.join(paths),
+                "pycharm_source_root": str(output),
+                "default_overlay": str(overlay) if overlay.is_dir() else None,
+            }
         if args.ide_command == "attach":
             if sys.prefix == sys.base_prefix:
                 raise ValueError("ide attach requires an explicitly active virtual environment")

@@ -10,7 +10,7 @@
 
 ## Local Contracts
 
-- The example must assert distinct versions and distinct module identities.
+- The example must use ordinary imports in separate `using()` scopes and assert distinct versions and module identities.
 
 ## Work Guidance
 

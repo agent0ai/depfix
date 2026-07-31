@@ -1,7 +1,10 @@
-from depfix import import_module
+import depfix
 
-idna_36 = import_module("idna==3.6")
-idna_37 = import_module("idna==3.7")
+with depfix.using("idna==3.6"):
+    import idna as idna_36
+
+with depfix.using("idna==3.7"):
+    import idna as idna_37
 
 assert idna_36 is not idna_37
 assert idna_36.__version__ == "3.6"

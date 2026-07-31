@@ -24,13 +24,14 @@
 </p>
 
 ```python
-from depfix import import_module
+import depfix
 
-idna_2 = import_module("idna==2.10")
-idna_3 = import_module("idna==3.10")
+with depfix.using("idna==2.10"):
+    import idna as idna_2
 
-assert idna_2.__depfix_version__ == "2.10"
-assert idna_3.__depfix_version__ == "3.10"
+with depfix.using("idna==3.10"):
+    import idna as idna_3
+
 assert idna_2 is not idna_3
 ```
 
@@ -42,7 +43,7 @@ No virtual-environment switching. No `sys.path` swapping. No installation into t
 | --- | --- |
 | **Side-by-side versions** | Load different versions of the same pure-Python distribution in one process. |
 | **Dependency realms** | Each root keeps parent-specific dependency edges, so one graph does not flatten into another. |
-| **Zero-configuration start** | Call `import_module()` directly; the first request prepares an exact graph in the user cache. |
+| **Standard Python imports** | Select persistent defaults or temporary scopes, then use ordinary `import` statements. |
 | **Reproducible deployments** | Export deterministic manifests, install frozen state, and build complete air-gap bundles. |
 | **Real package sources** | Resolve PyPI requirements, Git refs, URLs, local projects, wheels, and standalone Python files. |
 | **Honest isolation** | Pure-Python realm loading is supported; unsafe native-extension loading fails explicitly. |
@@ -58,25 +59,39 @@ Install Depfix from PyPI:
 python -m pip install depfix
 ```
 
-Then ask for the package version your code needs:
+Select persistent versions, then import normally:
 
 ```python
-from depfix import import_module, load_package
+import depfix
 
-requests = import_module("requests>=2.31,<3")
-tools = load_package("setuptools==75.0.0")
+depfix.default(
+    "requests>=2.31,<3",
+    "PyYAML==6.0.2",
+)
 
-print(requests.__depfix_version__)
-print(tools.name, tools.version, tools.module_names)
-setuptools = tools.modules.setuptools
+import requests
+import yaml
 ```
 
-`import_module()` returns exactly one canonical module. If a distribution exposes zero or several public roots, Depfix
-raises a typed discovery error instead of guessing. Use `module=` to select a known root or `load_package()` to inspect a
-lazy package handle.
+Use separate temporary scopes when code needs incompatible versions:
 
-Importing `depfix` itself performs no resolution, network, cache, or subprocess work. Those begin only when a load or
-preparation API is called. Cold preparation reports resolution, uv summaries, downloads, and materialization
+```python
+import depfix
+
+with depfix.using("requests==2.31.0"):
+    import requests as requests_old
+
+with depfix.using("requests==2.32.3"):
+    import requests as requests_new
+```
+
+`default()` creates an additive persistent import map. `using()` temporarily overrides matching defaults, supports nested
+contexts, and also decorates synchronous or asynchronous functions. Imported objects retain their dependency realm after
+the scope exits. For explicit dynamic loading, use `depfix.import_module(...)`; use `depfix.load_package(...)` to inspect a
+distribution exposing several roots.
+
+Importing `depfix` itself does not patch imports or perform resolution, network, cache, or subprocess work. The lightweight
+dispatcher is installed by the first `default()` or `using()` call. Cold preparation reports resolution, uv summaries, downloads, and materialization
 on stderr. Set `DEPFIX_LOG_LEVEL=WARNING` or call `configure(log_level="WARNING")` to silence progress.
 
 ## How it works
@@ -100,6 +115,8 @@ the active environment, or add prepared package trees to global `sys.path`.
 ## Sources
 
 ```python
+from depfix import import_module
+
 import_module("requests>=2.31,<3")
 import_module("pypi:requests[socks]~=2.32")
 import_module("git:https://github.com/acme/sdk.git@v2.4.0")
@@ -123,7 +140,8 @@ depfix install .depfix/imports.lock --frozen
 DEPFIX_FROZEN=1 python application.py
 ```
 
-`export` scans static `import_module()` and `load_package()` calls without executing application code. The manifest records
+`export` scans static `default()`, `using()`, `import_module()`, and `load_package()` declarations without executing
+application code. It preserves each multi-package standard-import declaration as one consistent realm request and records
 exact artifacts, hashes, target identity, import ownership, source provenance, policy, and parent-specific edges.
 
 For disconnected targets:
@@ -146,8 +164,13 @@ depfix ide sync .depfix/imports.lock
 depfix ide configure .depfix/imports.lock
 ```
 
-Depfix generates a physical `depfix_imports` package with graph-specific stubs, editor snippets, and source maps. Distinct
-aliases keep distinct version-specific APIs while runtime loading continues to use canonical realm identities.
+Depfix generates a physical `depfix_imports` package with graph-specific stubs, editor snippets, source maps, and an
+optional default-import type overlay. Scanner-derived aliases keep scoped versions distinct. Generic IDEs cannot infer
+arbitrary context-sensitive imports, so use generated aliases when exact scoped completion matters:
+
+```python
+from depfix_imports import requests_old, requests_new
+```
 
 ## Boundaries worth knowing
 

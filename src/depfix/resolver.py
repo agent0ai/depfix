@@ -141,6 +141,9 @@ class Resolver:
                     isolation=str(config.policy.get("isolation", "inprocess")),
                     index_identity=_index_policy_identity(self._project_indexes),
                     source_policy=str(config.policy.get("source-policy", "default")),
+                    group=declaration.group_id,
+                    mode=declaration.mode,
+                    enclosing_function=declaration.enclosing_function,
                 )
             )
         environment = current_environment()

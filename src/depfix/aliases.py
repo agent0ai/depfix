@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -71,8 +72,30 @@ def generate_aliases(graph: LockedGraph, cache: Cache, output_root: Path) -> Pat
             _generate_package_stub_tree(package, alias.name, nodes[alias.node], cache, alias_rows[alias.name])
         else:
             _generate_stub_tree(package, alias.name, alias.module, nodes[alias.node], cache)
-    _write_editor_snippets(output_root)
+    overlay = _generate_default_overlay(graph, cache, output_root)
+    _write_editor_snippets(output_root, overlay)
     return package
+
+
+def _generate_default_overlay(graph: LockedGraph, cache: Cache, output_root: Path) -> Path | None:
+    overlay = output_root / "default_imports"
+    generated: set[str] = set()
+    for group in graph.groups:
+        if group.mode != "default":
+            continue
+        for alias_name in group.aliases:
+            alias = graph.alias_index.get(alias_name)
+            if alias is None:
+                continue
+            node = graph.node_index[alias.node]
+            for logical_module in node.public_modules:
+                root = logical_module.split(".", 1)[0]
+                if root in generated:
+                    continue
+                overlay.mkdir(parents=True, exist_ok=True)
+                _generate_stub_tree(overlay, root, root, node, cache)
+                generated.add(root)
+    return overlay if generated else None
 
 
 def _generate_stub_tree(package: Path, alias_name: str, logical_module: str, node: Node, cache: Cache) -> None:
@@ -178,12 +201,19 @@ def _copy_stub(source: Path, target: Path, logical_root: str, alias_root: str) -
     target.write_text(text, encoding="utf-8")
 
 
-def _write_editor_snippets(output_root: Path) -> None:
+def _write_editor_snippets(output_root: Path, overlay: Path | None) -> None:
     generated = str(output_root.resolve())
+    paths = [str(overlay.resolve()), generated] if overlay is not None else [generated]
     (output_root / "pyrightconfig.depfix.json").write_text(
-        json.dumps({"extraPaths": [generated], "stubPath": generated}, indent=2) + "\n", encoding="utf-8"
+        json.dumps({"extraPaths": paths, "stubPath": generated}, indent=2) + "\n", encoding="utf-8"
     )
-    (output_root / "mypy.depfix.ini").write_text(f"[mypy]\nmypy_path = {generated}\n", encoding="utf-8")
+    (output_root / "mypy.depfix.ini").write_text(f"[mypy]\nmypy_path = {os.pathsep.join(paths)}\n", encoding="utf-8")
     (output_root / "PYCHARM.md").write_text(
-        "Mark this generated directory as a Sources Root in Settings > Project Structure.\n", encoding="utf-8"
+        "Mark this generated directory as a Sources Root in Settings > Project Structure.\n"
+        + (
+            "For ordinary default imports, mark default_imports as the first Sources Root.\n"
+            if overlay is not None
+            else ""
+        ),
+        encoding="utf-8",
     )

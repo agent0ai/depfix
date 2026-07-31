@@ -82,6 +82,8 @@ Default section order:
 - Treat `agent0ai` as the project owner and use `https://github.com/agent0ai/depfix` as the canonical repository URL.
 - License Depfix under MIT with `Agent Zero, s.r.o` copyright ownership and `pr@agent-zero.ai` as the contact.
 - Show concise, secret-safe package preparation progress on stderr by default; keep quiet and structured output modes clean.
+- Keep `default()` and `using()` as the lowercase public standard-import APIs; ordinary imports must preserve realm identity,
+  scope isolation, frozen preparation, and unmanaged Python behavior.
 - Keep the local `.env` owner-readable only for explicitly authorized publication; never print, package, or commit it or
   persist its credentials elsewhere.
 

@@ -10,7 +10,7 @@ public request / scanned request
   -> caller-bound synthetic import runtime
 ```
 
-Artifacts, nodes, and requests are distinct. An artifact is immutable content. A node is one artifact plus extras,
+Artifacts, nodes, requests, and grouped standard-import declarations are distinct. An artifact is immutable content. A node is one artifact plus extras,
 dependency edges, module ownership, namespace contributions, and native policy in a particular realm. A request points to a
 node and retains its normalized identity, API contract, source site, alias, and policy.
 
@@ -18,6 +18,10 @@ Canonical modules use `_depfix.g_<manifest>.n_<node>.<logical-name>`. They live 
 logical roots and materialized target paths are not added to global import state. Each module executes with a caller-bound
 `__import__` that resolves logical names through that node's declared dependency edges. Relative imports, circular imports,
 namespace packages, resource readers, `pkgutil`, and realm-scoped `importlib.metadata` use the same binding.
+
+`default()` and `using()` install one narrow process-wide `builtins.__import__` dispatcher. It never swaps the hook per
+scope. Dispatch first honors metadata on an already loaded realm module, then a context-local `using()` stack, then the
+persistent default map, and finally the previous importer. Managed versions remain under synthetic `sys.modules` keys.
 
 The public `depfix_imports` alias root is a lightweight finder at runtime and a physical generated stub package for editors.
 The two layers share graph/node/module/specifier identities.

@@ -210,5 +210,21 @@ class ImportOwnershipError(RealmImportError):
     pass
 
 
+class DefaultImportConflictError(DepfixError, ImportError):
+    pass
+
+
+class InvalidUsingScopeError(DepfixError):
+    pass
+
+
+class ScopeModuleNotProvidedError(ModuleNotProvidedError):
+    pass
+
+
+class ImportDispatcherConflictError(DepfixError, ImportError):
+    pass
+
+
 class AmbiguousMetadataError(ModuleDiscoveryError):
     pass

@@ -22,7 +22,7 @@ from .errors import (
     ManifestNotFoundError,
     UnsupportedManifestVersionError,
 )
-from .models import Alias, Artifact, Environment, LockedGraph, Node
+from .models import Alias, Artifact, Environment, LockedGraph, Node, RequestGroup
 
 
 def current_environment() -> Environment:
@@ -63,6 +63,18 @@ def computed_graph_id(graph: LockedGraph) -> str:
         "requests": [
             {name: getattr(item, name) for name in item.__dataclass_fields__}
             for item in sorted(graph.aliases, key=lambda value: value.name)
+        ],
+        "groups": [
+            {
+                **{
+                    name: getattr(item, name)
+                    for name in item.__dataclass_fields__
+                    if name not in {"module_aliases", "options"}
+                },
+                "module_aliases": dict(sorted(item.module_aliases.items())),
+                "options": dict(sorted(item.options.items())),
+            }
+            for item in sorted(graph.groups, key=lambda value: value.id)
         ],
         "policy": dict(sorted(graph.policy.items())),
         "dynamic_diagnostics": sorted(graph.dynamic_diagnostics),
@@ -191,6 +203,32 @@ def dumps_manifest(graph: LockedGraph) -> str:
                 f"isolation = {_q(request.isolation)}",
                 f"index-identity = {_q(request.index_identity)}",
                 f"source-policy = {_q(request.source_policy)}",
+                f"group = {_q(request.group)}",
+                f"mode = {_q(request.mode)}",
+                f"enclosing-function = {_q(request.enclosing_function)}",
+            ]
+        )
+    for group in sorted(graph.groups, key=lambda item: item.id):
+        lines.extend(
+            [
+                "",
+                "[[groups]]",
+                f"id = {_q(group.id)}",
+                f"mode = {_q(group.mode)}",
+                f"specifiers = {_array(group.specifiers)}",
+                f"normalized-specifiers = {_array(group.normalized_specifiers)}",
+                f"aliases = {_array(group.aliases)}",
+                f"source-file = {_q(group.source_file)}",
+                f"source-line = {group.source_line}",
+                f"source-column = {group.source_column}",
+                f"enclosing-function = {_q(group.enclosing_function)}",
+                f"ordinary-imports = {_array(group.ordinary_imports)}",
+                f"resolved-graph-ids = {_array(group.resolved_graph_ids)}",
+                f"provided-imports = {_array(group.provided_imports)}",
+                f"module-aliases = {_inline_table(dict(group.module_aliases))}",
+                f"source-base-directory = {_q(group.source_base_dir)}",
+                f"isolation = {_q(group.isolation)}",
+                f"options = {_inline_table(dict(group.options))}",
             ]
         )
     return "\n".join(lines) + "\n"
@@ -309,8 +347,32 @@ def load_manifest(path: Path) -> LockedGraph:
                 isolation=item.get("isolation", "inprocess"),
                 index_identity=item.get("index-identity", ""),
                 source_policy=item.get("source-policy", "default"),
+                group=item.get("group", ""),
+                mode=item.get("mode", "explicit"),
+                enclosing_function=item.get("enclosing-function", ""),
             )
             for item in raw.get("requests", [])
+        )
+        groups = tuple(
+            RequestGroup(
+                id=item["id"],
+                mode=item["mode"],
+                specifiers=tuple(item.get("specifiers", [])),
+                normalized_specifiers=tuple(item.get("normalized-specifiers", [])),
+                aliases=tuple(item.get("aliases", [])),
+                source_file=item.get("source-file", ""),
+                source_line=item.get("source-line", 0),
+                source_column=item.get("source-column", 0),
+                enclosing_function=item.get("enclosing-function", ""),
+                ordinary_imports=tuple(item.get("ordinary-imports", [])),
+                resolved_graph_ids=tuple(item.get("resolved-graph-ids", [])),
+                provided_imports=tuple(item.get("provided-imports", [])),
+                module_aliases=dict(item.get("module-aliases", {})),
+                source_base_dir=item.get("source-base-directory", ""),
+                isolation=item.get("isolation", "inprocess"),
+                options=dict(item.get("options", {})),
+            )
+            for item in raw.get("groups", [])
         )
         resolver = raw.get("resolver", {})
         graph = LockedGraph(
@@ -325,6 +387,7 @@ def load_manifest(path: Path) -> LockedGraph:
             resolver_backend=resolver.get("backend", "uv"),
             resolver_version=resolver.get("backend-version", "unknown"),
             dynamic_diagnostics=tuple(raw.get("dynamic-diagnostics", [])),
+            groups=groups,
         )
     except UnsupportedManifestVersionError:
         raise
@@ -409,8 +472,32 @@ def _validate(graph: LockedGraph, path: Path) -> None:
             raise ManifestError(f"Import request {request.name!r} has no selected module", manifest=path)
         if request.isolation not in {"inprocess", "process"}:
             raise ManifestError(f"Request {request.name!r} has an unsupported isolation policy", manifest=path)
+        if request.mode not in {"explicit", "default", "using-context", "using-decorator"}:
+            raise ManifestError(f"Request {request.name!r} has an unsupported declaration mode", manifest=path)
         if _contains_secret(request.specifier) or _contains_secret(request.index_identity):
             raise ManifestError(f"Request {request.name!r} contains serialized credentials", manifest=path)
+        if request.group and request.group not in graph.group_index:
+            raise ManifestError(f"Request {request.name!r} references a missing group", manifest=path)
+        if request.group and graph.group_index[request.group].mode != request.mode:
+            raise ManifestError(f"Request {request.name!r} disagrees with its group mode", manifest=path)
+    if len(graph.group_index) != len(graph.groups):
+        raise ManifestError("Duplicate request groups", manifest=path)
+    for group in graph.groups:
+        if group.mode not in {"default", "using-context", "using-decorator"}:
+            raise ManifestError(f"Request group {group.id!r} has unsupported mode {group.mode!r}", manifest=path)
+        if not group.specifiers or len(group.specifiers) != len(group.normalized_specifiers):
+            raise ManifestError(f"Request group {group.id!r} has an invalid specifier group", manifest=path)
+        if set(group.aliases) - set(graph.alias_index):
+            raise ManifestError(f"Request group {group.id!r} references missing aliases", manifest=path)
+        if set(group.module_aliases) - set(graph.alias_index):
+            raise ManifestError(f"Request group {group.id!r} references missing module aliases", manifest=path)
+        if any(not re.fullmatch(r"realm_[0-9a-f]{24}", item) for item in group.resolved_graph_ids):
+            raise ManifestError(f"Request group {group.id!r} has an invalid resolved realm identity", manifest=path)
+        if group.isolation not in {"inprocess", "process"}:
+            raise ManifestError(f"Request group {group.id!r} has unsupported isolation", manifest=path)
+        serialized_group = (*group.specifiers, *group.normalized_specifiers, *group.options.values())
+        if any(_contains_secret(value) for value in serialized_group):
+            raise ManifestError(f"Request group {group.id!r} contains serialized credentials", manifest=path)
     expected = computed_graph_id(graph)
     if graph.graph_id != expected:
         raise ManifestMismatchError(

@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import zipfile
 from collections.abc import Iterable
@@ -21,10 +22,12 @@ from .config import ImportDeclaration, ProjectConfig
 from .errors import (
     BundleError,
     CacheError,
+    DefaultImportConflictError,
     HashMismatchError,
     IntegrityError,
     ManifestError,
     OfflineArtifactMissingError,
+    redact,
 )
 from .manifest import (
     assert_compatible_environment,
@@ -33,10 +36,10 @@ from .manifest import (
     load_manifest,
     write_manifest,
 )
-from .models import LockedGraph
+from .models import Alias, LockedGraph, RequestGroup, resolved_realm_id
 from .progress import ProgressReporter
 from .resolver import Resolver
-from .scanner import DynamicRequest, scan_project
+from .scanner import DynamicRequest, ScanGroup, scan_project
 from .settings import resolve_settings
 from .sync import sync_graph
 from .uv_backend import UvBackend
@@ -107,12 +110,15 @@ def export_project(
             alias,
             site.original_specifier,
             site.module,
-            api=site.api,
+            api="load_package" if site.group_id else site.api,
             source_file=site.source_file,
             source_line=site.line,
             source_column=site.column,
             assignment=site.assignment or "",
             base_dir=site.base_dir,
+            group_id=site.group_id,
+            mode=site.mode,
+            enclosing_function=site.enclosing_function,
         )
         for alias, site in zip(aliases, sites, strict=True)
     )
@@ -137,8 +143,10 @@ def export_project(
     graph = Resolver(cache, settings=settings, progress=progress).resolve(
         ProjectConfig(config_path, declarations, policy)
     )
-    diagnostics = tuple(_format_dynamic(item) for item in result.dynamic_requests)
-    graph = replace(graph, dynamic_diagnostics=diagnostics)
+    diagnostics = [_format_dynamic(item) for item in result.dynamic_requests]
+    graph, group_diagnostics = _attach_scan_groups(graph, result.groups)
+    diagnostics.extend(group_diagnostics)
+    graph = replace(graph, dynamic_diagnostics=tuple(diagnostics))
     graph = replace(graph, graph_id=computed_graph_id(graph))
     destination = Path(output)
     if not destination.is_absolute():
@@ -510,6 +518,116 @@ def _write_state_gitignore(directory: Path) -> None:
     path = directory / ".gitignore"
     if not path.exists():
         path.write_text("*\n!.gitignore\n!imports.lock\n!config.toml\n", encoding="utf-8")
+
+
+def _attach_scan_groups(graph: LockedGraph, scanned: tuple[ScanGroup, ...]) -> tuple[LockedGraph, list[str]]:
+    aliases = list(graph.aliases)
+    used = {alias.name for alias in aliases}
+    groups: list[RequestGroup] = []
+    diagnostics: list[str] = []
+    nodes = graph.node_index
+    default_roots: dict[str, tuple[str, str]] = {}
+    for group in scanned:
+        roots = [alias for alias in aliases if alias.group == group.id and alias.api == "load_package"]
+        providers: dict[str, list[Alias]] = {}
+        provided_names: set[str] = set()
+        for alias in roots:
+            node = nodes[alias.node]
+            provided_names.update(node.provided_modules)
+            for logical in node.provided_modules:
+                providers.setdefault(logical.split(".", 1)[0], []).append(alias)
+        if group.mode == "default":
+            for root, candidates in providers.items():
+                for candidate in candidates:
+                    node = nodes[candidate.node]
+                    fingerprint = resolved_realm_id(graph, (node.id,))
+                    current = default_roots.get(root)
+                    if current is not None and current[0] != fingerprint:
+                        raise DefaultImportConflictError(
+                            "Persistent default declarations select incompatible providers",
+                            module=root,
+                            candidates=(current[1], f"{node.distribution}=={node.version}"),
+                            source=f"{group.source_file}:{group.line}:{group.column}",
+                            remediation="keep one default version or move the alternate selection into using()",
+                        )
+                    default_roots[root] = (fingerprint, f"{node.distribution}=={node.version}")
+        generated: dict[str, str] = {}
+        for logical, source_alias in group.module_aliases:
+            root = logical.split(".", 1)[0]
+            candidates = providers.get(root, [])
+            if len(candidates) != 1:
+                if not _standard_library(root):
+                    diagnostics.append(
+                        f"{group.source_file}:{group.line}:{group.column}: {group.mode} group {group.id} "
+                        f"does not uniquely provide ordinary import {logical!r}; "
+                        f"provided={sorted(provided_names)!r}"
+                    )
+                continue
+            provider = candidates[0]
+            name = _unique_generated_alias(source_alias, used)
+            used.add(name)
+            aliases.append(
+                Alias(
+                    name,
+                    provider.node,
+                    logical,
+                    " | ".join(redact(value) for value in group.specifiers),
+                    normalized_specifier=" | ".join(group.normalized_specifiers),
+                    api="import_module",
+                    source_file=group.source_file,
+                    source_line=group.line,
+                    source_column=group.column,
+                    assignment=source_alias,
+                    explicit_module=True,
+                    isolation=provider.isolation,
+                    index_identity=provider.index_identity,
+                    source_policy=provider.source_policy,
+                    group=group.id,
+                    mode=group.mode,
+                    enclosing_function=group.enclosing_function,
+                )
+            )
+            generated[name] = logical
+        realm_id = resolved_realm_id(graph, tuple(alias.node for alias in roots))
+        options = {key: redact(value) for key, value in group.options}
+        isolation = json.loads(options.get("isolation", '"inprocess"'))
+        if not isinstance(isolation, str):
+            isolation = "inprocess"
+        groups.append(
+            RequestGroup(
+                group.id,
+                group.mode,
+                tuple(redact(value) for value in group.specifiers),
+                group.normalized_specifiers,
+                tuple(alias.name for alias in roots),
+                source_file=group.source_file,
+                source_line=group.line,
+                source_column=group.column,
+                enclosing_function=group.enclosing_function,
+                ordinary_imports=group.ordinary_imports,
+                resolved_graph_ids=(realm_id,),
+                provided_imports=tuple(sorted(provided_names)),
+                module_aliases=generated,
+                source_base_dir=PurePosixPath(group.source_file).parent.as_posix(),
+                isolation=isolation,
+                options=options,
+            )
+        )
+    return replace(graph, aliases=tuple(sorted(aliases, key=lambda item: item.name)), groups=tuple(groups)), diagnostics
+
+
+def _unique_generated_alias(value: str, used: set[str]) -> str:
+    base = value if value.isidentifier() else "scoped_import"
+    if base not in used:
+        return base
+    index = 2
+    while f"{base}_{index}" in used:
+        index += 1
+    return f"{base}_{index}"
+
+
+def _standard_library(root: str) -> bool:
+    return root in sys.builtin_module_names or root in getattr(sys, "stdlib_module_names", set())
 
 
 def _unique_aliases(values: Iterable[str]) -> list[str]:

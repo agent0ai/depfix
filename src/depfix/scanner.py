@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import hashlib
+import json
 import keyword
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 import pathspec
 from pathspec.pattern import Pattern
 
+from .errors import redact
 from .sources import parse_source
 
 DEFAULT_EXCLUDED_DIRS = {
@@ -50,6 +53,25 @@ class ScanSite:
     base_dir: Path
     origin: str = "static"
     suggested_alias: str = ""
+    group_id: str = ""
+    mode: str = "explicit"
+    enclosing_function: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ScanGroup:
+    id: str
+    mode: str
+    specifiers: tuple[str, ...]
+    normalized_specifiers: tuple[str, ...]
+    source_file: str
+    line: int
+    column: int
+    enclosing_function: str
+    ordinary_imports: tuple[str, ...]
+    module_aliases: tuple[tuple[str, str], ...]
+    base_dir: Path
+    options: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +89,7 @@ class ScanResult:
     requests: tuple[ScanSite, ...]
     dynamic_requests: tuple[DynamicRequest, ...]
     files_scanned: int
+    groups: tuple[ScanGroup, ...] = ()
 
 
 def scan_project(
@@ -79,6 +102,7 @@ def scan_project(
     matcher = _gitignore(project)
     requests: list[ScanSite] = []
     dynamic: list[DynamicRequest] = []
+    groups: list[ScanGroup] = []
     files = 0
     for source in _source_files(project, matcher, tuple(exclude)):
         files += 1
@@ -93,6 +117,7 @@ def scan_project(
         visitor.visit(tree)
         requests.extend(visitor.requests)
         dynamic.extend(visitor.dynamic)
+        groups.extend(visitor.groups)
     for value in include:
         parsed = parse_source(value, base_dir=project)
         alias = _suggest_alias(None, parsed.distribution or "package")
@@ -106,6 +131,7 @@ def scan_project(
         tuple(sorted(requests, key=lambda item: (item.source_file, item.line, item.column, item.normalized_specifier))),
         tuple(sorted(dynamic, key=lambda item: (item.source_file, item.line, item.column))),
         files,
+        tuple(sorted(groups, key=lambda item: (item.source_file, item.line, item.column, item.id))),
     )
 
 
@@ -120,12 +146,29 @@ class _Visitor(ast.NodeVisitor):
         self.constants: dict[str, str] = {}
         self.requests: list[ScanSite] = []
         self.dynamic: list[DynamicRequest] = []
+        self.groups: list[ScanGroup] = []
         self._assignment: str | None = None
+        self._function_stack: list[str] = []
+        self._handled_groups: set[int] = set()
+
+    def visit_Module(self, node: ast.Module) -> None:
+        for index, statement in enumerate(node.body):
+            call = _expression_call(statement)
+            if call is not None and self._api(call.func) == "default":
+                following: list[ast.stmt] = []
+                for candidate in node.body[index + 1 :]:
+                    next_call = _expression_call(candidate)
+                    if next_call is not None and self._api(next_call.func) == "default":
+                        break
+                    following.append(candidate)
+                ordinary = _direct_ordinary_imports(following)
+                self._record_group(call, "default", ordinary, "")
+            self.visit(statement)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module == "depfix":
             for item in node.names:
-                if item.name in {"import_module", "load_package"}:
+                if item.name in {"default", "import_module", "load_package", "using"}:
                     self.functions[item.asname or item.name] = item.name
         self.generic_visit(node)
 
@@ -164,8 +207,16 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
+        if id(node) in self._handled_groups:
+            return
         api = self._api(node.func)
         if api is None:
+            self.generic_visit(node)
+            return
+        if api == "default":
+            self._record_group(node, "default", (), self._enclosing_function)
+            return
+        if api == "using":
             self.generic_visit(node)
             return
         expression = ast.get_source_segment(self.text, node) or "<call>"
@@ -218,9 +269,165 @@ class _Visitor(ast.NodeVisitor):
         if isinstance(node, ast.Name):
             return self.functions.get(node.id)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id in self.modules and node.attr in {"import_module", "load_package"}:
+            if node.value.id in self.modules and node.attr in {"default", "import_module", "load_package", "using"}:
                 return node.attr
         return None
+
+    def visit_With(self, node: ast.With) -> None:
+        ordinary = _ordinary_imports(node.body, self._is_using_call)
+        for item in node.items:
+            if isinstance(item.context_expr, ast.Call) and self._api(item.context_expr.func) == "using":
+                self._record_group(item.context_expr, "using-context", ordinary, self._enclosing_function)
+        self.generic_visit(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        self.visit_With(node)  # type: ignore[arg-type]
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        name = ".".join((*self._function_stack, node.name))
+        ordinary = _ordinary_imports(node.body, self._is_using_call)
+        for decorator in node.decorator_list:
+            if isinstance(decorator, ast.Call) and self._api(decorator.func) == "using":
+                self._record_group(decorator, "using-decorator", ordinary, name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        self._function_stack.append(node.name)
+        for index, statement in enumerate(node.body):
+            call = _expression_call(statement)
+            if call is not None and self._api(call.func) == "default":
+                following: list[ast.stmt] = []
+                for candidate in node.body[index + 1 :]:
+                    next_call = _expression_call(candidate)
+                    if next_call is not None and self._api(next_call.func) == "default":
+                        break
+                    following.append(candidate)
+                self._record_group(call, "default", _direct_ordinary_imports(following), name)
+            self.visit(statement)
+        self._function_stack.pop()
+
+    @property
+    def _enclosing_function(self) -> str:
+        return ".".join(self._function_stack)
+
+    def _is_using_call(self, node: ast.expr) -> bool:
+        return isinstance(node, ast.Call) and self._api(node.func) == "using"
+
+    def _record_group(
+        self,
+        node: ast.Call,
+        mode: str,
+        ordinary: tuple[tuple[str, str], ...],
+        enclosing_function: str,
+    ) -> None:
+        if id(node) in self._handled_groups:
+            return
+        self._handled_groups.add(id(node))
+        expression = ast.get_source_segment(self.text, node) or "<call>"
+        if not node.args:
+            self.dynamic.append(
+                DynamicRequest(self.relative, node.lineno, node.col_offset, expression, "missing specifier arguments")
+            )
+            return
+        values: list[str] = []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for argument in node.args:
+            value = self._constant(argument)
+            if value is None:
+                self.dynamic.append(
+                    DynamicRequest(
+                        self.relative,
+                        node.lineno,
+                        node.col_offset,
+                        expression,
+                        "specifier group contains a dynamic expression",
+                    )
+                )
+                return
+            parsed = parse_source(value, base_dir=self.source.parent)
+            if parsed.normalized in seen:
+                continue
+            seen.add(parsed.normalized)
+            values.append(value)
+            normalized.append(parsed.normalized)
+        options: list[tuple[str, str]] = []
+        for option in node.keywords:
+            if option.arg is None:
+                self.dynamic.append(
+                    DynamicRequest(self.relative, node.lineno, node.col_offset, expression, "dynamic keyword options")
+                )
+                return
+            rendered = _literal_option(option.value)
+            if rendered is None:
+                self.dynamic.append(
+                    DynamicRequest(
+                        self.relative,
+                        node.lineno,
+                        node.col_offset,
+                        expression,
+                        f"dynamic {option.arg}= option",
+                    )
+                )
+                return
+            options.append((option.arg, redact(rendered)))
+        options.sort()
+        payload = json.dumps(
+            {
+                "file": self.relative,
+                "line": node.lineno,
+                "column": node.col_offset,
+                "mode": mode,
+                "specifiers": sorted(normalized),
+                "options": options,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        group_id = "group_" + hashlib.sha256(payload.encode()).hexdigest()[:20]
+        imports = tuple(dict.fromkeys(name for name, _alias in ordinary if name != "depfix"))
+        aliases = tuple((name, alias) for name, alias in ordinary if name != "depfix")
+        self.groups.append(
+            ScanGroup(
+                group_id,
+                mode,
+                tuple(redact(value) for value in values),
+                tuple(normalized),
+                self.relative,
+                node.lineno,
+                node.col_offset,
+                enclosing_function,
+                imports,
+                aliases,
+                self.source.parent,
+                tuple(options),
+            )
+        )
+        for value, normalized_value in zip(values, normalized, strict=True):
+            parsed = parse_source(value, base_dir=self.source.parent)
+            alias = _suggest_alias(None, parsed.distribution or "package")
+            self.requests.append(
+                ScanSite(
+                    value,
+                    normalized_value,
+                    mode,
+                    None,
+                    self.relative,
+                    node.lineno,
+                    node.col_offset,
+                    None,
+                    self.source.parent,
+                    suggested_alias=alias,
+                    group_id=group_id,
+                    mode=mode,
+                    enclosing_function=enclosing_function,
+                )
+            )
 
     def _constant(self, node: ast.expr) -> str | None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -269,3 +476,65 @@ def _suggest_alias(assignment: str | None, distribution: str) -> str:
     if value[0].isdigit():
         value = "package_" + value
     return value
+
+
+def _expression_call(statement: ast.stmt) -> ast.Call | None:
+    return statement.value if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call) else None
+
+
+def _literal_option(node: ast.expr) -> str | None:
+    try:
+        value = ast.literal_eval(node)
+    except (ValueError, TypeError):
+        return None
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return json.dumps(value, sort_keys=True)
+    return None
+
+
+def _ordinary_imports(
+    statements: Iterable[ast.stmt],
+    is_using_call: Callable[[ast.expr], bool],
+) -> tuple[tuple[str, str], ...]:
+    result: list[tuple[str, str]] = []
+
+    class Collector(ast.NodeVisitor):
+        def visit_Import(self, node: ast.Import) -> None:
+            for item in node.names:
+                result.append((item.name, item.asname or item.name.split(".", 1)[0]))
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            if node.level == 0 and node.module:
+                result.append((node.module, node.module.split(".", 1)[0]))
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            return None
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            return None
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            return None
+
+        def visit_With(self, node: ast.With) -> None:
+            if any(is_using_call(item.context_expr) for item in node.items):
+                return None
+            self.generic_visit(node)
+
+        def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+            self.visit_With(node)  # type: ignore[arg-type]
+
+    collector = Collector()
+    for statement in statements:
+        collector.visit(statement)
+    return tuple(result)
+
+
+def _direct_ordinary_imports(statements: Iterable[ast.stmt]) -> tuple[tuple[str, str], ...]:
+    result: list[tuple[str, str]] = []
+    for statement in statements:
+        if isinstance(statement, ast.Import):
+            result.extend((item.name, item.asname or item.name.split(".", 1)[0]) for item in statement.names)
+        elif isinstance(statement, ast.ImportFrom) and statement.level == 0 and statement.module:
+            result.append((statement.module, statement.module.split(".", 1)[0]))
+    return tuple(result)

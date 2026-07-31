@@ -3,15 +3,15 @@ import sys
 
 from packaging.version import Version
 
-from depfix import import_module
+import depfix
 
 os.environ.setdefault("AWS_EC2_METADATA_DISABLED", "true")
 
-# Package A requires exactly Botocore 1.34.0.
-awscli_driver = import_module("awscli==1.32.0", module="awscli.clidriver")
-
-# Package B requires Botocore >=1.36.0,<1.37.0.
-boto3 = import_module("boto3==1.36.0")
+# Resolve package A and B as one application selection. Their mutually
+# exclusive Botocore dependencies remain bound to separate package realms.
+with depfix.using("awscli==1.32.0", "boto3==1.36.0"):
+    import awscli.clidriver as awscli_driver
+    import boto3
 
 awscli_botocore = awscli_driver.botocore
 boto3_botocore = boto3.session.botocore

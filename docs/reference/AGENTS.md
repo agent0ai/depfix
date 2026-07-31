@@ -12,6 +12,7 @@
 ## Local Contracts
 
 - Reference names and defaults must match implementation help and signatures.
+- Document `default()` and `using()` as the standard-import APIs; deprecated prototype activation is not a preferred API.
 
 ## Work Guidance
 

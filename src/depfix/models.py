@@ -7,6 +7,8 @@ than one node when its dependency view differs.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -84,6 +86,29 @@ class Alias:
     isolation: str = "inprocess"
     index_identity: str = ""
     source_policy: str = "default"
+    group: str = ""
+    mode: str = "explicit"
+    enclosing_function: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RequestGroup:
+    id: str
+    mode: str
+    specifiers: tuple[str, ...]
+    normalized_specifiers: tuple[str, ...]
+    aliases: tuple[str, ...]
+    source_file: str = ""
+    source_line: int = 0
+    source_column: int = 0
+    enclosing_function: str = ""
+    ordinary_imports: tuple[str, ...] = ()
+    resolved_graph_ids: tuple[str, ...] = ()
+    provided_imports: tuple[str, ...] = ()
+    module_aliases: Mapping[str, str] = field(default_factory=dict)
+    source_base_dir: str = ""
+    isolation: str = "inprocess"
+    options: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +124,7 @@ class LockedGraph:
     resolver_backend: str = "uv"
     resolver_version: str = "unknown"
     dynamic_diagnostics: tuple[str, ...] = ()
+    groups: tuple[RequestGroup, ...] = ()
 
     @property
     def artifact_index(self) -> dict[str, Artifact]:
@@ -111,3 +137,28 @@ class LockedGraph:
     @property
     def alias_index(self) -> dict[str, Alias]:
         return {alias.name: alias for alias in self.aliases}
+
+    @property
+    def group_index(self) -> dict[str, RequestGroup]:
+        return {group.id: group for group in self.groups}
+
+
+def resolved_realm_id(graph: LockedGraph, node_ids: tuple[str, ...]) -> str:
+    nodes = graph.node_index
+
+    def visit(node_id: str, active: set[str]) -> dict[str, Any]:
+        if node_id in active:
+            return {"cycle": nodes[node_id].distribution}
+        node = nodes[node_id]
+        lineage = {*active, node_id}
+        return {
+            "distribution": node.distribution,
+            "version": node.version,
+            "artifact": node.artifact,
+            "extras": node.extras,
+            "dependencies": {name: visit(child_id, lineage) for name, child_id in sorted(node.dependencies.items())},
+        }
+
+    payload = [visit(node_id, set()) for node_id in sorted(node_ids)]
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "realm_" + hashlib.sha256(encoded).hexdigest()[:24]

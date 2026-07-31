@@ -1,13 +1,19 @@
 # Getting started
 
-Install Depfix and call it directly:
+Install Depfix and select packages for ordinary imports:
 
 ```python
-from depfix import import_module, load_package
+import depfix
 
-http = import_module("requests>=2.31,<3")
-tools = load_package("setuptools>=75,<76")
+depfix.default("requests>=2.31,<3")
+import requests
+
+with depfix.using("requests==2.31.0"):
+    import requests as legacy_requests
 ```
+
+Use `depfix.import_module(...)` for an explicit dynamic module object and `depfix.load_package(...)` to inspect every root
+provided by a distribution.
 
 Live mode is sufficient for exploration. For tests or deployment:
 
@@ -19,7 +25,8 @@ depfix install .depfix/imports.lock --frozen
 DEPFIX_FROZEN=1 python application.py
 ```
 
-Dynamic calls can be declared with `--include` or `[[dynamic]]` tables in `.depfix/config.toml`. Configure private indices
+The scanner recognizes literal `default()` and `using()` calls, imported aliases, nested contexts, and decorated sync or
+async functions. Dynamic calls can be declared with `--include` or `[[dynamic]]` tables in `.depfix/config.toml`. Configure private indices
 outside specifiers and keep authentication in uv/keyring/Git facilities. Use `depfix bundle` for an air-gapped target.
 
 For multiprocessing spawn workers:

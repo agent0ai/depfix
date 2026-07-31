@@ -12,6 +12,7 @@
 
 - Use published, pinned AWS CLI and Boto3 releases with non-overlapping Botocore constraints.
 - Resolve and import both realms without credentials, AWS metadata lookup, or service calls.
+- Use one grouped `using()` declaration and ordinary imports for package A and B.
 - Assert the two Botocore versions and synthetic module identities are distinct.
 
 ## Work Guidance

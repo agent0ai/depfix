@@ -8,15 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import os
+import warnings
 from types import ModuleType
 
 from ._version import __version__
 from .errors import (
     ArtifactError,
     BundleError,
+    DefaultImportConflictError,
     DepfixError,
     FrozenManifestError,
     HashMismatchError,
+    ImportDispatcherConflictError,
+    InvalidUsingScopeError,
     ManifestError,
     ManifestMismatchError,
     ManifestNotFoundError,
@@ -27,6 +31,7 @@ from .errors import (
     NoImportModulesError,
     OfflineArtifactMissingError,
     ResolutionError,
+    ScopeModuleNotProvidedError,
     SourceError,
     SpecifierError,
     UnsupportedManifestVersionError,
@@ -37,6 +42,7 @@ from .errors import (
 )
 from .handles import PackageHandle
 from .manager import activate_manifest, prepare_request
+from .scopes import default, using
 from .settings import Settings, configure, resolve_settings
 
 
@@ -135,7 +141,12 @@ def activate(
     *,
     cache_dir: str | os.PathLike[str] | None = None,
 ) -> object:
-    """Activate an already installed manifest for notebooks or embedding."""
+    """Deprecated prototype alias for prepared-manifest activation."""
+    warnings.warn(
+        "depfix.activate() is deprecated; standard imports use depfix.default(), while prepared aliases auto-activate",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     settings = resolve_settings(manifest=manifest, cache_dir=cache_dir, frozen=True, discover=False)
     assert settings.manifest is not None
     return activate_manifest(settings.manifest, settings)
@@ -157,15 +168,20 @@ def multiprocessing_initializer(
     manifest: str | os.PathLike[str],
     cache_dir: str | os.PathLike[str] | None = None,
 ) -> None:
-    activate(manifest, cache_dir=cache_dir)
+    settings = resolve_settings(manifest=manifest, cache_dir=cache_dir, frozen=True, discover=False)
+    assert settings.manifest is not None
+    activate_manifest(settings.manifest, settings)
 
 
 __all__ = [
     "ArtifactError",
     "BundleError",
+    "DefaultImportConflictError",
     "DepfixError",
     "FrozenManifestError",
     "HashMismatchError",
+    "ImportDispatcherConflictError",
+    "InvalidUsingScopeError",
     "ManifestError",
     "ManifestMismatchError",
     "ManifestNotFoundError",
@@ -177,6 +193,7 @@ __all__ = [
     "OfflineArtifactMissingError",
     "PackageHandle",
     "ResolutionError",
+    "ScopeModuleNotProvidedError",
     "Settings",
     "SourceError",
     "SpecifierError",
@@ -185,12 +202,13 @@ __all__ = [
     "UvBackendError",
     "UvBootstrapError",
     "UvNotFoundError",
-    "activate",
     "configure",
+    "default",
     "import_module",
     "import_module_async",
     "load_package",
     "load_package_async",
     "multiprocessing_initializer",
+    "using",
     "__version__",
 ]

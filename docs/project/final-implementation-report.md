@@ -7,25 +7,32 @@ uv-backed resolver produces an exact graph; a content-addressed global cache ver
 maps logical names into `_depfix.<graph>.<node>` identities without modifying `sys.path` or active `site-packages`.
 Prepared manifests and `.depfixbundle` archives reuse the same graph/runtime implementation as zero-configuration calls.
 
-The stable contract is:
+The standard and explicit import contracts are:
 
 ```python
-from depfix import import_module, load_package
+import depfix
 
-requests = import_module("requests>=2.31,<3")
-package = load_package("charset-normalizer==3.4.2")
+depfix.default("requests>=2.31,<3")
+import requests
+
+with depfix.using("requests==2.31.0"):
+    import requests as legacy_requests
+
+dynamic_module = depfix.import_module("idna==3.10")
+package = depfix.load_package("charset-normalizer==3.4.2")
 ```
 
-`import_module()` returns exactly one module or raises a typed discovery error. `load_package()` always returns a lazy
-`PackageHandle`.
+`default()` maintains persistent ordinary-import selections. `using()` provides nested context-local selections and
+function execution decorators. `import_module()` returns exactly one module or raises a typed discovery error;
+`load_package()` returns a lazy `PackageHandle`.
 
 ## Production-phase file inventory
 
 Package and schemas:
 
-- `src/depfix/__init__.py`, `__main__.py`, `_version.py`, `aliases.py`, `cache.py`, `cli.py`, `config.py`, `errors.py`,
-  `handles.py`, `manager.py`, `manifest.py`, `models.py`, `project.py`, `resolver.py`, `runtime.py`, `scanner.py`,
-  `settings.py`, `sources.py`, `specifiers.py`, `sync.py`, `uv_backend.py`, `wheel.py`, and `py.typed`;
+- `src/depfix/__init__.py`, `__main__.py`, `_version.py`, `aliases.py`, `cache.py`, `cli.py`, `config.py`, `dispatcher.py`,
+  `errors.py`, `handles.py`, `manager.py`, `manifest.py`, `models.py`, `project.py`, `resolver.py`, `runtime.py`, `scanner.py`,
+  `scopes.py`, `settings.py`, `sources.py`, `specifiers.py`, `sync.py`, `uv_backend.py`, `wheel.py`, and `py.typed`;
 - `src/depfix/schemas/depfix-manifest-v1.schema.json` and `schemas/depfix-manifest-v1.schema.json`.
 
 Packaging, release, and automation:
@@ -44,8 +51,8 @@ Documentation and examples:
 
 Verification:
 
-- `tests/conftest.py`, `test_end_to_end.py`, `test_public_product.py`, `test_resolver_runtime.py`, and
-  `test_specifiers_lock_cache.py`;
+- `tests/conftest.py`, `test_end_to_end.py`, `test_public_product.py`, `test_resolver_runtime.py`,
+  `test_specifiers_lock_cache.py`, and `test_standard_imports.py`;
 - `benchmarks/import_identity.py`.
 
 The previous provisional package tree, generated prototype metadata, and obsolete repository configuration were removed.
@@ -61,6 +68,9 @@ import depfix
 from depfix.project import create_bundle, export_project, install_manifest, scan_project, verify_manifest
 
 depfix.configure(cache_dir="/var/cache/depfix")
+depfix.default("requests>=2.31,<3")
+with depfix.using("idna==3.10"):
+    import idna
 module = depfix.import_module("pypi:idna==3.10")
 result = export_project(".", output=".depfix/imports.lock")
 install_manifest(result.manifest, frozen=True)
@@ -85,8 +95,8 @@ passthrough.
 
 The default cache is `platformdirs.user_cache_path("depfix")/v1`; override its parent with `DEPFIX_CACHE_DIR` or
 `depfix.configure(cache_dir=...)`. Important subtrees are `artifacts/sha256`, `targets`, `resolutions`, `manifests`,
-`metadata`, `ide`, `locks`, `tools/uv`, and `built-wheels`. Project state is `.depfix/imports.lock`; live loading does not
-create project files.
+`groups`, `metadata`, `ide`, `locks`, `tools/uv`, and `built-wheels`. Project state is `.depfix/imports.lock`; live loading
+does not create project files.
 
 Representative manifest fields:
 
@@ -124,6 +134,14 @@ normalized-specifier = "requests<3,>=2.31"
 api = "import_module"
 module = "requests"
 index-identity = "first-index:https://pypi.org/pypi"
+
+[[groups]]
+id = "group_<declaration identity>"
+mode = "using-context"
+specifiers = ["requests==2.31.0", "PyYAML==6.0.2"]
+aliases = ["requests", "pyyaml"]
+ordinary-imports = ["requests", "yaml"]
+resolved-graph-ids = ["realm_<resolved identity>"]
 ```
 
 Serialization is deterministic for the same graph. Parsing validates the full identity, target, hashes, references,
@@ -170,8 +188,9 @@ Generated artifacts:
 - `isolation="process"` is reserved but a general RPC process backend is not implemented. Applications must own worker
   process boundaries for required native packages.
 - One manifest currently describes one concrete host target; multi-target pure-Python bundles are not implemented.
-- Generic analyzers cannot infer APIs from runtime strings. Generated `depfix_imports` aliases/stubs are the supported IDE
-  bridge; there is no custom language server.
+- Generic analyzers cannot infer arbitrary scope-sensitive imports. Generated `depfix_imports` aliases/stubs are the exact
+  scoped bridge, and one persistent default selection can use the generated type-search overlay; there is no custom
+  language server.
 - Source builds execute the selected build backend in a uv subprocess, not a security sandbox. Prefer exact wheels.
 - Built Git/local/sdist outputs retain source and resulting-wheel provenance, but portable fresh-host deployment of those
   locally built wheels requires a bundle (or another accessible wheel store).
@@ -188,9 +207,9 @@ and PyPI reports the reviewed wheel SHA-256
 `1c4a1a16923a66db7d5c716def504b3917cc04d392231a826c240ef7c2508bc3` and sdist SHA-256
 `b409bf4725dc1cb9c9a7c5a6461c8365207a7cebb2d46822730e300d6f2b4a67`.
 
-The public metadata records `agent0ai` as owner and `https://github.com/agent0ai/depfix` as the canonical repository. The
-remaining owner work is to choose and add a license, apply the prepared GitHub About metadata, add a private security
-contact, configure protected PyPI trusted publishing, and create the repository tag/release from a real Git checkout.
+The public metadata records `agent0ai` as owner and `https://github.com/agent0ai/depfix` as the canonical repository. Depfix
+is MIT licensed. Remaining owner operations include GitHub About metadata, private security contact, protected trusted
+publishing, and release/tag administration.
 
 The workflows still have no push/tag publication trigger. Future workflow publication requires explicit manual dispatch,
 confirmation text, trusted-publisher configuration, and environment approval.

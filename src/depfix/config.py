@@ -22,6 +22,9 @@ class ImportDeclaration:
     source_column: int = 0
     assignment: str = ""
     base_dir: Path | None = None
+    group_id: str = ""
+    mode: str = "explicit"
+    enclosing_function: str = ""
 
 
 @dataclass(frozen=True, slots=True)

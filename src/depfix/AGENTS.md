@@ -12,6 +12,9 @@
 
 - Importing `depfix` performs no network, resolver, cache, or subprocess work.
 - `import_module` returns exactly one selected module; `load_package` returns a lazy package handle.
+- `default()` owns persistent ordinary-import selections; context-local `using()` scopes and decorators own temporary ones.
+- Install the narrow standard-import dispatcher only on the first `default()` or `using()` call, preserve caller realms
+  before application scopes/defaults, and delegate unmanaged imports to the prior importer.
 - Resolved artifacts are hash-pinned and materialized outside ambient `site-packages`.
 - Realm imports preserve module identity and prevent undeclared cross-realm leakage.
 - Cold package preparation reports secret-safe progress on stderr by default; warning and higher log levels remain quiet.
@@ -20,7 +23,8 @@
 
 ## Work Guidance
 
-- Preserve the public imports re-exported by `depfix.__init__` and compatibility imports in `specifiers.py`.
+- Preserve the public imports re-exported by `depfix.__init__` and compatibility imports in `specifiers.py`; do not restore
+  the prototype `activate()` function to the preferred or documented API.
 - Keep resolver, cache, and runtime side effects explicit and testable.
 - Prefer independently owned concept subpackages when a code area becomes a stable boundary; avoid circular dependencies across those boundaries.
 

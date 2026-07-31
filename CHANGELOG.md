@@ -4,6 +4,9 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+- Added version-aware standard imports through persistent `default()` selections and context-local `using()` scopes and
+  function decorators, with narrow import dispatch, grouped scanning/export, frozen installation, offline bundles,
+  typed diagnostics, and generated scoped/default IDE artifacts.
 - Added default stderr progress for live resolution and installation, including uv package summaries, artifact downloads,
   preparation, and a quiet `WARNING`-level mode.
 - Added an AWS CLI/Boto3 example that runs mutually exclusive Botocore versions together, plus realm support for

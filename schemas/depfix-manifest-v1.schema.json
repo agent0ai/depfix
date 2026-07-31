@@ -46,6 +46,10 @@
     "requests": {
       "type": "array",
       "items": {"$ref": "#/$defs/request"}
+    },
+    "groups": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/group"}
     }
   },
   "additionalProperties": false,
@@ -140,7 +144,8 @@
       "required": [
         "id", "alias", "node", "module", "specifier", "normalized-specifier", "api",
         "source-file", "source-line", "source-column", "assignment", "explicit-module",
-        "isolation", "index-identity", "source-policy"
+        "isolation", "index-identity", "source-policy", "group", "mode",
+        "enclosing-function"
       ],
       "properties": {
         "id": {"type": "string", "pattern": "^request_[0-9a-f]{20}$"},
@@ -157,7 +162,48 @@
         "explicit-module": {"type": "boolean"},
         "isolation": {"enum": ["inprocess", "process"]},
         "index-identity": {"type": "string"},
-        "source-policy": {"type": "string"}
+        "source-policy": {"type": "string"},
+        "group": {"type": "string"},
+        "mode": {"enum": ["explicit", "default", "using-context", "using-decorator"]},
+        "enclosing-function": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "group": {
+      "type": "object",
+      "required": [
+        "id", "mode", "specifiers", "normalized-specifiers", "aliases", "source-file",
+        "source-line", "source-column", "enclosing-function", "ordinary-imports",
+        "resolved-graph-ids", "provided-imports", "module-aliases", "source-base-directory",
+        "isolation", "options"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^group_[0-9a-f]{20}$"},
+        "mode": {"enum": ["default", "using-context", "using-decorator"]},
+        "specifiers": {"$ref": "#/$defs/stringArray"},
+        "normalized-specifiers": {"$ref": "#/$defs/stringArray"},
+        "aliases": {"$ref": "#/$defs/stringArray"},
+        "source-file": {"type": "string"},
+        "source-line": {"type": "integer", "minimum": 0},
+        "source-column": {"type": "integer", "minimum": 0},
+        "enclosing-function": {"type": "string"},
+        "ordinary-imports": {"$ref": "#/$defs/stringArray"},
+        "resolved-graph-ids": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^realm_[0-9a-f]{24}$"},
+          "uniqueItems": true
+        },
+        "provided-imports": {"$ref": "#/$defs/stringArray"},
+        "module-aliases": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "source-base-directory": {"type": "string"},
+        "isolation": {"enum": ["inprocess", "process"]},
+        "options": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        }
       },
       "additionalProperties": false
     }

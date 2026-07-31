@@ -26,5 +26,5 @@ promotion. The bundle contains no credential and never invokes a network operati
 ## Concurrency
 
 Artifact, target, resolution, and uv-bootstrap mutations use cross-process directory locks and temporary/atomic promotion.
-Threaded calls share canonical identities. Spawn workers should use `depfix.multiprocessing_initializer` or call
-`depfix.activate` in their initializer.
+Threaded calls share canonical identities. Temporary `using()` selections are context-local across threads and async tasks.
+Spawn workers should use `depfix.multiprocessing_initializer` in their initializer.

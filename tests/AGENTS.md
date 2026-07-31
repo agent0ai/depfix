@@ -7,7 +7,7 @@
 ## Ownership
 
 - `conftest.py` owns deterministic artifact fixtures.
-- Test modules group end-to-end, runtime/resolver, public-product, and lock/cache behavior.
+- Test modules group end-to-end, runtime/resolver, public-product, lock/cache, and standard-import scope behavior.
 
 ## Local Contracts
 
@@ -15,6 +15,7 @@
 - Network-free fixtures are preferred; explicitly marked live checks belong in release or CI boundaries.
 - Live PyPI checks require `DEPFIX_RUN_LIVE_TESTS=1`; CI owns their connected execution.
 - Regressions should assert observable public behavior or a named safety invariant.
+- Standard-import tests reset the dispatcher, persistent defaults, context scopes, runtimes, and configuration.
 
 ## Work Guidance
 

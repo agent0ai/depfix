@@ -12,6 +12,8 @@
 
 - Logical module spelling, canonical module identity, artifact identity, node identity, and realm identity stay distinct.
 - Realm code resolves third-party imports only through declared parent-specific edges.
+- Standard-import dispatch prioritizes a loaded caller's realm, then context-local scopes, then persistent defaults.
+- Managed versions stay under synthetic identities; the dispatcher delegates unrelated imports unchanged.
 - Native isolation claims must remain conservative and evidence-based.
 
 ## Work Guidance
