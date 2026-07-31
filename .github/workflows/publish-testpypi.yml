@@ -1,0 +1,55 @@
+name: Publish to TestPyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit or tag to build
+        required: true
+        type: string
+      confirmation:
+        description: Type publish-depfix-test to enable the trusted-publishing job
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[test,release]"
+      - run: python scripts/release_check.py
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    if: inputs.confirmation == 'publish-depfix-test'
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/depfix
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/

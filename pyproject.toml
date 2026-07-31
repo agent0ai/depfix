@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "depfix"
+dynamic = ["version"]
+description = "Import multiple Python package versions side by side with isolated dependency realms"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "agent0ai" },
+]
+dependencies = [
+  "packaging>=24",
+  "pathspec>=0.12",
+  "platformdirs>=4",
+  "uv>=0.11.0",
+]
+keywords = ["dependencies", "dependency-isolation", "imports", "multiversion", "packaging", "uv"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "mypy>=1.10", "pyright>=1.1.400", "jsonschema>=4.23"]
+release = ["build>=1.2", "ruff>=0.12", "twine>=6"]
+
+[project.scripts]
+depfix = "depfix.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/agent0ai/depfix"
+Documentation = "https://github.com/agent0ai/depfix/tree/main/docs"
+Repository = "https://github.com/agent0ai/depfix"
+Issues = "https://github.com/agent0ai/depfix/issues"
+Changelog = "https://github.com/agent0ai/depfix/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "depfix._version.__version__"}
+
+[tool.setuptools.package-data]
+depfix = ["py.typed", "schemas/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["depfix"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

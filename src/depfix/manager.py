@@ -1,0 +1,258 @@
+"""Live/prepared request coordinator shared by Python and CLI APIs."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import platform
+import sys
+from pathlib import Path
+from threading import RLock
+from types import ModuleType
+from typing import TYPE_CHECKING
+
+from .cache import Cache
+from .config import ImportDeclaration, ProjectConfig
+from .errors import FrozenManifestError, ManifestMismatchError, NativeIsolationRequired
+from .manifest import assert_compatible_environment, load_manifest, write_manifest
+from .models import Alias, LockedGraph
+from .resolver import Resolver
+from .runtime import DepfixRuntime
+from .settings import Settings, resolve_settings
+from .sources import parse_source
+from .sync import sync_graph
+
+if TYPE_CHECKING:
+    from .handles import PackageHandle
+
+_runtimes: dict[tuple[str, str], DepfixRuntime] = {}
+_active_runtimes: dict[str, DepfixRuntime] = {}
+_memory_requests: dict[str, tuple[DepfixRuntime, Alias]] = {}
+_request_locks: dict[str, RLock] = {}
+_guard = RLock()
+
+
+def prepare_request(
+    specifier: str,
+    *,
+    module: str | None,
+    api: str,
+    refresh: bool,
+    isolation: str | None,
+    settings: Settings,
+) -> tuple[DepfixRuntime, Alias]:
+    selected_isolation = isolation or "inprocess"
+    if selected_isolation not in {"inprocess", "process"}:
+        raise ValueError("isolation must be 'inprocess' or 'process'")
+    if selected_isolation == "process":
+        raise NativeIsolationRequired(
+            "The process-isolation RPC backend is not available in this release",
+            request=specifier,
+            module=module,
+            remediation="run the native package in an application-owned worker process",
+        )
+    source = parse_source(specifier)
+    identity = _request_identity(
+        source.normalized,
+        module,
+        api,
+        selected_isolation,
+        settings,
+    )
+    with _guard:
+        if not refresh and identity in _memory_requests:
+            return _memory_requests[identity]
+        request_lock = _request_locks.setdefault(identity, RLock())
+    cache = Cache(settings.cache_dir)
+    with request_lock, cache.lock("resolution:" + identity):
+        with _guard:
+            if not refresh and identity in _memory_requests:
+                return _memory_requests[identity]
+        if settings.manifest is not None:
+            graph = load_manifest(settings.manifest)
+            assert_compatible_environment(graph, settings.manifest)
+            alias = _match_manifest_request(
+                graph,
+                source.normalized,
+                module,
+                api,
+                selected_isolation,
+                settings,
+            )
+            sync_graph(graph, cache, offline=settings.offline)
+            runtime = _runtime(graph, cache, settings.manifest)
+        else:
+            resolution_path = cache.root / "resolutions" / identity / "imports.lock"
+            if not refresh and resolution_path.is_file():
+                graph = load_manifest(resolution_path)
+                assert_compatible_environment(graph, resolution_path)
+                alias = graph.aliases[0]
+                # A warm resolution may refetch an evicted exact artifact, but
+                # it never asks uv to resolve the request again.
+                sync_graph(graph, cache, offline=settings.offline)
+                runtime = _runtime(graph, cache, resolution_path)
+            else:
+                if settings.frozen:
+                    raise FrozenManifestError(
+                        "Frozen mode rejects a request that is not listed in a prepared manifest",
+                        request=specifier,
+                        normalized_request=source.normalized,
+                        frozen=True,
+                        remediation="set DEPFIX_MANIFEST or run `depfix export` and `depfix install`",
+                    )
+                declaration = ImportDeclaration(
+                    name="live_" + identity[:16],
+                    specifier=specifier,
+                    module=module,
+                    api=api,
+                    assignment="",
+                    base_dir=Path.cwd(),
+                )
+                graph = Resolver(cache, settings=settings).resolve(
+                    ProjectConfig(
+                        Path("<live>"),
+                        (declaration,),
+                        {"mode": "live", "isolation": selected_isolation},
+                    )
+                )
+                alias = graph.aliases[0]
+                sync_graph(graph, cache, offline=settings.offline)
+                resolution_path.parent.mkdir(parents=True, exist_ok=True)
+                write_manifest(graph, resolution_path)
+                runtime = _runtime(graph, cache, resolution_path)
+        with _guard:
+            _memory_requests[identity] = (runtime, alias)
+    return runtime, alias
+
+
+def activate_manifest(path: Path, settings: Settings) -> DepfixRuntime:
+    graph = load_manifest(path)
+    assert_compatible_environment(graph, path)
+    cache = Cache(settings.cache_dir)
+    for artifact in graph.artifacts:
+        cache.verify_blob(artifact.sha256, size=artifact.size)
+    sync_graph(graph, cache, offline=True)
+    return _runtime(graph, cache, path)
+
+
+def load_generated_alias(name: str, identity: tuple[str, str, str, str]) -> ModuleType:
+    graph_id, node_id, module, specifier = identity
+    runtime = _runtime_for_generated(graph_id)
+    request = runtime.graph.alias_index.get(name)
+    if request is None or (graph_id, request.node, request.module, request.specifier) != identity:
+        raise RuntimeError(f"generated alias {name!r} does not match the active manifest")
+    return runtime.import_for_node(node_id, module)
+
+
+def load_generated_package(name: str, identity: tuple[str, str, str, str]) -> PackageHandle:
+    from .handles import PackageHandle
+
+    graph_id, node_id, module, specifier = identity
+    runtime = _runtime_for_generated(graph_id)
+    request = runtime.graph.alias_index.get(name)
+    if request is None or request.node != node_id or request.specifier != specifier or request.api != "load_package":
+        raise RuntimeError(f"generated package alias {name!r} does not match the active manifest")
+    return PackageHandle(runtime, request)
+
+
+def reset_runtime_state() -> None:
+    with _guard:
+        for runtime in set(_runtimes.values()):
+            runtime.deactivate()
+        _runtimes.clear()
+        _active_runtimes.clear()
+        _memory_requests.clear()
+        _request_locks.clear()
+
+
+def _runtime(graph: LockedGraph, cache: Cache, manifest: Path) -> DepfixRuntime:
+    key = (graph.graph_id, str(cache.root.resolve()))
+    with _guard:
+        runtime = _runtimes.get(key)
+        if runtime is None:
+            runtime = DepfixRuntime(graph, cache, manifest=manifest).activate()
+            _runtimes[key] = runtime
+        _active_runtimes[graph.graph_id] = runtime
+        return runtime
+
+
+def _runtime_for_generated(graph_id: str) -> DepfixRuntime:
+    with _guard:
+        runtime = _active_runtimes.get(graph_id)
+    if runtime is not None:
+        return runtime
+    settings = resolve_settings(discover=True)
+    if settings.manifest is None:
+        raise RuntimeError("The generated Depfix alias has no active or automatically discovered manifest")
+    runtime = activate_manifest(settings.manifest, settings)
+    if runtime.graph.graph_id != graph_id:
+        raise RuntimeError("The generated Depfix alias does not match the discovered manifest")
+    return runtime
+
+
+def _match_manifest_request(
+    graph: LockedGraph,
+    normalized: str,
+    module: str | None,
+    api: str,
+    isolation: str,
+    settings: Settings,
+) -> Alias:
+    matches = [
+        request
+        for request in graph.aliases
+        if request.normalized_specifier == normalized
+        and request.api == api
+        and request.isolation == isolation
+        and ((module is None and not request.explicit_module) or (module is not None and request.module == module))
+    ]
+    if len(matches) != 1:
+        if settings.frozen:
+            raise FrozenManifestError(
+                "The normalized runtime request is not declared exactly once in the frozen manifest",
+                normalized_request=normalized,
+                module=module,
+                manifest=settings.manifest,
+                frozen=True,
+                candidates=tuple(
+                    f"{request.api}:{request.normalized_specifier}:module={request.module or '<package>'}"
+                    for request in graph.aliases
+                ),
+                remediation="export the current source declarations into the deployment manifest",
+            )
+        raise ManifestMismatchError(
+            "The prepared manifest does not contain this exact normalized request",
+            normalized_request=normalized,
+            module=module,
+            manifest=settings.manifest,
+            remediation="run `depfix export` or omit the manifest for live resolution",
+        )
+    return matches[0]
+
+
+def _request_identity(
+    normalized: str,
+    module: str | None,
+    api: str,
+    isolation: str,
+    settings: Settings,
+) -> str:
+    payload = json.dumps(
+        {
+            "request": normalized,
+            "module": module,
+            "api": api,
+            "isolation": isolation,
+            "manifest": str(settings.manifest.resolve()) if settings.manifest else None,
+            "cache": str(settings.cache_dir.resolve()),
+            "index": settings.index_url,
+            "extra_indexes": settings.extra_index_url,
+            "environment": {
+                "implementation": platform.python_implementation().lower(),
+                "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()

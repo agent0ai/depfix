@@ -1,0 +1,16 @@
+# Compatibility boundaries
+
+Supported release targets are CPython 3.11–3.13 on x64 Linux, macOS, and Windows, with Python 3.13 coverage on arm64 Linux,
+macOS, and Windows. Manifests are specific to implementation, minor version, ABI, platform, and architecture.
+
+Pure-Python wheels, modules, namespace packages, resources, relative/circular imports, `importlib.import_module`,
+`importlib.resources`, selected `importlib.metadata`, and `pkgutil.get_data` are realm aware. Code that compares synthetic
+`__name__` values to hard-coded logical names should instead use `__depfix_logical_name__`.
+
+Mixed wheels may execute their pure-Python root. Any attempt to load an unknown native module is rejected; optional native
+accelerators can therefore fall back to Python when the package handles `ImportError`. Required native extensions still
+need an application-owned process. Arbitrary plugin discovery, binary ABI co-loading, and extension modules that require
+their original initialization name are not claimed to work in-process.
+
+Ambient third-party packages are intentionally invisible inside a realm unless declared by artifact metadata. Standard
+library modules remain shared process modules. Conventional `depfix pip` environments are separate from realm resolution.

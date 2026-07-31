@@ -1,0 +1,17 @@
+include README.md
+include CHANGELOG.md
+include SECURITY.md
+include CONTRIBUTING.md
+include RELEASING.md
+recursive-include docs *.md
+recursive-include schemas *.json
+recursive-include examples *.py *.md Dockerfile
+recursive-include scripts *.py
+prune .depfix
+prune .github
+prune .vscode
+prune build
+prune dist
+prune tmp
+prune tests
+global-exclude .env .env.* *.py[cod] __pycache__/*

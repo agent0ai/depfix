@@ -1,0 +1,1000 @@
+"""Realm-aware resolver with uv-backed root resolution and exact artifacts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+import zipfile
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
+from typing import Any
+from urllib.parse import urldefrag, urljoin, urlsplit
+
+from packaging.markers import default_environment
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.tags import sys_tags
+from packaging.utils import canonicalize_name, parse_sdist_filename, parse_wheel_filename
+from packaging.version import InvalidVersion, Version
+
+from ._version import __version__
+from .cache import Cache, _host_matches, _open_url
+from .config import ImportDeclaration, ProjectConfig
+from .errors import (
+    HashMismatchError,
+    ModuleNotProvidedError,
+    MultipleImportModulesError,
+    NoImportModulesError,
+    ResolutionError,
+    SourceError,
+    redact,
+)
+from .manifest import computed_graph_id, current_environment
+from .models import Alias, Artifact, LockedGraph, Node
+from .settings import Settings, resolve_settings
+from .sources import SourceInfo, hash_local_source, parse_source
+from .uv_backend import UvBackend
+from .wheel import WheelInspection, inspect_wheel
+
+
+class _Candidate:
+    def __init__(
+        self,
+        distribution: str,
+        version: str,
+        url: str,
+        filename: str,
+        size: int,
+        sha256: str,
+        requires_python: str = "",
+        yanked: bool = False,
+        yanked_reason: str = "",
+        source: SourceInfo | None = None,
+        built: bool = False,
+        source_url: str = "",
+        source_final_url: str = "",
+        source_sha256: str = "",
+        source_size: int = 0,
+    ) -> None:
+        self.distribution = distribution
+        self.version = version
+        self.url = url
+        self.filename = filename
+        self.size = size
+        self.sha256 = sha256
+        self.requires_python = requires_python
+        self.yanked = yanked
+        self.yanked_reason = yanked_reason
+        self.source = source
+        self.built = built
+        self.source_url = source_url
+        self.source_final_url = source_final_url
+        self.source_sha256 = source_sha256
+        self.source_size = source_size
+
+
+class Resolver:
+    def __init__(
+        self,
+        cache: Cache,
+        *,
+        settings: Settings | None = None,
+        backend: UvBackend | None = None,
+        index_url: str | None = None,
+        allow_yanked: bool = False,
+    ) -> None:
+        self.cache = cache
+        self.settings = settings or resolve_settings(cache_dir=cache.root.parent, discover=False)
+        self.backend = backend or UvBackend(self.settings, cache)
+        # The JSON endpoint is used only to turn uv-selected versions into exact
+        # compatible wheel records. A custom endpoint remains injectable for
+        # deterministic local-index tests.
+        configured_index = index_url or self.settings.index_url
+        self.index_url = (configured_index or "https://pypi.org/pypi").rstrip("/")
+        self._custom_index = configured_index is not None or bool(self.settings.extra_index_url)
+        configured_indexes = () if index_url is not None else self.settings.extra_index_url
+        self._project_indexes = tuple(dict.fromkeys((*configured_indexes, self.index_url)))
+        self.allow_yanked = allow_yanked
+        self._artifacts: dict[str, Artifact] = {}
+        self._nodes: dict[str, Node] = {}
+        self._candidate_cache: dict[tuple[str, str], _Candidate] = {}
+        self._uv_version = "not-required"
+        self._policy: dict[str, object] = {}
+        self._allowed_hosts: tuple[str, ...] = ()
+        self._allow_insecure = False
+
+    def resolve(self, config: ProjectConfig) -> LockedGraph:
+        self._policy = dict(config.policy)
+        self._allowed_hosts = _policy_strings(self._policy.get("allowed-hosts"))
+        self._allow_insecure = bool(self._policy.get("allow-insecure-transport", False))
+        self._validate_index_policy()
+        aliases: list[Alias] = []
+        for declaration in config.imports:
+            source = parse_source(declaration.specifier, base_dir=declaration.base_dir or config.path.parent)
+            node = self._resolve_declaration(declaration, source, path=f"request:{declaration.name}", ancestors={})
+            selected_module = self._select_module(declaration, source, node)
+            aliases.append(
+                Alias(
+                    declaration.name,
+                    node.id,
+                    selected_module or "",
+                    redact(declaration.specifier),
+                    normalized_specifier=source.normalized,
+                    api=declaration.api,
+                    source_file=declaration.source_file,
+                    source_line=declaration.source_line,
+                    source_column=declaration.source_column,
+                    assignment=declaration.assignment,
+                    explicit_module=declaration.module is not None,
+                    isolation=str(config.policy.get("isolation", "inprocess")),
+                    index_identity=_index_policy_identity(self._project_indexes),
+                    source_policy=str(config.policy.get("source-policy", "default")),
+                )
+            )
+        environment = current_environment()
+        graph = LockedGraph(
+            format_version=1,
+            graph_id="",
+            created_by=f"depfix {__version__}",
+            environment=environment,
+            artifacts=tuple(sorted(self._artifacts.values(), key=lambda value: value.id)),
+            nodes=tuple(sorted(self._nodes.values(), key=lambda value: value.id)),
+            aliases=tuple(sorted(aliases, key=lambda value: value.name)),
+            policy=config.policy,
+            resolver_backend="uv",
+            resolver_version=self._uv_version,
+        )
+        return replace(graph, graph_id=computed_graph_id(graph))
+
+    def _select_module(self, declaration: ImportDeclaration, source: SourceInfo, node: Node) -> str | None:
+        if declaration.module is not None:
+            if (
+                declaration.module not in node.all_importable_modules
+                and declaration.module not in node.public_modules
+                and declaration.module not in node.namespace_contributions
+            ):
+                raise ModuleNotProvidedError(
+                    "The selected artifact does not provide the requested import module",
+                    request=declaration.specifier,
+                    normalized_request=source.normalized,
+                    module=declaration.module,
+                    import_modules=node.all_importable_modules,
+                    remediation="choose one of the import modules discovered in the exact artifact",
+                )
+            return declaration.module
+        if declaration.api == "load_package":
+            return None
+        if not node.public_modules:
+            raise NoImportModulesError(
+                f"{node.distribution}=={node.version} exposes no public import modules",
+                request=declaration.specifier,
+                normalized_request=source.normalized,
+                remediation=f'use load_package("{declaration.specifier}") to inspect distribution metadata',
+            )
+        if len(node.public_modules) > 1:
+            choices = "\n".join(f"- {name}" for name in node.public_modules)
+            raise MultipleImportModulesError(
+                f"{node.distribution}=={node.version} exposes multiple public import modules:\n\n{choices}",
+                request=declaration.specifier,
+                normalized_request=source.normalized,
+                import_modules=node.public_modules,
+                remediation=(
+                    f'use load_package("{declaration.specifier}") or pass module='
+                    + " / ".join(repr(name) for name in node.public_modules)
+                ),
+            )
+        return node.public_modules[0]
+
+    def _resolve_declaration(
+        self,
+        declaration: ImportDeclaration,
+        source: SourceInfo,
+        *,
+        path: str,
+        ancestors: dict[str, Node],
+    ) -> Node:
+        self._validate_source_policy(source)
+        if source.kind == "py":
+            return self._resolve_single_file(declaration, source, path=path)
+        if source.kind == "pypi":
+            assert source.distribution is not None and source.requirement is not None
+            self._uv_version = self.backend.version()
+            exact_version = self.backend.resolve_root_version(source.requirement, source.distribution)
+            constraint = SpecifierSet(f"=={exact_version}")
+            candidate = self._select_pypi(source.distribution, constraint)
+            candidate.source = source
+            candidate = self._prepare_selected_candidate(candidate)
+            return self._resolve_candidate(candidate, extras=source.extras, path=path, ancestors=ancestors)
+        if source.kind == "git":
+            wheel, exact_source = self._build_git(source)
+            candidate = self._candidate_from_local_wheel(wheel, exact_source)
+            return self._resolve_candidate(candidate, extras=source.extras, path=path, ancestors=ancestors)
+        if source.path is not None:
+            if not source.path.exists():
+                raise SourceError("Local source does not exist", request=source.original, source=str(source.path))
+            if source.path.suffix.lower() == ".py":
+                return self._resolve_single_file(declaration, source, path=path)
+            if source.path.suffix.lower() == ".whl":
+                candidate = self._candidate_from_local_wheel(source.path, source)
+            else:
+                candidate = self._build_source_candidate(source.path, source)
+            return self._resolve_candidate(candidate, extras=source.extras, path=path, ancestors=ancestors)
+        if source.kind == "url":
+            assert source.url is not None
+            blob, observed_source = self._fetch_source(source)
+            if source.url.lower().split("#", 1)[0].endswith(".whl"):
+                candidate = self._candidate_from_blob(blob, Path(urlsplit(source.url).path).name, observed_source)
+            else:
+                candidate = self._build_source_candidate(blob, observed_source)
+            return self._resolve_candidate(candidate, extras=source.extras, path=path, ancestors=ancestors)
+        raise SourceError("Unsupported normalized source", request=source.original, source=source.kind)
+
+    def _resolve_single_file(self, declaration: ImportDeclaration, source: SourceInfo, *, path: str) -> Node:
+        module = declaration.module
+        if source.path is not None:
+            if not source.path.is_file():
+                raise SourceError("Single-file source does not exist", request=source.original, source=str(source.path))
+            stem = source.path.stem
+            digest = hashlib.sha256(source.path.read_bytes()).hexdigest()
+            if source.sha256 and source.sha256 != digest:
+                raise HashMismatchError(
+                    "Local single-file hash mismatch",
+                    request=source.original,
+                    artifact_hash=digest,
+                )
+            blob = self.cache.fetch_url(source.path.as_uri(), digest, expected_size=source.path.stat().st_size)
+            origin = source.path.as_uri()
+            filename = source.path.name
+        else:
+            assert source.url is not None
+            blob, observed = self._fetch_source(source)
+            digest = observed.sha256 or hashlib.sha256(blob.read_bytes()).hexdigest()
+            origin = observed.final_url or observed.url or source.url
+            filename = Path(urlsplit(source.url).path).name
+            stem = Path(filename).stem
+        if module is None:
+            if not stem.isidentifier():
+                raise NoImportModulesError(
+                    "The single-file name is not a valid Python import identifier",
+                    request=source.original,
+                    remediation="pass module= with a valid top-level import name",
+                )
+            module = stem
+        if "." in module:
+            raise ResolutionError(
+                "A single-file artifact must be a top-level module",
+                request=source.original,
+                module=module,
+                remediation="package related files as a wheel",
+            )
+        artifact = Artifact(
+            id=f"sha256:{digest}",
+            distribution=str(canonicalize_name(source.distribution or module)),
+            version=f"0+{digest[:12]}",
+            url=redact(origin),
+            filename=filename,
+            size=blob.stat().st_size,
+            sha256=digest,
+            source_kind=source.kind,
+            final_url=redact(origin),
+            local_source_hash=digest if source.path else "",
+            source_url=redact(source.url or (source.path.as_uri() if source.path else "")),
+            source_final_url=redact(source.final_url or ""),
+            source_sha256=digest,
+            source_size=blob.stat().st_size,
+        )
+        self._artifacts.setdefault(artifact.id, artifact)
+        node = Node(
+            id=_node_id(path, artifact.id),
+            artifact=artifact.id,
+            distribution=artifact.distribution,
+            version=artifact.version,
+            provided_modules=(module,),
+            public_modules=(module,),
+            all_importable_modules=(module,),
+        )
+        self._nodes[node.id] = node
+        return node
+
+    def _resolve_candidate(
+        self,
+        candidate: _Candidate,
+        *,
+        extras: tuple[str, ...],
+        path: str,
+        ancestors: dict[str, Node],
+    ) -> Node:
+        blob, final_url = self.cache.fetch_url_with_final(
+            candidate.url,
+            candidate.sha256,
+            expected_size=candidate.size,
+            allowed_hosts=self._allowed_hosts,
+            allow_insecure=self._allow_insecure,
+        )
+        inspection = self._inspect_artifact(blob, candidate)
+        if inspection.distribution != candidate.distribution or inspection.version != candidate.version:
+            raise ResolutionError(
+                "Repository record and downloaded wheel metadata disagree",
+                artifact_hash=candidate.sha256,
+                remediation=(
+                    f"record={candidate.distribution} {candidate.version}; "
+                    f"wheel={inspection.distribution} {inspection.version}"
+                ),
+            )
+        source = candidate.source
+        artifact = Artifact(
+            id=f"sha256:{candidate.sha256}",
+            distribution=candidate.distribution,
+            version=candidate.version,
+            url=redact(candidate.url),
+            filename=candidate.filename,
+            size=candidate.size,
+            sha256=candidate.sha256,
+            python_tag=inspection.python_tag,
+            abi_tag=inspection.abi_tag,
+            platform_tag=inspection.platform_tag,
+            build_tag=inspection.build_tag,
+            requires_python=inspection.requires_python,
+            yanked=candidate.yanked,
+            yanked_reason=candidate.yanked_reason,
+            source_kind=source.kind if source else "pypi",
+            final_url=redact((source.final_url or final_url) if source else final_url),
+            vcs_repository=redact(source.url or "") if source and source.kind == "git" else "",
+            vcs_commit=(source.commit or "") if source else "",
+            requested_ref=(source.requested_ref or "") if source else "",
+            subdirectory=(source.subdirectory or "") if source else "",
+            local_source_hash=hash_local_source(source.path) if source and source.path and source.path.exists() else "",
+            build_backend="uv" if candidate.built else "",
+            source_url=redact(
+                candidate.source_url
+                or (source.url if source and source.url else source.path.as_uri() if source and source.path else "")
+            ),
+            source_final_url=redact(candidate.source_final_url or (source.final_url if source else "") or ""),
+            source_sha256=candidate.source_sha256 or (source.sha256 if source and source.sha256 else ""),
+            source_size=candidate.source_size,
+        )
+        self._artifacts.setdefault(artifact.id, artifact)
+        provisional = Node(
+            id=_node_id(path, artifact.id),
+            artifact=artifact.id,
+            distribution=artifact.distribution,
+            version=artifact.version,
+            extras=extras,
+            provided_modules=inspection.provided_modules,
+            public_modules=inspection.public_modules,
+            private_modules=inspection.private_modules,
+            all_importable_modules=inspection.all_importable_modules,
+            namespace_contributions=inspection.namespace_contributions,
+            native_classification=inspection.native_classification,
+        )
+        self._nodes[provisional.id] = provisional
+        lineage = dict(ancestors)
+        lineage[artifact.distribution] = provisional
+        grouped: dict[str, list[Requirement]] = {}
+        evaluated: list[str] = []
+        marker_environment = {key: str(value) for key, value in default_environment().items()}
+        for raw in inspection.requires_dist:
+            requirement = Requirement(raw)
+            active_extras = ("", *extras)
+            if requirement.marker is not None and not any(
+                requirement.marker.evaluate({**marker_environment, "extra": extra}) for extra in active_extras
+            ):
+                continue
+            dependency_name = str(canonicalize_name(requirement.name))
+            grouped.setdefault(dependency_name, []).append(requirement)
+            evaluated.append(raw)
+        dependencies: dict[str, str] = {}
+        for name, requirements in sorted(grouped.items()):
+            constraints = SpecifierSet(",".join(str(req.specifier) for req in requirements if str(req.specifier)))
+            ancestor = lineage.get(name)
+            if ancestor is not None and Version(ancestor.version) in constraints:
+                dependencies[name] = ancestor.id
+                continue
+            selected_extras = tuple(sorted({extra for req in requirements for extra in req.extras}))
+            child_candidate = self._select_pypi(name, constraints)
+            child_candidate.source = SourceInfo(
+                original=str(requirements[0]),
+                normalized=f"{name}{constraints}",
+                kind="pypi",
+                distribution=name,
+                requirement=f"{name}{constraints}",
+                extras=selected_extras,
+            )
+            child_candidate = self._prepare_selected_candidate(child_candidate)
+            child = self._resolve_candidate(
+                child_candidate, extras=selected_extras, path=f"{path}/{name}", ancestors=lineage
+            )
+            dependencies[name] = child.id
+        node = replace(provisional, dependencies=dependencies, evaluated_markers=tuple(sorted(evaluated)))
+        self._nodes[node.id] = node
+        return node
+
+    def _inspect_artifact(self, blob: Path, candidate: _Candidate) -> WheelInspection:
+        metadata_path = self.cache.root / "metadata" / "imports" / f"{candidate.sha256}.json"
+        try:
+            raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if raw.get("format_version") != 1 or raw.get("filename") != candidate.filename:
+                raise ValueError("metadata cache version/filename mismatch")
+            inspection = WheelInspection(
+                distribution=raw["distribution"],
+                version=raw["version"],
+                build_tag=raw["build_tag"],
+                python_tag=raw["python_tag"],
+                abi_tag=raw["abi_tag"],
+                platform_tag=raw["platform_tag"],
+                requires_python=raw["requires_python"],
+                requires_dist=tuple(raw["requires_dist"]),
+                provided_modules=tuple(raw["provided_modules"]),
+                public_modules=tuple(raw["public_modules"]),
+                private_modules=tuple(raw["private_modules"]),
+                all_importable_modules=tuple(raw["all_importable_modules"]),
+                namespace_contributions=tuple(raw["namespace_contributions"]),
+                native_classification=raw["native_classification"],
+                metadata_dir=raw["metadata_dir"],
+            )
+            names = (
+                *inspection.provided_modules,
+                *inspection.public_modules,
+                *inspection.private_modules,
+                *inspection.all_importable_modules,
+                *inspection.namespace_contributions,
+            )
+            if any(
+                not isinstance(name, str) or not name or not all(part.isidentifier() for part in name.split("."))
+                for name in names
+            ):
+                raise ValueError("invalid import name in metadata cache")
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            inspection = inspect_wheel(blob, filename=candidate.filename)
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "format_version": 1,
+                "filename": candidate.filename,
+                **{name: getattr(inspection, name) for name in inspection.__dataclass_fields__},
+            }
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=metadata_path.name + ".",
+                dir=metadata_path.parent,
+            )
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+                os.replace(temporary_name, metadata_path)
+            finally:
+                Path(temporary_name).unlink(missing_ok=True)
+        return inspection
+
+    def _candidate_from_local_wheel(self, path: Path, source: SourceInfo) -> _Candidate:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if source.sha256 and source.sha256 != digest:
+            raise HashMismatchError(
+                "Local wheel hash mismatch",
+                request=source.original,
+                artifact_hash=digest,
+            )
+        blob = self.cache.fetch_url(path.resolve().as_uri(), digest, expected_size=path.stat().st_size)
+        observed = replace(source, sha256=digest, final_url=path.resolve().as_uri())
+        return self._candidate_from_blob(blob, path.name, observed)
+
+    def _candidate_from_blob(self, blob: Path, filename: str, source: SourceInfo) -> _Candidate:
+        try:
+            distribution, version, _build, tags = parse_wheel_filename(filename)
+        except Exception as exc:
+            raise ResolutionError("Invalid wheel filename", request=source.original, remediation=str(exc)) from exc
+        if not tags & set(sys_tags()):
+            raise ResolutionError(
+                "Wheel is incompatible with this interpreter",
+                request=source.original,
+                candidates=tuple(str(tag) for tag in sorted(tags, key=str)),
+            )
+        digest = source.sha256 or hashlib.sha256(blob.read_bytes()).hexdigest()
+        if source.path is not None and source.path.suffix.lower() == ".whl":
+            artifact_url = source.path.resolve().as_uri()
+        else:
+            artifact_url = source.final_url or source.url or blob.as_uri()
+        return _Candidate(
+            str(canonicalize_name(str(distribution))),
+            str(version),
+            artifact_url,
+            filename,
+            blob.stat().st_size,
+            digest,
+            source=source,
+        )
+
+    def _build_source_candidate(self, source_path: Path, source: SourceInfo) -> _Candidate:
+        self._uv_version = self.backend.version()
+        temporary_root = self.cache.root / "tmp"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        output = Path(tempfile.mkdtemp(prefix="depfix-build-", dir=temporary_root))
+        extracted: Path | None = None
+        try:
+            source_url = source.url or (source.path.as_uri() if source.path is not None else "")
+            source_final_url = source.final_url or source_url
+            source_digest = source.sha256 or hash_local_source(source_path)
+            source_size = source_path.stat().st_size if source_path.is_file() else 0
+            build_root = source_path
+            if source_path.is_file():
+                extracted = Path(tempfile.mkdtemp(prefix="depfix-source-", dir=temporary_root))
+                _extract_source_archive(source_path, extracted)
+                build_root = _source_project_root(extracted)
+            wheel = self.backend.build_wheel(build_root, output=output)
+            digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+            permanent = self.cache.root / "built-wheels" / digest / wheel.name
+            permanent.parent.mkdir(parents=True, exist_ok=True)
+            if not permanent.exists():
+                shutil.copy2(wheel, permanent)
+            candidate = self._candidate_from_local_wheel(permanent, replace(source, final_url=permanent.as_uri()))
+            candidate.built = True
+            candidate.source_url = source_url
+            candidate.source_final_url = source_final_url
+            candidate.source_sha256 = source_digest
+            candidate.source_size = source_size
+            return candidate
+        finally:
+            shutil.rmtree(output, ignore_errors=True)
+            if extracted is not None:
+                shutil.rmtree(extracted, ignore_errors=True)
+
+    def _prepare_selected_candidate(self, candidate: _Candidate) -> _Candidate:
+        if candidate.filename.endswith(".whl"):
+            return candidate
+        if not bool(self._policy.get("allow-build", True)):
+            raise ResolutionError(
+                "The selected release requires a source build that policy forbids",
+                request=f"{candidate.distribution}=={candidate.version}",
+                remediation="enable controlled builds during live/export or require a wheel-only release",
+            )
+        source = candidate.source or SourceInfo(
+            original=f"{candidate.distribution}=={candidate.version}",
+            normalized=f"{candidate.distribution}=={candidate.version}",
+            kind="pypi",
+            distribution=candidate.distribution,
+        )
+        blob, final_url = self.cache.fetch_url_with_final(
+            candidate.url,
+            candidate.sha256,
+            expected_size=candidate.size,
+            allowed_hosts=self._allowed_hosts,
+            allow_insecure=self._allow_insecure,
+        )
+        observed = replace(
+            source,
+            url=candidate.url,
+            final_url=final_url,
+            sha256=candidate.sha256,
+            mutable=False,
+        )
+        return self._build_source_candidate(blob, observed)
+
+    def _build_git(self, source: SourceInfo) -> tuple[Path, SourceInfo]:
+        assert source.url is not None
+        root = self.cache.root / "tmp"
+        root.mkdir(parents=True, exist_ok=True)
+        checkout = Path(tempfile.mkdtemp(prefix="git-", dir=root))
+        output = Path(tempfile.mkdtemp(prefix="git-wheel-", dir=root))
+        try:
+            clone = subprocess.run(
+                ["git", "clone", "--no-checkout", source.url, str(checkout)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if clone.returncode != 0:
+                raise SourceError("Git clone failed", request=source.original, rejections=(clone.stderr.strip(),))
+            ref = source.requested_ref or "HEAD"
+            checkout_result = subprocess.run(
+                ["git", "-C", str(checkout), "checkout", "--detach", ref],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if checkout_result.returncode != 0:
+                raise SourceError(
+                    "Git ref checkout failed", request=source.original, rejections=(checkout_result.stderr.strip(),)
+                )
+            commit_result = subprocess.run(
+                ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            commit = commit_result.stdout.strip().lower()
+            build_root = checkout / source.subdirectory if source.subdirectory else checkout
+            self._uv_version = self.backend.version()
+            wheel = self.backend.build_wheel(build_root, output=output)
+            permanent = self.cache.root / "built-wheels" / hashlib.sha256(wheel.read_bytes()).hexdigest() / wheel.name
+            permanent.parent.mkdir(parents=True, exist_ok=True)
+            if not permanent.exists():
+                shutil.copy2(wheel, permanent)
+            return permanent, replace(
+                source,
+                commit=commit,
+                mutable=False,
+                final_url=permanent.as_uri(),
+            )
+        finally:
+            shutil.rmtree(checkout, ignore_errors=True)
+            shutil.rmtree(output, ignore_errors=True)
+
+    def _fetch_source(self, source: SourceInfo) -> tuple[Path, SourceInfo]:
+        assert source.url is not None
+        if source.sha256:
+            blob, final_url = self.cache.fetch_url_with_final(
+                source.url,
+                source.sha256,
+                allowed_hosts=self._allowed_hosts,
+                allow_insecure=self._allow_insecure,
+            )
+            return blob, replace(source, final_url=final_url)
+        if self.settings.frozen:
+            raise SourceError(
+                "Frozen remote artifacts require an exact SHA-256",
+                request=source.original,
+                frozen=True,
+                remediation="add #sha256=<digest> and export again",
+            )
+        blob, digest, final_url = self.cache.fetch_unpinned(
+            source.url,
+            allowed_hosts=self._allowed_hosts,
+            allow_insecure=self._allow_insecure,
+        )
+        return blob, replace(source, sha256=digest, final_url=final_url, mutable=False)
+
+    def _validate_index_policy(self) -> None:
+        allowed_indexes = {_index_identity(value) for value in _policy_strings(self._policy.get("allowed-indexes"))}
+        for index in self._project_indexes:
+            identity = _index_identity(index)
+            if allowed_indexes and identity not in allowed_indexes:
+                raise ResolutionError("Package index is not permitted by policy", source=identity)
+            split = urlsplit(index)
+            if split.scheme == "file":
+                continue
+            if split.scheme != "https" and not (self._allow_insecure and split.scheme == "http"):
+                raise ResolutionError(
+                    "Package indexes require HTTPS",
+                    source=identity,
+                    remediation="use HTTPS or set allow-insecure-transport only for a controlled development index",
+                )
+            host = (split.hostname or "").lower().rstrip(".")
+            if self._allowed_hosts and not any(_host_matches(host, value) for value in self._allowed_hosts):
+                raise ResolutionError("Package index host is not permitted by policy", source=identity)
+
+    def _validate_source_policy(self, source: SourceInfo) -> None:
+        if source.url is None:
+            return
+        clean = source.url.removeprefix("git+")
+        split = urlsplit(clean)
+        if split.scheme in {"http", "https"}:
+            if split.scheme != "https" and not self._allow_insecure:
+                raise SourceError(
+                    "Remote sources require HTTPS",
+                    request=source.original,
+                    source=redact(source.url),
+                )
+            host = (split.hostname or "").lower().rstrip(".")
+        elif split.scheme == "ssh":
+            host = (split.hostname or "").lower().rstrip(".")
+        elif split.scheme == "git":
+            if not self._allow_insecure:
+                raise SourceError(
+                    "The unauthenticated git transport is disabled by policy",
+                    request=source.original,
+                    source=redact(source.url),
+                )
+            host = (split.hostname or "").lower().rstrip(".")
+        elif split.scheme:
+            return
+        else:
+            match = re.match(r"^[^@\s]+@([^:\s]+):", clean)
+            host = match.group(1).lower().rstrip(".") if match else ""
+        if self._allowed_hosts and not any(_host_matches(host, value) for value in self._allowed_hosts):
+            raise SourceError(
+                "Source host is not permitted by policy",
+                request=source.original,
+                source=redact(source.url),
+            )
+
+    def _select_pypi(self, distribution: str, constraint: SpecifierSet) -> _Candidate:
+        key = (distribution, str(constraint))
+        if key in self._candidate_cache:
+            return self._candidate_cache[key]
+        payload = self._project_artifact_payload(distribution, constraint)
+        tag_rank = {tag: index for index, tag in enumerate(sys_tags())}
+        candidates: list[tuple[Version, int, int, int, _Candidate]] = []
+        rejections: list[str] = []
+        for raw_version, files in payload.get("releases", {}).items():
+            try:
+                version = Version(raw_version)
+            except InvalidVersion:
+                continue
+            if version not in constraint:
+                continue
+            for item in files:
+                filename = item.get("filename", "")
+                if item.get("yanked", False) and not self.allow_yanked:
+                    rejections.append(f"{filename}: yanked ({item.get('yanked_reason') or 'no reason'})")
+                    continue
+                requires_python = item.get("requires_python") or ""
+                current_python = Version(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+                if requires_python and current_python not in SpecifierSet(requires_python):
+                    rejections.append(f"{filename}: Requires-Python {requires_python}")
+                    continue
+                digest = item.get("digests", {}).get("sha256")
+                if not digest:
+                    rejections.append(f"{filename}: missing SHA-256")
+                    continue
+                candidate = _Candidate(
+                    str(canonicalize_name(distribution)),
+                    raw_version,
+                    item["url"],
+                    filename,
+                    int(item["size"]),
+                    digest,
+                    requires_python,
+                    bool(item.get("yanked", False)),
+                    item.get("yanked_reason") or "",
+                )
+                if item.get("packagetype") == "bdist_wheel" and filename.endswith(".whl"):
+                    try:
+                        _name, _version, _build, wheel_tags = parse_wheel_filename(filename)
+                    except Exception:
+                        continue
+                    ranks = [tag_rank[tag] for tag in wheel_tags if tag in tag_rank]
+                    if not ranks:
+                        rejections.append(f"{filename}: incompatible wheel tags")
+                        continue
+                    pure_python = int(all(tag.abi == "none" and tag.platform == "any" for tag in wheel_tags))
+                    candidates.append((version, 1, pure_python, -min(ranks), candidate))
+                    continue
+                if item.get("packagetype") == "sdist" and bool(self._policy.get("allow-build", True)):
+                    try:
+                        _sdist_name, sdist_version = parse_sdist_filename(filename)
+                    except Exception:
+                        continue
+                    if sdist_version == version:
+                        candidates.append((version, 0, 0, 0, candidate))
+        if not candidates:
+            raise ResolutionError(
+                "No compatible artifact satisfies the dependency edge",
+                request=f"{distribution}{constraint}",
+                rejections=tuple(rejections[-20:]),
+                remediation="allow a controlled source build or select a compatible wheel target",
+            )
+        candidates.sort(
+            key=lambda entry: (entry[0], entry[1], entry[2], entry[3], entry[4].filename),
+            reverse=True,
+        )
+        selected = candidates[0][4]
+        self._candidate_cache[key] = selected
+        return selected
+
+    def _project_artifact_payload(
+        self,
+        distribution: str,
+        constraint: SpecifierSet,
+    ) -> dict[str, Any]:
+        errors: list[str] = []
+        indexes = self._project_indexes if self._custom_index else (self.index_url,)
+        for index in indexes:
+            if index == "https://pypi.org/pypi" and not self._custom_index:
+                continue
+            simple_url = f"{index.rstrip('/')}/{distribution}/"
+            request = urllib.request.Request(
+                simple_url,
+                headers={
+                    "Accept": "application/vnd.pypi.simple.v1+json",
+                    "User-Agent": "depfix/0.1",
+                },
+            )
+            try:
+                with _open_url(
+                    request,
+                    timeout=self.cache.timeout,
+                    allowed_hosts=self._allowed_hosts,
+                    allow_insecure=self._allow_insecure,
+                ) as response:
+                    simple = json.load(response)
+                releases: dict[str, list[dict[str, object]]] = {}
+                for item in simple.get("files", []):
+                    filename = str(item.get("filename", ""))
+                    try:
+                        if filename.endswith(".whl"):
+                            _name, version, _build, _tags = parse_wheel_filename(filename)
+                            package_type = "bdist_wheel"
+                        else:
+                            _name, version = parse_sdist_filename(filename)
+                            package_type = "sdist"
+                    except Exception:
+                        continue
+                    file_url = urljoin(simple_url, str(item.get("url", "")))
+                    file_url, fragment = urldefrag(file_url)
+                    hashes = dict(item.get("hashes", {}))
+                    if "sha256" not in hashes and fragment.startswith("sha256="):
+                        hashes["sha256"] = fragment.removeprefix("sha256=")
+                    size = item.get("size")
+                    if size is None:
+                        size = self._remote_size(file_url)
+                    releases.setdefault(str(version), []).append(
+                        {
+                            "filename": filename,
+                            "packagetype": package_type,
+                            "url": file_url,
+                            "size": int(size),
+                            "digests": hashes,
+                            "requires_python": item.get("requires-python") or "",
+                            "yanked": bool(item.get("yanked", False)),
+                            "yanked_reason": item.get("yanked") if isinstance(item.get("yanked"), str) else "",
+                        }
+                    )
+                if releases:
+                    return {"releases": releases}
+                errors.append("the PEP 691 project response contained no supported artifacts")
+            except Exception as exc:
+                errors.append(f"PEP 691 {redact(simple_url)}: {redact(str(exc))}")
+        for index in indexes:
+            legacy_url = f"{index.rstrip('/')}/{distribution}/json"
+            request = urllib.request.Request(
+                legacy_url,
+                headers={"Accept": "application/json", "User-Agent": "depfix/0.1"},
+            )
+            try:
+                with _open_url(
+                    request,
+                    timeout=self.cache.timeout,
+                    allowed_hosts=self._allowed_hosts,
+                    allow_insecure=self._allow_insecure,
+                ) as response:
+                    payload = json.load(response)
+                if isinstance(payload, dict) and payload.get("releases"):
+                    return payload
+                errors.append(f"JSON API {redact(legacy_url)}: response contained no releases")
+            except Exception as exc:
+                errors.append(f"JSON API {redact(legacy_url)}: {redact(str(exc))}")
+        raise ResolutionError(
+            "Unable to query package artifact metadata",
+            request=f"{distribution}{constraint}",
+            source=_index_policy_identity(indexes),
+            rejections=tuple(errors),
+            remediation="verify the PyPI-compatible index URL and its PEP 691 or project JSON support",
+        )
+
+    def _remote_size(self, url: str) -> int:
+        request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "depfix/0.1"})
+        with _open_url(
+            request,
+            timeout=self.cache.timeout,
+            allowed_hosts=self._allowed_hosts,
+            allow_insecure=self._allow_insecure,
+        ) as response:
+            value = response.headers.get("Content-Length")
+        if not value:
+            raise ResolutionError("Package index did not provide an artifact size", source=redact(url))
+        return int(value)
+
+
+def _node_id(path: str, artifact_id: str) -> str:
+    return "node_" + hashlib.sha256(f"{path}\0{artifact_id}".encode()).hexdigest()[:24]
+
+
+def _index_identity(value: str) -> str:
+    split = urlsplit(redact(value))
+    host = split.hostname or ""
+    port = f":{split.port}" if split.port else ""
+    return f"{split.scheme}://{host}{port}{split.path}".rstrip("/")
+
+
+def _index_policy_identity(values: tuple[str, ...]) -> str:
+    return "first-index:" + ",".join(_index_identity(value) for value in values)
+
+
+def _policy_strings(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (tuple, list)) and all(isinstance(item, str) for item in value):
+        return tuple(value)
+    raise ResolutionError("Network policy values must be strings or arrays of strings")
+
+
+def _extract_source_archive(path: Path, destination: Path) -> None:
+    max_files = 50_000
+    max_size = 2 * 1024 * 1024 * 1024
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            if len(infos) > max_files or sum(item.file_size for item in infos) > max_size:
+                raise SourceError("Source archive exceeds extraction safety limits", source=str(path))
+            seen_paths: set[str] = set()
+            for info in infos:
+                relative = _safe_archive_path(info.filename, path)
+                _reject_archive_path_collision(relative, info.filename, seen_paths)
+                mode = info.external_attr >> 16
+                if (mode & 0o170000) == 0o120000:
+                    raise SourceError("Source archives may not contain symbolic links", source=info.filename)
+                target = destination.joinpath(*relative.parts)
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+        return
+    try:
+        tar_archive = tarfile.open(path, mode="r:*")
+    except tarfile.TarError as exc:
+        raise SourceError("Unsupported or malformed source archive", source=str(path)) from exc
+    with tar_archive:
+        members = tar_archive.getmembers()
+        if len(members) > max_files or sum(item.size for item in members) > max_size:
+            raise SourceError("Source archive exceeds extraction safety limits", source=str(path))
+        seen_paths = set()
+        for member in members:
+            relative = _safe_archive_path(member.name, path)
+            _reject_archive_path_collision(relative, member.name, seen_paths)
+            if member.issym() or member.islnk() or member.isdev():
+                raise SourceError("Source archives may not contain links or devices", source=member.name)
+            target = destination.joinpath(*relative.parts)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tar_source = tar_archive.extractfile(member)
+            if tar_source is None:
+                raise SourceError("Unable to read source archive member", source=member.name)
+            with tar_source, target.open("wb") as output:
+                shutil.copyfileobj(tar_source, output, length=1024 * 1024)
+
+
+def _safe_archive_path(name: str, archive: Path) -> PurePosixPath:
+    relative = PurePosixPath(name)
+    if (
+        not name
+        or "\x00" in name
+        or "\\" in name
+        or relative.is_absolute()
+        or not relative.parts
+        or ".." in relative.parts
+    ):
+        raise SourceError("Unsafe path in source archive", source=str(archive), remediation=name)
+    return relative
+
+
+def _reject_archive_path_collision(relative: PurePosixPath, original: str, seen_paths: set[str]) -> None:
+    normalized = relative.as_posix().casefold()
+    if normalized in seen_paths:
+        raise SourceError(
+            "Source archive contains duplicate or case-colliding paths",
+            source=original,
+        )
+    seen_paths.add(normalized)
+
+
+def _source_project_root(destination: Path) -> Path:
+    if (destination / "pyproject.toml").is_file() or (destination / "setup.py").is_file():
+        return destination
+    children = [item for item in destination.iterdir() if item.is_dir()]
+    files = [item for item in destination.iterdir() if item.is_file()]
+    if len(children) == 1 and not files:
+        return children[0]
+    candidates = [
+        item.parent for item in destination.rglob("pyproject.toml") if len(item.relative_to(destination).parts) <= 2
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    raise SourceError(
+        "Unable to identify one build project in the source archive",
+        source=str(destination),
+        candidates=tuple(str(item) for item in candidates),
+    )

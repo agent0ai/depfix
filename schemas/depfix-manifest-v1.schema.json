@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:depfix:schema:manifest:v1",
+  "title": "Depfix resolved import manifest v1 (after TOML parsing)",
+  "type": "object",
+  "required": [
+    "format-version",
+    "manifest-id",
+    "created-by",
+    "resolver",
+    "targets",
+    "artifacts",
+    "nodes",
+    "requests"
+  ],
+  "properties": {
+    "format-version": {"const": 1},
+    "manifest-id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "created-by": {"type": "string", "pattern": "^depfix "},
+    "dynamic-diagnostics": {"type": "array", "items": {"type": "string"}},
+    "resolver": {
+      "type": "object",
+      "required": ["backend", "backend-version", "depfix-version"],
+      "properties": {
+        "backend": {"const": "uv"},
+        "backend-version": {"type": "string"},
+        "depfix-version": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {"$ref": "#/$defs/target"}
+    },
+    "policy": {"type": "object"},
+    "artifacts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "nodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "requests": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/request"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "stringArray": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "target": {
+      "type": "object",
+      "required": ["id", "implementation", "python-version", "abi", "platform", "architecture"],
+      "properties": {
+        "id": {"type": "string"},
+        "implementation": {"type": "string"},
+        "python-version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+        "abi": {"type": "string"},
+        "platform": {"type": "string"},
+        "architecture": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "id", "distribution", "version", "url", "final-url", "filename", "size", "sha256",
+        "source-kind", "python-tag", "abi-tag", "platform-tag", "requires-python", "yanked",
+        "source-url", "source-final-url", "source-sha256", "source-size"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "distribution": {"type": "string"},
+        "version": {"type": "string"},
+        "url": {"type": "string"},
+        "final-url": {"type": "string"},
+        "filename": {"type": "string"},
+        "size": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source-kind": {"enum": ["pypi", "git", "url", "file", "py"]},
+        "python-tag": {"type": "string"},
+        "abi-tag": {"type": "string"},
+        "platform-tag": {"type": "string"},
+        "build-tag": {"type": "string"},
+        "requires-python": {"type": "string"},
+        "yanked": {"type": "boolean"},
+        "yanked-reason": {"type": "string"},
+        "vcs-repository": {"type": "string"},
+        "vcs-commit": {"type": "string"},
+        "requested-ref": {"type": "string"},
+        "subdirectory": {"type": "string"},
+        "local-source-hash": {"type": "string"},
+        "build-backend": {"type": "string"},
+        "source-url": {"type": "string"},
+        "source-final-url": {"type": "string"},
+        "source-sha256": {"type": "string", "pattern": "^$|^[0-9a-f]{64}$"},
+        "source-size": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "id", "realm-id", "artifact", "distribution", "version", "extras", "provided-roots",
+        "module-names", "private-module-names", "all-importable-names", "namespace-contributions",
+        "native-classification", "dependencies", "evaluated-markers"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^node_[0-9a-f]{24}$"},
+        "realm-id": {"type": "string", "pattern": "^node_[0-9a-f]{24}$"},
+        "artifact": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "distribution": {"type": "string"},
+        "version": {"type": "string"},
+        "extras": {"$ref": "#/$defs/stringArray"},
+        "provided-roots": {"$ref": "#/$defs/stringArray"},
+        "module-names": {"$ref": "#/$defs/stringArray"},
+        "private-module-names": {"$ref": "#/$defs/stringArray"},
+        "all-importable-names": {"$ref": "#/$defs/stringArray"},
+        "namespace-contributions": {"$ref": "#/$defs/stringArray"},
+        "native-classification": {
+          "enum": ["pure-python", "native-certified-safe", "native-unknown", "native-known-unsafe"]
+        },
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "pattern": "^node_[0-9a-f]{24}$"}
+        },
+        "evaluated-markers": {"$ref": "#/$defs/stringArray"}
+      },
+      "additionalProperties": false
+    },
+    "request": {
+      "type": "object",
+      "required": [
+        "id", "alias", "node", "module", "specifier", "normalized-specifier", "api",
+        "source-file", "source-line", "source-column", "assignment", "explicit-module",
+        "isolation", "index-identity", "source-policy"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^request_[0-9a-f]{20}$"},
+        "alias": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+        "node": {"type": "string", "pattern": "^node_[0-9a-f]{24}$"},
+        "module": {"type": "string"},
+        "specifier": {"type": "string"},
+        "normalized-specifier": {"type": "string"},
+        "api": {"enum": ["import_module", "load_package"]},
+        "source-file": {"type": "string"},
+        "source-line": {"type": "integer", "minimum": 0},
+        "source-column": {"type": "integer", "minimum": 0},
+        "assignment": {"type": "string"},
+        "explicit-module": {"type": "boolean"},
+        "isolation": {"enum": ["inprocess", "process"]},
+        "index-identity": {"type": "string"},
+        "source-policy": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  }
+}
