@@ -4,6 +4,8 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+- Added an AWS CLI/Boto3 example that runs mutually exclusive Botocore versions together, plus realm support for
+  `ModuleNotFoundError` probes, dynamic compatibility submodules, and internal synthetic imports used by those packages.
 - Added a live regression that imports OpenAI 0.7.0 and 0.28.1 side by side, including fixes for optional `find_spec()`
   probes and source-built wheel hash provenance exposed by those published artifacts.
 - Adopted the MIT License with Agent Zero ownership and contact metadata.

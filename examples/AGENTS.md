@@ -23,6 +23,7 @@
 
 ## Child DOX Index
 
+- [`conflicting_botocore_versions/AGENTS.md`](conflicting_botocore_versions/AGENTS.md) — incompatible AWS CLI and Boto3 Botocore realms.
 - [`container/AGENTS.md`](container/AGENTS.md) — prepared container image layering.
 - [`debug_basic/AGENTS.md`](debug_basic/AGENTS.md) — environment diagnostics and basic live realm checks.
 - [`two_idna_versions/AGENTS.md`](two_idna_versions/AGENTS.md) — two versions of one distribution in one process.

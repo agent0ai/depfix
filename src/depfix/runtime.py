@@ -126,6 +126,8 @@ class BoundImporter:
             logical_name = importlib.util.resolve_name("." * level + name, self.logical_package)
         else:
             logical_name = name
+        if not level and logical_name.startswith("_depfix."):
+            return builtins.__import__(name, globals, locals, fromlist, level)
         root = logical_name.split(".", 1)[0]
         if not level and root in _FACADE_ROOTS:
             requested = self.runtime.facade(self.node_id, logical_name, self.logical_package)
@@ -142,8 +144,10 @@ class BoundImporter:
                 child_name = f"{logical_name}.{member}" if logical_name else member
                 try:
                     child = self.runtime.import_for_node(self.node_id, child_name)
-                except RealmImportError:
-                    continue
+                except RealmImportError as exc:
+                    if exc.module == child_name:
+                        continue
+                    raise
                 setattr(module, member, child)
             return module
         return self.runtime.import_for_node(self.node_id, root)
@@ -351,6 +355,18 @@ class DepfixRuntime:
             existing = sys.modules.get(canonical)
             if existing is not None:
                 return existing
+            if parent is not None:
+                member = logical_name.rsplit(".", 1)[1]
+                dynamic = vars(parent).get(member)
+                if dynamic is None and parent.__name__ not in self._locations:
+                    dynamic = getattr(parent, member, None)
+                if isinstance(dynamic, ModuleType):
+                    dynamic_name = dynamic.__name__
+                    if dynamic_name == canonical:
+                        sys.modules[canonical] = dynamic
+                        return dynamic
+                    if self.is_standard_library(dynamic_name.split(".", 1)[0]):
+                        return dynamic
             location = self._locate(node, logical_name)
             if not self._location_exists(location):
                 raise RealmImportError(

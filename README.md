@@ -47,6 +47,9 @@ No virtual-environment switching. No `sys.path` swapping. No installation into t
 | **Real package sources** | Resolve PyPI requirements, Git refs, URLs, local projects, wheels, and standalone Python files. |
 | **Honest isolation** | Pure-Python realm loading is supported; unsafe native-extension loading fails explicitly. |
 
+See the runnable [AWS CLI and Boto3 dependency-conflict example](https://github.com/agent0ai/depfix/tree/main/examples/conflicting_botocore_versions)
+for two incompatible Botocore graphs operating in one Python process.
+
 ## Quick start
 
 Install Depfix from PyPI:

@@ -132,7 +132,7 @@ class MultipleImportModulesError(ModuleDiscoveryError):
     pass
 
 
-class ModuleNotProvidedError(ModuleDiscoveryError, ImportError):
+class ModuleNotProvidedError(ModuleDiscoveryError, ModuleNotFoundError):
     pass
 
 

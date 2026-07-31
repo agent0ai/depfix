@@ -11,7 +11,7 @@ from conftest import build_index, file_spec
 import depfix
 from depfix.aliases import generate_aliases
 from depfix.cache import Cache
-from depfix.config import load_config
+from depfix.config import ImportDeclaration, ProjectConfig, load_config
 from depfix.errors import NativeIsolationRequired, UndeclaredImportError
 from depfix.manifest import write
 from depfix.resolver import Resolver
@@ -202,6 +202,60 @@ def test_unknown_native_is_rejected_and_ambient_imports_do_not_leak(tmp_path: Pa
     example = runtime.load_alias("example_v1")
     with pytest.raises(UndeclaredImportError):
         runtime.import_for_node(example.__depfix_node_id__, "pytest")
+
+
+def test_dynamic_compatibility_submodules_and_missing_probes(tmp_path: Path, wheel_factory) -> None:
+    provider = wheel_factory(
+        "compat-provider",
+        "1.0.0",
+        {
+            "compat_provider/__init__.py": (
+                "import json\n"
+                "import sys\n"
+                "import types\n"
+                "moves = types.ModuleType(__name__ + '.moves')\n"
+                "moves.json = json\n"
+                "sys.modules[moves.__name__] = moves\n"
+                "synthetic_round_trip = __import__(moves.__name__, fromlist=('*',)) is moves\n"
+            ),
+            "compat_provider/broken.py": "import absent_nested_dependency\n",
+        },
+    )
+    consumer = wheel_factory(
+        "compat-consumer",
+        "1.0.0",
+        {
+            "compat_consumer.py": (
+                "try:\n"
+                "    import absent_optional_dependency\n"
+                "except ModuleNotFoundError:\n"
+                "    optional_missing = True\n"
+                "import compat_provider\n"
+                "try:\n"
+                "    from compat_provider import broken\n"
+                "except ModuleNotFoundError:\n"
+                "    nested_missing = True\n"
+                "from compat_provider.moves import json\n"
+                "encoded = json.dumps({'realm': 'ok'}, sort_keys=True)\n"
+            )
+        },
+        requires=["compat-provider==1.0.0"],
+    )
+    index = build_index(tmp_path / "index", [provider])
+    config = ProjectConfig(
+        tmp_path / ".depfix" / "config.toml",
+        (ImportDeclaration("consumer", file_spec(consumer), "compat_consumer"),),
+        {},
+    )
+    cache = Cache(tmp_path / "cache")
+    graph = Resolver(cache, index_url=index).resolve(config)
+    sync_graph(graph, cache, offline=True)
+    module = DepfixRuntime(graph, cache).activate().load_alias("consumer")
+
+    assert module.optional_missing is True
+    assert module.nested_missing is True
+    assert module.compat_provider.synthetic_round_trip is True
+    assert module.encoded == '{"realm": "ok"}'
 
 
 def test_generated_stubs_keep_version_specific_apis(tmp_path: Path, wheel_factory) -> None:
