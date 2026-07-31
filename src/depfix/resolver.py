@@ -532,7 +532,10 @@ class Resolver:
             permanent.parent.mkdir(parents=True, exist_ok=True)
             if not permanent.exists():
                 shutil.copy2(wheel, permanent)
-            candidate = self._candidate_from_local_wheel(permanent, replace(source, final_url=permanent.as_uri()))
+            candidate = self._candidate_from_local_wheel(
+                permanent,
+                replace(source, final_url=permanent.as_uri(), sha256=None),
+            )
             candidate.built = True
             candidate.source_url = source_url
             candidate.source_final_url = source_final_url

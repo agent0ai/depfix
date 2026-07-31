@@ -14,6 +14,7 @@ import depfix
 from depfix.cache import Cache
 from depfix.config import ImportDeclaration, ProjectConfig
 from depfix.errors import UndeclaredImportError
+from depfix.manager import reset_runtime_state
 from depfix.manifest import write
 from depfix.resolver import Resolver
 from depfix.runtime import DepfixRuntime
@@ -46,6 +47,30 @@ def test_direct_single_file_api_is_integrity_pinned_and_isolated(tmp_path: Path)
         with pytest.raises(UndeclaredImportError):
             depfix.import_module(file_spec(isolated, kind="py"), module="isolated", refresh=True)
     finally:
+        reset_configuration()
+
+
+@pytest.mark.live
+@pytest.mark.skipif(
+    os.environ.get("DEPFIX_RUN_LIVE_TESTS") != "1",
+    reason="set DEPFIX_RUN_LIVE_TESTS=1 to exercise published PyPI artifacts",
+)
+def test_openai_0_7_and_0_28_load_side_by_side(tmp_path: Path) -> None:
+    depfix.configure(cache_dir=tmp_path / "cache")
+    try:
+        openai_0_7 = depfix.import_module("openai==0.7.0")
+        openai_0_28 = depfix.import_module("openai==0.28.1")
+
+        assert openai_0_7.__depfix_version__ == "0.7.0"
+        assert openai_0_28.__depfix_version__ == "0.28.1"
+        assert openai_0_7 is not openai_0_28
+        assert openai_0_7.__name__ != openai_0_28.__name__
+        assert hasattr(openai_0_7, "Completion")
+        assert not hasattr(openai_0_7, "ChatCompletion")
+        assert hasattr(openai_0_28, "ChatCompletion")
+        assert "openai" not in sys.modules
+    finally:
+        reset_runtime_state()
         reset_configuration()
 
 

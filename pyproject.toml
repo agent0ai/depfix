@@ -58,6 +58,9 @@ depfix = ["py.typed", "schemas/*.json"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+  "live: requires network access to resolve and fetch published package artifacts",
+]
 
 [tool.mypy]
 python_version = "3.11"

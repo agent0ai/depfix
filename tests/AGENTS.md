@@ -13,6 +13,7 @@
 
 - Tests must not depend on the developer's ambient packages, cache, or credentials.
 - Network-free fixtures are preferred; explicitly marked live checks belong in release or CI boundaries.
+- Live PyPI checks require `DEPFIX_RUN_LIVE_TESTS=1`; CI owns their connected execution.
 - Regressions should assert observable public behavior or a named safety invariant.
 
 ## Work Guidance

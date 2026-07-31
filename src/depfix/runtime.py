@@ -27,6 +27,7 @@ from .errors import (
     AmbiguousMetadataError,
     CacheError,
     ImportOwnershipError,
+    ModuleNotProvidedError,
     NativeIsolationRequired,
     RealmImportError,
     UndeclaredImportError,
@@ -611,7 +612,7 @@ class DepfixRuntime:
             setattr(  # noqa: B010
                 facade,
                 "find_spec",
-                lambda name, package=None: self._facade_import(node_id, name, package, logical_package).__spec__,
+                lambda name, package=None: self._facade_find_spec(node_id, name, package, logical_package),
             )
         elif requested == "pkgutil":
             facade = _copy_module(pkgutil)
@@ -635,6 +636,18 @@ class DepfixRuntime:
         if self.is_standard_library(name.split(".", 1)[0]):
             return importlib.import_module(name)
         return self.import_for_node(node_id, name)
+
+    def _facade_find_spec(
+        self,
+        node_id: str,
+        name: str,
+        package: str | None,
+        logical_package: str,
+    ) -> importlib.machinery.ModuleSpec | None:
+        try:
+            return self._facade_import(node_id, name, package, logical_package).__spec__
+        except ModuleNotProvidedError:
+            return None
 
     def _module_argument(self, node_id: str, package: str | ModuleType) -> ModuleType:
         if isinstance(package, ModuleType):
