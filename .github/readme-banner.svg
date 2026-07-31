@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
   <title id="title">Depfix</title>
-  <desc id="desc">Isolated Python dependency realms shown as connected package graphs.</desc>
+  <desc id="desc">Multiple Python package versions running together without dependency conflicts.</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#07111f" />
@@ -42,7 +42,7 @@
     <g transform="translate(884 96)">
       <rect width="112" height="76" rx="14" fill="#0e1b2e" stroke="#63d5ff" stroke-width="2" />
       <text x="56" y="33" fill="#e6f8ff" font-size="17" font-weight="700">dep</text>
-      <text x="56" y="56" fill="#63d5ff" font-size="14">realm A</text>
+      <text x="56" y="56" fill="#63d5ff" font-size="14">for v1</text>
     </g>
     <g transform="translate(982 48)">
       <rect width="112" height="76" rx="14" fill="#17162d" stroke="#a78bfa" stroke-width="2" />
@@ -56,8 +56,8 @@
     </g>
     <g transform="translate(884 197)">
       <rect width="112" height="76" rx="14" fill="#0e1b2e" stroke="#63d5ff" stroke-width="2" />
-      <text x="56" y="33" fill="#e6f8ff" font-size="17" font-weight="700">graph</text>
-      <text x="56" y="56" fill="#63d5ff" font-size="14">locked</text>
+      <text x="56" y="33" fill="#e6f8ff" font-size="17" font-weight="700">package</text>
+      <text x="56" y="56" fill="#63d5ff" font-size="14">cached</text>
     </g>
     <g transform="translate(982 232)">
       <rect width="112" height="76" rx="14" fill="#17162d" stroke="#a78bfa" stroke-width="2" />
@@ -68,8 +68,8 @@
 
   <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
     <text x="78" y="158" fill="url(#accent)" font-size="92" font-weight="800" letter-spacing="-4">depfix</text>
-    <text x="84" y="211" fill="#edf4ff" font-size="25" font-weight="600">MULTIVERSION IMPORTS. ISOLATED REALMS.</text>
-    <text x="84" y="253" fill="#a8b8d8" font-size="20">Exact Python package graphs without dependency collisions.</text>
+    <text x="84" y="211" fill="#edf4ff" font-size="25" font-weight="600">INSTALL AT RUNTIME. IMPORT ANY VERSION.</text>
+    <text x="84" y="253" fill="#a8b8d8" font-size="20">No dependency collisions. No environment juggling.</text>
   </g>
 
   <rect x="1" y="1" width="1198" height="358" rx="23" fill="none" stroke="url(#accent)" stroke-opacity="0.38" stroke-width="2" />

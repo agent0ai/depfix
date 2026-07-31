@@ -1,11 +1,11 @@
 <p align="center">
-  <img src=".github/readme-banner.svg" alt="Depfix — isolated Python dependency realms" width="100%" />
+  <img src="https://raw.githubusercontent.com/agent0ai/depfix/main/.github/readme-banner.svg" alt="Depfix — install and import any Python package version" width="100%" />
 </p>
 
-<h3 align="center">Python dependencies solved. Use one package in multiple versions simultaneously. Install at runtime.</h3>
+<h3 align="center">Python dependency problems, solved.</h3>
 
 <p align="center">
-  Depfix lets one Python process load multiple pure-Python package versions side by side—even when their transitive dependencies conflict.
+  Install packages when your code runs. Use normal Python imports. Run multiple versions of the same package at once.
 </p>
 
 <p align="center">
@@ -15,51 +15,51 @@
   <a href="https://github.com/sponsors/agent0ai"><img alt="Sponsor agent0ai" src="https://img.shields.io/badge/Sponsor-agent0ai-FF69B4?style=for-the-badge&logo=githubsponsors&logoColor=white" /></a>
 </p>
 
-<p align="center">
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#why-depfix">Why Depfix</a> ·
-  <a href="#from-live-imports-to-locked-deployments">Deployment</a> ·
-  <a href="#documentation">Documentation</a> ·
-  <a href="https://github.com/agent0ai/depfix/issues">Issues</a>
-</p>
-
 ```python
 import depfix
 
-with depfix.using("idna==2.10"):
-    import idna as idna_2
+with depfix.using("requests==2.31.0"):
+    import requests as requests_old
 
-with depfix.using("idna==3.10"):
-    import idna as idna_3
+with depfix.using("requests==2.32.3"):
+    import requests as requests_new
 
-assert idna_2 is not idna_3
+assert requests_old is not requests_new
 ```
 
-No virtual-environment switching. No `sys.path` swapping. No installation into the active `site-packages`.
+That is the idea: put the version next to the import and let Depfix handle the rest.
 
-## Why Depfix
+No `requirements.txt` needed. No dependency list in `pyproject.toml`. No virtual-environment juggling because two packages
+want different versions of the same dependency. Depfix downloads packages when they are first used, keeps them cached, and
+makes sure each package continues using the dependencies it was installed with.
 
-| Capability | Why it matters |
-| --- | --- |
-| **Side-by-side versions** | Load different versions of the same pure-Python distribution in one process. |
-| **Dependency realms** | Each root keeps parent-specific dependency edges, so one graph does not flatten into another. |
-| **Standard Python imports** | Select persistent defaults or temporary scopes, then use ordinary `import` statements. |
-| **Reproducible deployments** | Export deterministic manifests, install frozen state, and build complete air-gap bundles. |
-| **Real package sources** | Resolve PyPI requirements, Git refs, URLs, local projects, wheels, and standalone Python files. |
-| **Honest isolation** | Pure-Python realm loading is supported; unsafe native-extension loading fails explicitly. |
+Your imports become the source of truth. Dependency conflicts stop being a project-wide problem.
 
-See the runnable [AWS CLI and Boto3 dependency-conflict example](https://github.com/agent0ai/depfix/tree/main/examples/conflicting_botocore_versions)
-for two incompatible Botocore graphs operating in one Python process.
+## Your imports are the package manager
 
-## Quick start
-
-Install Depfix from PyPI:
+Install Depfix once:
 
 ```bash
 python -m pip install depfix
 ```
 
-Select persistent versions, then import normally:
+Then choose whichever import style fits your code.
+
+### Set a default version
+
+Use `default()` when the rest of the file or application should import one selected version normally:
+
+```python
+import depfix
+
+depfix.default("requests==2.32.3")
+
+import requests
+
+response = requests.get("https://example.com")
+```
+
+You can select several packages together:
 
 ```python
 import depfix
@@ -73,129 +73,144 @@ import requests
 import yaml
 ```
 
-Use separate temporary scopes when code needs incompatible versions:
+There is no separate install step. The first `default()` call prepares the requested packages, and later runs reuse the
+cache.
+
+### Use a version temporarily
+
+Use `using()` when one part of your program needs a specific version:
 
 ```python
 import depfix
 
-with depfix.using("requests==2.31.0"):
-    import requests as requests_old
+with depfix.using("openai==0.7.0"):
+    import openai as openai_0_7
 
-with depfix.using("requests==2.32.3"):
-    import requests as requests_new
+with depfix.using("openai==0.28.1"):
+    import openai as openai_0_28
 ```
 
-`default()` creates an additive persistent import map. `using()` temporarily overrides matching defaults, supports nested
-contexts, and also decorates synchronous or asynchronous functions. Imported objects retain their dependency realm after
-the scope exits. For explicit dynamic loading, use `depfix.import_module(...)`; use `depfix.load_package(...)` to inspect a
-distribution exposing several roots.
+The imported objects keep working after the block ends:
 
-Importing `depfix` itself does not patch imports or perform resolution, network, cache, or subprocess work. The lightweight
-dispatcher is installed by the first `default()` or `using()` call. Cold preparation reports resolution, uv summaries, downloads, and materialization
-on stderr. Set `DEPFIX_LOG_LEVEL=WARNING` or call `configure(log_level="WARNING")` to silence progress.
+```python
+with depfix.using("requests==2.31.0"):
+    import requests as legacy_requests
 
-## How it works
+response = legacy_requests.get("https://example.com")
+```
+
+`using()` also works as a function decorator:
+
+```python
+import depfix
+
+@depfix.using("requests==2.31.0")
+def fetch_with_legacy_requests(url: str):
+    import requests
+    return requests.get(url)
+```
+
+The selected version is active every time the function runs. Async functions work too.
+
+### Import a package directly
+
+Use `import_module()` when you want the module returned immediately:
+
+```python
+import depfix
+
+requests = depfix.import_module("requests==2.32.3")
+```
+
+This is especially convenient for dynamic code:
+
+```python
+version = "2.32.3"
+requests = depfix.import_module(f"requests=={version}")
+```
+
+If one package contains several importable modules, use `load_package()`:
+
+```python
+import depfix
+
+tools = depfix.load_package("setuptools==75.0.0")
+setuptools = tools.modules.setuptools
+pkg_resources = tools.modules.pkg_resources
+```
+
+## Dependency conflicts just work
+
+Imagine two packages that cannot be installed together conventionally:
 
 ```text
-requirement or source
-  → exact uv-backed resolution
-  → hash-pinned artifact graph
-  → verified, content-addressed cache
-  → parent-specific dependency realm
-  → canonical synthetic module identity
+awscli==1.32.0  needs botocore==1.34.0
+boto3==1.36.0   needs botocore>=1.36,<1.37
 ```
 
-Realm modules live under graph- and node-qualified internal names. Their logical imports are resolved through declared
-dependency edges, not the process's ambient third-party packages. Repeated calls for the same graph and logical module
-return the same module object.
-
-Depfix invokes uv through its documented executable interface. It does not import uv internals, vendor a uv binary, alter
-the active environment, or add prepared package trees to global `sys.path`.
-
-## Sources
+With Depfix, import both:
 
 ```python
-from depfix import import_module
+import depfix
 
-import_module("requests>=2.31,<3")
-import_module("pypi:requests[socks]~=2.32")
-import_module("git:https://github.com/acme/sdk.git@v2.4.0")
-import_module("url:https://packages.example/acme_sdk-2.4.0-py3-none-any.whl#sha256=<digest>")
-import_module("file:../acme-sdk")
-import_module("file:./helpers.py")
-import_module("py:https://modules.example/utilities.py#sha256=<digest>")
+with depfix.using("awscli==1.32.0", "boto3==1.36.0"):
+    import awscli.clidriver
+    import boto3
 ```
 
-Standard PEP 508 direct references work too. Mutable Git refs are pinned to commits during export. Credentials remain in
-external uv, index, keyring, or Git configuration and are never serialized into manifests.
+Each package receives the Botocore version it needs. You do not have to pin the shared dependency, split the application,
+or create another environment. See the runnable
+[AWS CLI and Boto3 example](https://github.com/agent0ai/depfix/tree/main/examples/conflicting_botocore_versions).
 
-## From live imports to locked deployments
+## More than PyPI
 
-Live mode is ideal for exploration: it resolves into the platform cache and creates no project files. When the graph must
-be reproducible, prepare it explicitly:
+The same APIs accept version ranges and common Python package sources:
+
+```python
+requests = depfix.import_module("requests>=2.31,<3")
+requests_with_socks = depfix.import_module("pypi:requests[socks]~=2.32")
+sdk = depfix.import_module("git:https://github.com/acme/sdk.git@v2.4.0")
+local_package = depfix.import_module("file:../my-local-package")
+helpers = depfix.import_module("file:./helpers.py")
+
+module = depfix.import_module(
+    "url:https://packages.example/acme_sdk-2.4.0-py3-none-any.whl#sha256=<digest>"
+)
+```
+
+Standard PEP 508 direct references work as well.
+
+## Start simple, lock it later
+
+For local development, just run your Python file. Depfix installs and caches packages as the code reaches them. It does
+not create project files.
+
+When you want a repeatable deployment, Depfix can scan the same imports and prepare everything in advance:
 
 ```bash
-depfix export . --output .depfix/imports.lock
+depfix export . -o .depfix/imports.lock
 depfix install .depfix/imports.lock --frozen
-DEPFIX_FROZEN=1 python application.py
+python application.py
 ```
 
-`export` scans static `default()`, `using()`, `import_module()`, and `load_package()` declarations without executing
-application code. It preserves each multi-package standard-import declaration as one consistent realm request and records
-exact artifacts, hashes, target identity, import ownership, source provenance, policy, and parent-specific edges.
+This is optional. You can start with one import and add deployment controls only when you need them. Offline bundles,
+containers, and generated IDE aliases are also available.
 
-For disconnected targets:
+## Good to know
 
-```bash
-depfix bundle .depfix/imports.lock --output dist/application.depfixbundle --include-depfix-runtime
-depfix install dist/application.depfixbundle --offline --frozen
-```
-
-| Mode | Resolution | Network | Project state |
-| --- | --- | --- | --- |
-| **Live** | On the first request | Allowed by policy | None |
-| **Prepared** | During export | Optional during install | Deterministic manifest |
-| **Air-gapped** | On the connected build host | Forbidden on target | Manifest + exact bundle |
-
-## IDE support
-
-```bash
-depfix ide sync .depfix/imports.lock
-depfix ide configure .depfix/imports.lock
-```
-
-Depfix generates a physical `depfix_imports` package with graph-specific stubs, editor snippets, source maps, and an
-optional default-import type overlay. Scanner-derived aliases keep scoped versions distinct. Generic IDEs cannot infer
-arbitrary context-sensitive imports, so use generated aliases when exact scoped completion matters:
-
-```python
-from depfix_imports import requests_old, requests_new
-```
-
-## Boundaries worth knowing
-
-Depfix is an alpha release focused on CPython 3.11–3.13. Its isolation boundary prevents dependency-graph collisions; it
-is not a sandbox for untrusted Python code.
-
-Pure-Python wheels, namespace packages, resources, relative and circular imports, selected metadata access, threads, and
-spawn workers are covered. Native extensions can carry process-global ABI and library state that cannot be made safe by
-renaming a module. Depfix rejects unknown native loading with `NativeIsolationRequired`; use an application-owned worker
-process when native code is required.
+- Importing `depfix` alone does nothing expensive. Installation starts only when you call a loading function.
+- Package preparation is shown on stderr, so you can see what is happening. Set `DEPFIX_LOG_LEVEL=WARNING` for quiet mode.
+- Depfix currently focuses on pure-Python packages on CPython 3.11–3.13.
+- Packages that require native extensions may need a separate worker process.
+- Depfix isolates dependency versions; it is not a sandbox for untrusted code.
 
 ## Documentation
 
-| I want to… | Start here |
-| --- | --- |
-| Get a project running | [Getting started](https://github.com/agent0ai/depfix/blob/main/docs/guides/getting-started.md) |
-| Understand dependency isolation | [Import realms](https://github.com/agent0ai/depfix/tree/main/docs/concepts/import-realms) |
-| Follow resolution and package discovery | [Resolution](https://github.com/agent0ai/depfix/tree/main/docs/concepts/resolution) |
-| Prepare containers or offline systems | [Deployment](https://github.com/agent0ai/depfix/tree/main/docs/concepts/deployment) |
-| Inspect the Python surface | [Python API](https://github.com/agent0ai/depfix/blob/main/docs/reference/api.md) |
-| Inspect every command | [CLI reference](https://github.com/agent0ai/depfix/blob/main/docs/reference/cli.md) |
-| Review security assumptions | [Threat model](https://github.com/agent0ai/depfix/blob/main/docs/operations/threat-model.md) |
-| Diagnose a failure | [Troubleshooting](https://github.com/agent0ai/depfix/blob/main/docs/guides/troubleshooting.md) |
-
-Browse the complete [documentation map](https://github.com/agent0ai/depfix/tree/main/docs).
+- [Getting started](https://github.com/agent0ai/depfix/blob/main/docs/guides/getting-started.md)
+- [Python API](https://github.com/agent0ai/depfix/blob/main/docs/reference/api.md)
+- [CLI reference](https://github.com/agent0ai/depfix/blob/main/docs/reference/cli.md)
+- [Deployment](https://github.com/agent0ai/depfix/tree/main/docs/concepts/deployment)
+- [Troubleshooting](https://github.com/agent0ai/depfix/blob/main/docs/guides/troubleshooting.md)
 
 ## Created by Agent Zero
 
@@ -205,7 +220,6 @@ Depfix is an open-source project by [agent0ai](https://github.com/agent0ai), cre
 
 - Found a bug or compatibility gap? [Open an issue](https://github.com/agent0ai/depfix/issues).
 - Want to contribute? Read [CONTRIBUTING.md](https://github.com/agent0ai/depfix/blob/main/CONTRIBUTING.md).
-- Preparing a release? Follow [RELEASING.md](https://github.com/agent0ai/depfix/blob/main/RELEASING.md).
 - Want to support agent0ai's work? [Sponsor on GitHub](https://github.com/sponsors/agent0ai).
 
 ## License

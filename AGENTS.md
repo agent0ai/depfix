@@ -79,6 +79,8 @@ Default section order:
 
 - Keep repository concepts in clear folder boundaries so each can carry focused DOX guidance.
 - Maintain one polished `README.md` that renders well on both GitHub and PyPI.
+- Lead the public README with plain-language importing workflows and developer outcomes; keep internal implementation
+  terminology in the deeper documentation.
 - Treat `agent0ai` as the project owner and use `https://github.com/agent0ai/depfix` as the canonical repository URL.
 - License Depfix under MIT with `Agent Zero, s.r.o` copyright ownership and `pr@agent-zero.ai` as the contact.
 - Show concise, secret-safe package preparation progress on stderr by default; keep quiet and structured output modes clean.
