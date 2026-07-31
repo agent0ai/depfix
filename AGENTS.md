@@ -80,6 +80,7 @@ Default section order:
 - Keep repository concepts in clear folder boundaries so each can carry focused DOX guidance.
 - Maintain one polished `README.md` that renders well on both GitHub and PyPI.
 - Treat `agent0ai` as the project owner and use `https://github.com/agent0ai/depfix` as the canonical repository URL.
+- License Depfix under MIT with `Agent Zero, s.r.o` copyright ownership and `pr@agent-zero.ai` as the contact.
 - Keep the local `.env` owner-readable only for explicitly authorized publication; never print, package, or commit it or
   persist its credentials elsewhere.
 

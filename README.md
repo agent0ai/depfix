@@ -181,7 +181,6 @@ Depfix is an open-source project by [agent0ai](https://github.com/agent0ai), cre
 - Preparing a release? Follow [RELEASING.md](https://github.com/agent0ai/depfix/blob/main/RELEASING.md).
 - Want to support agent0ai's work? [Sponsor on GitHub](https://github.com/sponsors/agent0ai).
 
-## License status
+## License
 
-No license has been selected yet. Until the owner adds an explicit `LICENSE`, the source is publicly visible but no open-
-source license grant should be assumed. License selection remains a blocker for the first public release.
+Depfix is released under the [MIT License](https://github.com/agent0ai/depfix/blob/main/LICENSE).

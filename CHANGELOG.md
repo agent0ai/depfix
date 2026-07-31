@@ -4,6 +4,7 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+- Adopted the MIT License with Agent Zero ownership and contact metadata.
 - Fixed wheel target promotion on macOS by keeping the staging root owner-writable until `os.replace`, then restoring the
   final read-only cache invariant after atomic promotion.
 
@@ -23,5 +24,5 @@ All notable changes use this file. The project follows semantic versioning after
 - Added a project-wide DOX hierarchy, concept-owned documentation folders, a GitHub/PyPI README, and canonical
   `agent0ai` project metadata.
 
-Published to PyPI as the initial Alpha release. Owner follow-up remains: choose a license, add a private security contact,
-and configure protected trusted-publisher environments for future releases.
+Published to PyPI as the initial Alpha release. At publication, owner follow-up included license selection, a private
+security contact, and protected trusted-publisher environments for future releases.

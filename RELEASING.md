@@ -5,7 +5,7 @@ allocation.
 
 ## Owner-controlled blockers
 
-- [ ] Choose and add an owner-approved `LICENSE`; update PEP 621 license metadata and classifiers.
+- [x] Add the owner-approved MIT `LICENSE`, PEP 621 license metadata, and package classifier.
 - [x] Record `agent0ai` as project owner in package metadata.
 - [x] Record the owner-specified canonical source, documentation, issue, and changelog URLs.
 - [ ] Apply [the prepared GitHub About metadata](.github/REPOSITORY_METADATA.md) in repository settings.
