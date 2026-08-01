@@ -23,16 +23,16 @@
   </thead>
   <tbody>
     <tr>
-      <td><strong>⚡ Install at runtime</strong></td>
-      <td>Packages are downloaded when your code first needs them, then cached.</td>
-    </tr>
-    <tr>
       <td><strong>🧩 No dependency conflicts</strong></td>
       <td>Every package keeps the dependency versions it needs.</td>
     </tr>
     <tr>
       <td><strong>🔀 Multiple versions together</strong></td>
       <td>Import two versions of the same package in one Python process.</td>
+    </tr>
+    <tr>
+      <td><strong>⚡ Install at runtime</strong></td>
+      <td>Packages are downloaded when your code first needs them, then cached.</td>
     </tr>
     <tr>
       <td><strong>🧹 No dependency files</strong></td>
@@ -45,6 +45,10 @@
     <tr>
       <td><strong>🌱 Start with one line</strong></td>
       <td>No environment redesign or separate installation workflow.</td>
+    </tr>
+    <tr>
+      <td><strong>🚀 Production ready</strong></td>
+      <td>Built-in CLI and Python APIs let you preinstall or vendor packages for predictable deployments.</td>
     </tr>
   </tbody>
 </table>
