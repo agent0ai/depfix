@@ -85,30 +85,27 @@ Then choose whichever import style fits your code.
 
 ### Set a default version
 
-Use `default()` when the rest of the file or application should import one selected version normally:
-
-```python
-import depfix
-
-depfix.default("requests==2.32.3")
-
-import requests
-
-response = requests.get("https://example.com")
-```
-
-You can select several packages together:
+Use `default()` when the rest of the file or application should import selected versions normally. You can select one or
+several packages together:
 
 ```python
 import depfix
 
 depfix.default(
-    "requests>=2.31,<3",
+    "requests==2.32.3",
     "PyYAML==6.0.2",
 )
 
 import requests
 import yaml
+
+response = requests.get(
+    "https://raw.githubusercontent.com/agent0ai/depfix/main/.github/workflows/ci.yml"
+)
+response.raise_for_status()
+
+workflow = yaml.safe_load(response.text)
+print(workflow["name"])
 ```
 
 There is no separate install step. The first `default()` call prepares the requested packages, and later runs reuse the
