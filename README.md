@@ -164,8 +164,8 @@ version = "2.32.3"
 requests = depfix.import_module(f"requests=={version}")
 ```
 
-Most packages expose one obvious import. If a package exposes several and you already know which one you need, select it
-with `module=`:
+Most packages expose one obvious import. If a package exposes several and you already know which ones you need, select
+each with `module=`:
 
 ```python
 import depfix
@@ -173,6 +173,11 @@ import depfix
 setuptools = depfix.import_module(
     "setuptools==75.0.0",
     module="setuptools",
+)
+
+pkg_resources = depfix.import_module(
+    "setuptools==75.0.0",
+    module="pkg_resources",
 )
 ```
 
