@@ -55,6 +55,8 @@ separate upload job. PyPI already contains Depfix 0.1.0.
 - Published from commit `3781777608545b2d3985e550242e3076910d4a26` after the complete cross-platform CI matrix and
   isolated Trusted Publishing workflow passed.
 - Verified through a clean public-index installation, CLI version check, and live `idna==3.10` runtime import.
+- A separate tag-triggered CI rerun later exposed the transient Windows cache-lock race fixed by `0.2.1`; use `0.2.1` or
+  later on Windows.
 
 ### 0.1.0 Alpha — 2026-07-31
 
