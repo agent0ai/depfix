@@ -11,9 +11,17 @@
 <p align="center">
   <a href="https://pypi.org/project/depfix/"><img alt="PyPI" src="https://img.shields.io/pypi/v/depfix?style=for-the-badge&logo=pypi&logoColor=white" /></a>
   <a href="https://pypi.org/project/depfix/"><img alt="Python 3.11+" src="https://img.shields.io/pypi/pyversions/depfix?style=for-the-badge&logo=python&logoColor=white" /></a>
-  <a href="https://github.com/agent0ai/depfix/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/agent0ai/depfix/ci.yml?branch=main&style=for-the-badge&label=CI" /></a>
   <a href="https://github.com/sponsors/agent0ai"><img alt="Sponsor agent0ai" src="https://img.shields.io/badge/Sponsor-agent0ai-FF69B4?style=for-the-badge&logo=githubsponsors&logoColor=white" /></a>
 </p>
+
+| The win | What it means |
+| --- | --- |
+| **⚡ Install at runtime** | Packages are downloaded when your code first needs them, then cached. |
+| **🧩 No dependency conflicts** | Every package keeps the dependency versions it needs. |
+| **🔀 Multiple versions together** | Import two versions of the same package in one Python process. |
+| **🧹 No dependency files** | No `requirements.txt` or dependency list in `pyproject.toml` is required. |
+| **🐍 Normal Python imports** | Select a version, then keep writing ordinary `import package`. |
+| **🌱 Start with one line** | No environment redesign or separate installation workflow. |
 
 ```python
 import depfix
@@ -129,14 +137,26 @@ version = "2.32.3"
 requests = depfix.import_module(f"requests=={version}")
 ```
 
-If one package contains several importable modules, use `load_package()`:
+Most packages expose one obvious import. If a package exposes several and you already know which one you need, select it
+with `module=`:
 
 ```python
 import depfix
 
-tools = depfix.load_package("setuptools==75.0.0")
-setuptools = tools.modules.setuptools
-pkg_resources = tools.modules.pkg_resources
+setuptools = depfix.import_module(
+    "setuptools==75.0.0",
+    module="setuptools",
+)
+```
+
+Use `load_package()` when you want to inspect package metadata or discover its available module names before importing:
+
+```python
+package = depfix.load_package("setuptools==75.0.0")
+
+print(package.name, package.version)
+print(package.module_names)
+print(package.dependencies)
 ```
 
 ## Dependency conflicts just work
