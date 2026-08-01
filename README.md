@@ -14,14 +14,40 @@
   <a href="https://github.com/sponsors/agent0ai"><img alt="Sponsor agent0ai" src="https://img.shields.io/badge/Sponsor-agent0ai-FF69B4?style=for-the-badge&logo=githubsponsors&logoColor=white" /></a>
 </p>
 
-| The win | What it means |
-| --- | --- |
-| **⚡ Install at runtime** | Packages are downloaded when your code first needs them, then cached. |
-| **🧩 No dependency conflicts** | Every package keeps the dependency versions it needs. |
-| **🔀 Multiple versions together** | Import two versions of the same package in one Python process. |
-| **🧹 No dependency files** | No `requirements.txt` or dependency list in `pyproject.toml` is required. |
-| **🐍 Normal Python imports** | Select a version, then keep writing ordinary `import package`. |
-| **🌱 Start with one line** | No environment redesign or separate installation workflow. |
+<table>
+  <thead>
+    <tr>
+      <th>The win</th>
+      <th>What it means</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>⚡ Install at runtime</strong></td>
+      <td>Packages are downloaded when your code first needs them, then cached.</td>
+    </tr>
+    <tr>
+      <td><strong>🧩 No dependency conflicts</strong></td>
+      <td>Every package keeps the dependency versions it needs.</td>
+    </tr>
+    <tr>
+      <td><strong>🔀 Multiple versions together</strong></td>
+      <td>Import two versions of the same package in one Python process.</td>
+    </tr>
+    <tr>
+      <td><strong>🧹 No dependency files</strong></td>
+      <td>No <code>requirements.txt</code> or dependency list in <code>pyproject.toml</code> is required.</td>
+    </tr>
+    <tr>
+      <td><strong>🐍 Normal Python imports</strong></td>
+      <td>Select a version, then keep writing ordinary <code>import package</code>.</td>
+    </tr>
+    <tr>
+      <td><strong>🌱 Start with one line</strong></td>
+      <td>No environment redesign or separate installation workflow.</td>
+    </tr>
+  </tbody>
+</table>
 
 ```python
 import depfix
