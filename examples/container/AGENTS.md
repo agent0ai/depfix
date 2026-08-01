@@ -11,6 +11,7 @@
 ## Local Contracts
 
 - The image must prepare dependencies during build and run application code without unexpected resolution.
+- The Dockerfile pins the documented Depfix release; update that pin with each release example refresh.
 
 ## Work Guidance
 

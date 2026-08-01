@@ -1,17 +1,18 @@
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "depfix"
 dynamic = ["version"]
-description = "Import multiple Python package versions side by side with isolated dependency realms"
+description = "Run multiple Python package versions together without dependency conflicts"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
   { name = "agent0ai" },
 ]
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
   "packaging>=24",
   "pathspec>=0.12",
@@ -21,7 +22,6 @@ dependencies = [
 keywords = ["dependencies", "dependency-isolation", "imports", "multiversion", "packaging", "uv"]
 classifiers = [
   "Development Status :: 3 - Alpha",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",

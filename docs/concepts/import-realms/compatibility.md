@@ -14,6 +14,11 @@ accelerators can therefore fall back to Python when the package handles `ImportE
 need an application-owned process. Arbitrary plugin discovery, binary ABI co-loading, and extension modules that require
 their original initialization name are not claimed to work in-process.
 
+Setuptools' `distutils` compatibility import is redirected to the selected package's own `setuptools._distutils`. Imports
+of dependencies bundled under `setuptools._vendor` also stay inside that selected wheel, while an explicitly declared
+dependency always wins. The compatibility adapter preserves synthetic module identity while satisfying setuptools'
+logical module-prefix checks. A versioned setuptools import therefore does not fall back to ambient installation state.
+
 Ambient third-party packages are intentionally invisible inside a realm unless declared by artifact metadata. Standard
 library modules remain shared process modules. Conventional `depfix pip` environments are separate from realm resolution.
 

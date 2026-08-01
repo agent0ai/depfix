@@ -6,7 +6,7 @@ loads two `idna` versions side by side, checks warm module identity, and inspect
 From the repository root:
 
 ```bash
-python -m pip install depfix
+python -m pip install -e .
 python examples/debug_basic/application.py --cache-dir tmp/depfix-debug-cache
 ```
 

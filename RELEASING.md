@@ -1,22 +1,24 @@
 # Release checklist
 
-No command or workflow in this repository publishes automatically. The first accepted upload is the definitive PyPI name
-allocation.
+No command or workflow in this repository publishes automatically. PyPI already contains Depfix 0.1.0; every later release
+requires an explicit owner-run workflow. Configure the protected-environment approvals listed below before using it.
 
 ## Owner-controlled blockers
 
-- [x] Add the owner-approved MIT `LICENSE`, PEP 621 license metadata, and package classifier.
+- [x] Add the owner-approved MIT `LICENSE` and SPDX PEP 621 license metadata.
 - [x] Record `agent0ai` as project owner in package metadata.
 - [x] Record the owner-specified canonical source, documentation, issue, and changelog URLs.
 - [ ] Apply [the prepared GitHub About metadata](.github/REPOSITORY_METADATA.md) in repository settings.
-- [x] Run `python scripts/name_preflight.py` and register normalized name `depfix` with the functional `0.1.0` Alpha release.
+- [x] Confirm normalized name `depfix` is owned by the published functional `0.1.0` Alpha release.
 - [ ] Configure protected `testpypi` and `pypi` repository environments with required reviewers.
 - [ ] Configure matching TestPyPI/PyPI trusted publishers for the workflow and environment names.
-- [ ] Add the private security reporting contact to `SECURITY.md`.
+- [x] Add the owner-approved private security reporting contact to `SECURITY.md`.
+- [ ] Push the reviewed source and `.github/readme-banner.png` to the public canonical repository before uploading 0.2.0;
+  the PyPI README loads its banner from that absolute GitHub URL.
 
 ## Candidate validation
 
-- [x] Update `_version.py` and `CHANGELOG.md`; confirm no unintended API/manifest format change.
+- [x] Update `_version.py` and `CHANGELOG.md` for 0.2.0; confirm no unintended manifest format change.
 - [x] Run `python scripts/release_check.py` on a clean connected host.
 - [x] Review the printed wheel/sdist SHA-256 values and archive inventories.
 - [x] Confirm the wheel is `py3-none-any`, contains `py.typed` and schemas, and contains no tests, caches, credentials,
@@ -32,8 +34,8 @@ allocation.
 - PyPI: `https://pypi.org/project/depfix/0.1.0/`
 - Wheel SHA-256: `1c4a1a16923a66db7d5c716def504b3917cc04d392231a826c240ef7c2508bc3`
 - Sdist SHA-256: `b409bf4725dc1cb9c9a7c5a6461c8365207a7cebb2d46822730e300d6f2b4a67`
-- Published with the owner-authorized account token after the full local release gate; a clean public-index install and
-  both public file hashes were verified.
+- Published through an owner-authorized upload after the full local release gate; a clean public-index install and both
+  public file hashes were verified.
 - The package was published before this workspace gained Git history, so no matching tag or repository-host release
   accompanied the original upload.
 

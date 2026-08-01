@@ -74,6 +74,36 @@ def test_openai_0_7_and_0_28_load_side_by_side(tmp_path: Path) -> None:
         reset_configuration()
 
 
+@pytest.mark.live
+@pytest.mark.skipif(
+    os.environ.get("DEPFIX_RUN_LIVE_TESTS") != "1",
+    reason="set DEPFIX_RUN_LIVE_TESTS=1 to exercise published PyPI artifacts",
+)
+def test_setuptools_75_imports_both_public_modules_explicitly_and_by_default(tmp_path: Path) -> None:
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    try:
+        setuptools = depfix.import_module("setuptools==75.0.0", module="setuptools")
+        with pytest.warns(DeprecationWarning, match="pkg_resources is deprecated"):
+            pkg_resources = depfix.import_module("setuptools==75.0.0", module="pkg_resources")
+
+        assert setuptools.__depfix_version__ == "75.0.0"
+        assert pkg_resources.__depfix_version__ == "75.0.0"
+        assert setuptools is not pkg_resources
+
+        depfix.default("setuptools==75.0.0")
+        import setuptools as default_setuptools
+
+        with pytest.warns(DeprecationWarning, match="pkg_resources is deprecated"):
+            import pkg_resources as default_pkg_resources
+
+        assert default_setuptools.__depfix_version__ == "75.0.0"
+        assert default_pkg_resources.__depfix_version__ == "75.0.0"
+        assert default_setuptools is not default_pkg_resources
+    finally:
+        reset_runtime_state()
+        reset_configuration()
+
+
 def test_reload_failure_cleanup_and_thread_identity(tmp_path: Path, wheel_factory) -> None:
     good = wheel_factory("reload-demo", "1.0.0", {"reloadable/__init__.py": "VALUE = 1\n"})
     bad = wheel_factory("failure-demo", "1.0.0", {"failure/__init__.py": "raise RuntimeError('boom')\n"})
@@ -120,7 +150,7 @@ def test_cli_frozen_offline_run_and_doctor(tmp_path: Path, wheel_factory) -> Non
     )
     assert exported.returncode == 0, exported.stderr
     installed = subprocess.run(
-        [*base, "install", str(manifest), "--frozen", "--offline"], text=True, capture_output=True
+        [*base, "install", str(manifest), "--frozen", "--offline", "--no-build"], text=True, capture_output=True
     )
     assert installed.returncode == 0, installed.stderr
     environment = dict(os.environ)

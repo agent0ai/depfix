@@ -33,7 +33,7 @@ from .uv_backend import UvBackend
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="depfix",
-        description="Import multiple Python package versions side by side with isolated dependency realms",
+        description="Run multiple Python package versions together without dependency conflicts",
     )
     parser.add_argument("--version", action="version", version=f"depfix {__version__}")
     parser.add_argument("--cache-dir", type=Path, help="override the global Depfix cache")
@@ -89,7 +89,6 @@ def _parser() -> argparse.ArgumentParser:
     check = commands.add_parser("check", help="verify source declarations against a manifest")
     check.add_argument("project", nargs="?", default=".", type=Path)
     check.add_argument("--manifest", type=Path, default=Path(".depfix/imports.lock"))
-    check.add_argument("--frozen", action="store_true")
     check.add_argument("--offline", action="store_true")
 
     tree = commands.add_parser("tree", help="display exact nodes and dependency edges")
@@ -153,13 +152,12 @@ def _install_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--python")
     parser.add_argument("--platform")
     parser.add_argument("--architecture")
-    parser.add_argument("--only-binary", action="store_true")
-    parser.add_argument("--allow-build", action="store_true")
-    parser.add_argument("--no-build", action="store_true")
+    parser.add_argument(
+        "--no-build",
+        action="store_true",
+        help="require artifact-only installation (install never builds or resolves)",
+    )
     parser.add_argument("--compile-bytecode", action="store_true")
-    parser.add_argument("--index-url")
-    parser.add_argument("--extra-index-url", action="append", default=[])
-    parser.add_argument("--refresh", action="store_true")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -576,8 +574,8 @@ def _validate_target_options(args: argparse.Namespace) -> None:
         raise ValueError("the manifest currently contains only the host platform target")
     if args.architecture and args.architecture.lower() != platform.machine().lower():
         raise ValueError("the manifest currently contains only the host architecture target")
-    if args.allow_build and args.no_build:
-        raise ValueError("--allow-build and --no-build are mutually exclusive")
+    if args.target is not None and not args.local:
+        raise ValueError("--target requires --local so the selected artifacts are copied there")
 
 
 def _package_dict(package: Any) -> dict[str, object]:

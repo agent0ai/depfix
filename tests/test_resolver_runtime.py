@@ -170,7 +170,8 @@ def test_multiversion_realms_import_semantics_and_aliases(tmp_path: Path, wheel_
     assert "example" not in sys.modules and "shared" not in sys.modules
     assert sys.path == before_path
 
-    depfix.activate(lock_path, cache_dir=tmp_path / "cache")
+    with pytest.warns(DeprecationWarning, match=r"depfix\.activate\(\) is deprecated"):
+        depfix.activate(lock_path, cache_dir=tmp_path / "cache")
     from depfix_imports import example_v1, example_v2
 
     assert example_v1 is v1 and example_v2 is v2
@@ -256,6 +257,36 @@ def test_dynamic_compatibility_submodules_and_missing_probes(tmp_path: Path, whe
     assert module.nested_missing is True
     assert module.compat_provider.synthetic_round_trip is True
     assert module.encoded == '{"realm": "ok"}'
+
+
+def test_declared_dependency_wins_over_setuptools_vendored_fallback(tmp_path: Path, wheel_factory) -> None:
+    packaging = wheel_factory(
+        "packaging",
+        "1.0.0",
+        {"packaging/__init__.py": "SOURCE = 'declared-dependency'\n"},
+    )
+    setuptools = wheel_factory(
+        "setuptools",
+        "75.0.0",
+        {
+            "setuptools/__init__.py": ("import importlib\nselected_packaging = importlib.import_module('packaging')\n"),
+            "setuptools/_vendor/packaging/__init__.py": "SOURCE = 'vendored-fallback'\n",
+        },
+        requires=["packaging==1.0.0"],
+    )
+    index = build_index(tmp_path / "index", [packaging])
+    config = ProjectConfig(
+        tmp_path / ".depfix" / "config.toml",
+        (ImportDeclaration("setuptools", file_spec(setuptools), "setuptools"),),
+        {},
+    )
+    cache = Cache(tmp_path / "cache")
+    graph = Resolver(cache, index_url=index).resolve(config)
+    sync_graph(graph, cache, offline=True)
+
+    module = DepfixRuntime(graph, cache).activate().load_alias("setuptools")
+
+    assert module.selected_packaging.SOURCE == "declared-dependency"
 
 
 def test_generated_stubs_keep_version_specific_apis(tmp_path: Path, wheel_factory) -> None:

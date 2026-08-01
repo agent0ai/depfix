@@ -55,9 +55,14 @@ def inspect_wheel(path: Path, *, filename: str | None = None) -> WheelInspection
         raise ResolutionError("Invalid wheel filename", remediation=f"{wheel_filename}: {exc}") from exc
     with zipfile.ZipFile(path) as archive:
         names = _validate_members(archive)
-        metadata_names = [name for name in names if name.endswith(".dist-info/METADATA")]
+        metadata_names = [
+            name for name in names if name.endswith(".dist-info/METADATA") and len(PurePosixPath(name).parts) == 2
+        ]
         if len(metadata_names) != 1:
-            raise ResolutionError("Wheel must contain exactly one .dist-info/METADATA file", remediation=wheel_filename)
+            raise ResolutionError(
+                "Wheel must contain exactly one top-level .dist-info/METADATA file",
+                remediation=wheel_filename,
+            )
         metadata_name = metadata_names[0]
         metadata = BytesParser(policy=compat32).parsebytes(archive.read(metadata_name))
         metadata_distribution = canonicalize_name(metadata.get("Name", ""))
@@ -341,9 +346,9 @@ def _validate_members(
 
 
 def _verify_record(archive: zipfile.ZipFile, names: list[str]) -> None:
-    records = [name for name in names if name.endswith(".dist-info/RECORD")]
+    records = [name for name in names if name.endswith(".dist-info/RECORD") and len(PurePosixPath(name).parts) == 2]
     if len(records) != 1:
-        raise IntegrityError("Wheel must contain exactly one RECORD file")
+        raise IntegrityError("Wheel must contain exactly one top-level RECORD file")
     rows = csv.reader(archive.read(records[0]).decode("utf-8").splitlines())
     record: dict[str, tuple[str, str]] = {}
     for row in rows:

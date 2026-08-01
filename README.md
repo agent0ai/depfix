@@ -2,17 +2,14 @@
   <img src="https://raw.githubusercontent.com/agent0ai/depfix/main/.github/readme-banner.png" alt="Depfix — install and import any Python package version" width="100%" />
 </p>
 
-<h3 align="center">Python dependency problems, solved.</h3>
-
-<p align="center">
-  Install packages when your code runs. Use normal Python imports. Run multiple versions of the same package at once.
-</p>
 
 <p align="center">
   <a href="https://pypi.org/project/depfix/"><img alt="PyPI" src="https://img.shields.io/pypi/v/depfix?style=for-the-badge&logo=pypi&logoColor=white" /></a>
   <a href="https://pypi.org/project/depfix/"><img alt="Python 3.11+" src="https://img.shields.io/pypi/pyversions/depfix?style=for-the-badge&logo=python&logoColor=white" /></a>
   <a href="https://github.com/sponsors/agent0ai"><img alt="Sponsor agent0ai" src="https://img.shields.io/badge/Sponsor-agent0ai-FF69B4?style=for-the-badge&logo=githubsponsors&logoColor=white" /></a>
 </p>
+
+<h1>No more Python dependency pain!</h1>
 
 <table>
   <thead>
@@ -99,13 +96,8 @@ depfix.default(
 import requests
 import yaml
 
-response = requests.get(
-    "https://raw.githubusercontent.com/agent0ai/depfix/main/.github/workflows/ci.yml"
-)
-response.raise_for_status()
-
+response = requests.get("https://raw.githubusercontent.com/pypa/pip/main/.pre-commit-config.yaml")
 workflow = yaml.safe_load(response.text)
-print(workflow["name"])
 ```
 
 There is no separate install step. The first `default()` call prepares the requested packages, and later runs reuse the
@@ -139,9 +131,11 @@ response = legacy_requests.get("https://example.com")
 ```python
 import depfix
 
+
 @depfix.using("requests==2.31.0")
 def fetch_with_legacy_requests(url: str):
     import requests
+
     return requests.get(url)
 ```
 
@@ -225,9 +219,7 @@ sdk = depfix.import_module("git:https://github.com/acme/sdk.git@v2.4.0")
 local_package = depfix.import_module("file:../my-local-package")
 helpers = depfix.import_module("file:./helpers.py")
 
-module = depfix.import_module(
-    "url:https://packages.example/acme_sdk-2.4.0-py3-none-any.whl#sha256=<digest>"
-)
+module = depfix.import_module("url:https://packages.example/acme_sdk-2.4.0-py3-none-any.whl#sha256=<digest>")
 ```
 
 Standard PEP 508 direct references work as well.

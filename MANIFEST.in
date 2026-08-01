@@ -15,4 +15,4 @@ prune build
 prune dist
 prune tmp
 prune tests
-global-exclude .env .env.* *.py[cod] __pycache__/*
+global-exclude .env .env.* .DS_Store AGENTS.md *.py[cod] __pycache__/*

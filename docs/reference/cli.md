@@ -8,8 +8,10 @@ Primary workflow:
 - `depfix export [PROJECT] [-o MANIFEST]`: scan, resolve, build as permitted, cache, generate IDE metadata, and write a
   deterministic manifest. Static `default()` and `using()` declarations remain grouped. Add dynamic requests with
   `--include`, exclude paths with `--exclude`, or incorporate roots with `--requirements`.
-- `depfix install MANIFEST_OR_BUNDLE [--frozen] [--offline]`: validate exact state and materialize realms. Deployment
-  options include `--cached-only`, `--local`, `--target`, and `--compile-bytecode`.
+- `depfix install MANIFEST_OR_BUNDLE [--frozen] [--offline] [--no-build]`: validate exact state and materialize packages.
+  `--cached-only` forbids downloads. `--local` copies prepared targets beneath `.depfix/runtime`; combine it with
+  `--target PATH` to choose another destination. `--compile-bytecode` prepares bytecode. `--python`, `--platform`, and
+  `--architecture` reject mismatched targets; cross-target installation is not implemented.
 - `depfix bundle MANIFEST -o FILE.depfixbundle`: create a deterministic air-gap archive. Add
   `--include-depfix-runtime` for disconnected bootstrapping wheels.
 - `depfix prepare [PROJECT]`: export, install, verify, and generate IDE data in one development command.

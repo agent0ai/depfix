@@ -25,7 +25,7 @@ from depfix.settings import Settings, reset_configuration, resolve_settings
 from depfix.sources import parse_source
 from depfix.sync import sync_graph
 from depfix.uv_backend import UvBackend, UvExecutable
-from depfix.wheel import inspect_wheel
+from depfix.wheel import extract_wheel, inspect_wheel
 
 
 @pytest.fixture(autouse=True)
@@ -46,8 +46,10 @@ def test_source_forms_normalize_without_confusing_git_authentication(tmp_path: P
     git = parse_source("git:https://user@github.example/acme/sdk.git@v2.4.0")
     assert git.url == "https://user@github.example/acme/sdk.git"
     assert git.requested_ref == "v2.4.0" and git.mutable
-    pinned = parse_source("git:ssh://git@github.example/acme/sdk.git@1fadefa67b26508cc59cf38e6130bde2243c929d")
-    assert pinned.commit == "1fadefa67b26508cc59cf38e6130bde2243c929d"
+    pinned = parse_source(
+        "git:ssh://git@github.example/acme/sdk.git@1fadefa67b26508cc59cf38e6130bde2243c929d"  # pragma: allowlist secret
+    )
+    assert pinned.commit == "1fadefa67b26508cc59cf38e6130bde2243c929d"  # pragma: allowlist secret
     direct = parse_source('acme-sdk[http] @ git+https://github.example/acme/sdk.git@v2.4.0 ; python_version >= "3.11"')
     assert direct.distribution == "acme-sdk"
     assert direct.extras == ("http",)
@@ -95,6 +97,20 @@ def test_core_metadata_and_artifact_module_discovery(tmp_path: Path, wheel_facto
     with pytest.raises(ResolutionError, match="inconsistent"):
         inspect_wheel(inconsistent)
 
+    vendored_metadata = wheel_factory(
+        "vendored-metadata",
+        "1.0.0",
+        {
+            "vendored_metadata.py": "VALUE = 1\n",
+            "vendored_metadata/_vendor/helper-2.0.0.dist-info/METADATA": (
+                "Metadata-Version: 2.3\nName: helper\nVersion: 2.0.0\n\n"
+            ),
+            "vendored_metadata/_vendor/helper-2.0.0.dist-info/RECORD": "",
+        },
+    )
+    assert inspect_wheel(vendored_metadata).public_modules == ("vendored_metadata",)
+    extract_wheel(vendored_metadata, tmp_path / "vendored-target")
+
 
 def test_stable_module_and_lazy_package_handle_contracts(tmp_path: Path, wheel_factory) -> None:
     wheel = wheel_factory(
@@ -119,6 +135,40 @@ def test_stable_module_and_lazy_package_handle_contracts(tmp_path: Path, wheel_f
     assert package.modules["second"].VALUE == "second"
     with pytest.raises(MultipleImportModulesError):
         package.only_module()
+
+
+def test_setuptools_distutils_compatibility_alias_is_package_local(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "setuptools",
+        "75.0.0",
+        {
+            "setuptools/__init__.py": (
+                "import importlib\n"
+                "from importlib.machinery import EXTENSION_SUFFIXES\n"
+                "import distutils as direct_distutils\n"
+                "bundled_distutils = importlib.import_module('distutils')\n"
+                "bundled_helper = importlib.import_module('jaraco.functools')\n"
+                "class LocalClass: pass\n"
+            ),
+            "setuptools/_distutils/__init__.py": "VALUE = 'local-distutils'\nclass BaseClass: pass\n",
+            "setuptools/_vendor/jaraco/functools.py": "VALUE = 'vendored-helper'\n",
+            "pkg_resources/__init__.py": "VALUE = 'resources'\n",
+        },
+    )
+    depfix.configure(cache_dir=tmp_path / "cache")
+
+    setuptools = depfix.import_module(file_spec(wheel), module="setuptools")
+    pkg_resources = depfix.import_module(file_spec(wheel), module="pkg_resources")
+
+    assert setuptools.bundled_distutils.VALUE == "local-distutils"
+    assert setuptools.direct_distutils is setuptools.bundled_distutils
+    assert setuptools.bundled_helper.VALUE == "vendored-helper"
+    assert isinstance(setuptools.EXTENSION_SUFFIXES, list)
+    assert str(setuptools.LocalClass.__module__).startswith("_depfix.")
+    assert setuptools.LocalClass.__module__.startswith("setuptools")
+    assert setuptools.bundled_distutils.BaseClass.__module__.startswith("distutils")
+    assert pkg_resources.VALUE == "resources"
+    assert "distutils" not in sys.modules
 
 
 def test_live_load_reports_preparation_and_warning_level_silences_it(
@@ -164,7 +214,7 @@ def test_uv_success_summary_is_forwarded_to_progress(
                 "Resolved 2 packages\n"
                 "Installed 2 packages\n"
                 " + demo==1.0.0\n"
-                "Index https://user:password@example.test/simple\n"
+                "Index https://user:password@example.test/simple\n"  # pragma: allowlist secret
             ),
         )
 
@@ -189,6 +239,19 @@ def test_json_cli_suppresses_progress(tmp_path: Path, wheel_factory, capsys: pyt
     assert result == 0
     assert captured.err == ""
     assert json.loads(captured.out)["name"] == "json-progress-demo"
+
+
+def test_install_cli_exposes_only_effective_artifact_options() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "depfix", "install", "--help"],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert "--no-build" in result.stdout
+    for removed in ("--allow-build", "--only-binary", "--index-url", "--extra-index-url", "--refresh"):
+        assert removed not in result.stdout
 
 
 def test_no_module_package_handle_is_still_representable(tmp_path: Path, wheel_factory) -> None:
@@ -266,6 +329,12 @@ def test_bundle_is_deterministic_and_installs_without_network(tmp_path: Path, wh
     sync_graph(graph, cache, offline=True)
     manifest = tmp_path / ".depfix" / "imports.lock"
     write_manifest(graph, manifest)
+    with pytest.raises(ValueError, match="target requires local=True"):
+        install_manifest(manifest, target=tmp_path / "invalid-target", cache_dir=cache_dir)
+    vendored = tmp_path / "vendored"
+    local = install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
+    assert local.target == vendored
+    assert (vendored / graph.artifacts[0].sha256[:16] / "purelib" / "bundle_demo" / "__init__.py").is_file()
     first = create_bundle(manifest, tmp_path / "first.depfixbundle", cache_dir=cache_dir)
     second = create_bundle(manifest, tmp_path / "second.depfixbundle", cache_dir=cache_dir)
     assert first.bundle.read_bytes() == second.bundle.read_bytes()

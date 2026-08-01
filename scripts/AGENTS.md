@@ -7,12 +7,13 @@
 ## Ownership
 
 - `release_check.py` is the authoritative local distribution gate.
-- `name_preflight.py` performs non-reserving package-index availability checks.
 
 ## Local Contracts
 
 - Scripts must fail closed, redact credentials, and avoid publishing or reserving names.
-- Release validation must inspect built archives and test a clean installation.
+- Release validation must inspect tracked source and built archives for repository junk or credential patterns, then test a
+  clean installation.
+- Clean-environment creation must work with both system and dynamically linked uv-managed CPython interpreters.
 
 ## Work Guidance
 

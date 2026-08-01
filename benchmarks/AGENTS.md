@@ -6,7 +6,7 @@
 
 ## Ownership
 
-- `import_identity.py` measures repeated import identity and warm-path timing.
+- `import_identity.py` measures repeated public `import_module()` identity and prepared warm-path timing.
 
 ## Local Contracts
 
@@ -19,6 +19,6 @@
 
 ## Verification
 
-- Run `python benchmarks/import_identity.py` when runtime caching or module identity changes.
+- Run `python benchmarks/import_identity.py MANIFEST SPECIFIER` when runtime caching or module identity changes.
 
 ## Child DOX Index

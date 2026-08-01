@@ -20,7 +20,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType, ModuleType
-from typing import Any
+from typing import Any, SupportsIndex
 
 from .cache import Cache
 from .errors import (
@@ -35,6 +35,9 @@ from .errors import (
 from .models import Alias, Artifact, LockedGraph, Node
 
 _FACADE_ROOTS = {"importlib", "pkgutil"}
+_COMPATIBILITY_IMPORT_ALIASES = {
+    "setuptools": {"distutils": "setuptools._distutils"},
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +53,28 @@ class _Location:
     @property
     def is_namespace(self) -> bool:
         return self.source is None and bool(self.namespace_paths)
+
+
+class _CompatibilityModuleName(str):
+    """Keep synthetic identity while satisfying known logical-prefix checks."""
+
+    aliases: tuple[str, ...]
+
+    def __new__(cls, value: str, aliases: Iterable[str]) -> _CompatibilityModuleName:
+        instance = super().__new__(cls, value)
+        instance.aliases = tuple(aliases)
+        return instance
+
+    def startswith(
+        self,
+        prefix: str | tuple[str, ...],
+        start: SupportsIndex | None = 0,
+        end: SupportsIndex | None = None,
+        /,
+    ) -> bool:
+        return super().startswith(prefix, start, end) or any(
+            alias.startswith(prefix, start, end) for alias in self.aliases
+        )
 
 
 class DepfixResourceReader(importlib.resources.abc.TraversableResources):
@@ -134,7 +159,10 @@ class BoundImporter:
             if fromlist:
                 return requested
             return self.runtime.facade(self.node_id, root, self.logical_package)
-        if not level and self.runtime.is_standard_library(root):
+        caller = self.runtime._nodes[self.node_id]
+        has_provider = bool(self.runtime._provider_nodes(caller, logical_name))
+        compatibility_alias = None if has_provider else self.runtime._compatibility_alias_name(caller, logical_name)
+        if not level and compatibility_alias is None and self.runtime.is_standard_library(root):
             return builtins.__import__(name, globals, locals, fromlist, level)
         module = self.runtime.import_for_node(self.node_id, logical_name)
         if fromlist:
@@ -293,6 +321,9 @@ class DepfixRuntime:
         caller = self._nodes[caller_node_id]
         providers = self._provider_nodes(caller, logical_name)
         if not providers:
+            redirected = self._compatibility_import_name(caller, logical_name)
+            if redirected is not None:
+                return self.import_for_node(caller_node_id, redirected)
             raise UndeclaredImportError(
                 "No declared provider exposes this import in the caller's realm",
                 module=logical_name,
@@ -339,6 +370,22 @@ class DepfixRuntime:
                 )
             return providers
         return [child for child in self._direct_dependencies(caller) if root in child.provided_modules]
+
+    def _compatibility_import_name(self, caller: Node, logical_name: str) -> str | None:
+        redirected = self._compatibility_alias_name(caller, logical_name)
+        if redirected is not None:
+            return redirected
+        if caller.distribution == "setuptools" and not logical_name.startswith("setuptools._vendor"):
+            vendored = f"setuptools._vendor.{logical_name}"
+            if self._location_exists(self._locate(caller, vendored)):
+                return vendored
+        return None
+
+    def _compatibility_alias_name(self, caller: Node, logical_name: str) -> str | None:
+        for logical_root, target_root in _COMPATIBILITY_IMPORT_ALIASES.get(caller.distribution, {}).items():
+            if logical_name == logical_root or logical_name.startswith(logical_root + "."):
+                return target_root + logical_name.removeprefix(logical_root)
+        return None
 
     def _direct_dependencies(self, node: Node) -> list[Node]:
         return [self._nodes[node_id] for _name, node_id in sorted(node.dependencies.items())]
@@ -439,6 +486,20 @@ class DepfixRuntime:
         source = location.source.read_bytes()
         code = compile(source, str(location.source), "exec", dont_inherit=True)
         exec(code, module.__dict__)
+        self._apply_compatibility_metadata(module, node, logical_name)
+
+    def _apply_compatibility_metadata(self, module: ModuleType, node: Node, logical_name: str) -> None:
+        if node.distribution != "setuptools":
+            return
+        if logical_name == "setuptools._distutils" or logical_name.startswith("setuptools._distutils."):
+            aliases = ["distutils" + logical_name.removeprefix("setuptools._distutils")]
+        else:
+            aliases = [logical_name]
+        canonical = str(module.__name__)
+        compatible_name = _CompatibilityModuleName(canonical, aliases)
+        for value in tuple(vars(module).values()):
+            if isinstance(value, type) and value.__module__ == canonical:
+                value.__module__ = compatible_name
 
     def _load_namespace(self, caller: Node, logical_name: str, providers: list[Node]) -> ModuleType:
         canonical = self.namespace_name(caller.id, logical_name)
@@ -637,6 +698,8 @@ class DepfixRuntime:
                 "get_data",
                 lambda package, resource: self._pkgutil_get_data(node_id, package, resource),
             )
+        elif requested.startswith("importlib."):
+            facade = importlib.import_module(requested)
         else:
             raise ImportError(requested)
         self._facades[key] = facade
@@ -649,6 +712,11 @@ class DepfixRuntime:
                 module = sys.modules.get(base)
                 base = str(getattr(module, "__depfix_logical_name__", logical_package))
             name = importlib.util.resolve_name(name, base)
+        caller = self._nodes[node_id]
+        has_provider = bool(self._provider_nodes(caller, name))
+        redirected = None if has_provider else self._compatibility_alias_name(caller, name)
+        if redirected is not None:
+            return self.import_for_node(node_id, redirected)
         if self.is_standard_library(name.split(".", 1)[0]):
             return importlib.import_module(name)
         return self.import_for_node(node_id, name)

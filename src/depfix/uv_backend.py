@@ -278,7 +278,7 @@ class UvBackend:
             destination.parent.mkdir(parents=True, exist_ok=True)
             temporary = Path(tempfile.mkdtemp(prefix="uv-bootstrap-", dir=destination.parent))
             try:
-                venv.EnvBuilder(with_pip=True, clear=True).create(temporary)
+                venv.EnvBuilder(with_pip=True, clear=True, symlinks=os.name != "nt").create(temporary)
                 python = temporary / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
                 command = [
                     str(python),

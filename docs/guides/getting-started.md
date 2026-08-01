@@ -12,8 +12,8 @@ with depfix.using("requests==2.31.0"):
     import requests as legacy_requests
 ```
 
-Use `depfix.import_module(...)` for an explicit dynamic module object and `depfix.load_package(...)` to inspect every root
-provided by a distribution.
+Use `depfix.import_module(...)` for an explicit dynamic module object and `depfix.load_package(...)` to inspect package
+metadata or discover the import roots provided by a distribution.
 
 Live mode is sufficient for exploration. For tests or deployment:
 
@@ -26,8 +26,9 @@ DEPFIX_FROZEN=1 python application.py
 ```
 
 The scanner recognizes literal `default()` and `using()` calls, imported aliases, nested contexts, and decorated sync or
-async functions. Dynamic calls can be declared with `--include` or `[[dynamic]]` tables in `.depfix/config.toml`. Configure private indices
-outside specifiers and keep authentication in uv/keyring/Git facilities. Use `depfix bundle` for an air-gapped target.
+async functions. Dynamic calls can be declared with `--include` or `[[dynamic]]` tables in `.depfix/config.toml`.
+Configure private indices outside specifiers and keep authentication in uv/keyring/Git facilities. Use `depfix bundle` for
+an air-gapped target.
 
 For multiprocessing spawn workers:
 

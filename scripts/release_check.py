@@ -21,11 +21,33 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
-FORBIDDEN_PARTS = {".depfix", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__", "tests", "tmp"}
+FORBIDDEN_PARTS = {
+    ".depfix",
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".DS_Store",
+    "AGENTS.md",
+    "__pycache__",
+    "tests",
+    "tmp",
+}
 SECRET_PATTERNS = (
-    re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-    re.compile(rb"pypi-[A-Za-z0-9_-]{20,}"),
-    re.compile(rb"https?://[^/@\s:]+:[^/@\s]+@"),
+    ("private key", re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
+    ("AWS access key", re.compile(rb"(?:AKIA|ASIA)[A-Z0-9]{16}")),
+    ("GitHub token", re.compile(rb"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
+    ("GitLab token", re.compile(rb"glpat-[A-Za-z0-9_-]{20,}")),
+    ("Hugging Face token", re.compile(rb"hf_[A-Za-z0-9]{30,}")),
+    ("npm token", re.compile(rb"npm_[A-Za-z0-9]{30,}")),
+    ("OpenAI token", re.compile(rb"sk-(?!ant-)(?:proj-)?[A-Za-z0-9_-]{20,}")),
+    ("Anthropic token", re.compile(rb"sk-ant-[A-Za-z0-9_-]{20,}")),
+    ("PyPI token", re.compile(rb"pypi-[A-Za-z0-9_-]{20,}")),
+    ("Slack token", re.compile(rb"xox[baprs]-[A-Za-z0-9-]{20,}")),
+    ("Stripe live secret", re.compile(rb"(?:sk|rk)_live_[A-Za-z0-9]{20,}")),
+    ("SendGrid token", re.compile(rb"SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{20,}")),
+    ("Google API key", re.compile(rb"AIza[0-9A-Za-z_-]{30,}")),
+    ("credential URL", re.compile(rb"https?://[^/@\s:]+:[^/@\s]+@[^/\s]+")),
 )
 
 
@@ -64,6 +86,54 @@ def clean_build_outputs() -> None:
             shutil.rmtree(resolved)
 
 
+def create_clean_environment(path: Path) -> None:
+    # uv-managed CPython builds are dynamically linked; copying only their launcher
+    # can omit the adjacent runtime library. POSIX virtual environments normally
+    # use symlinks and retain that interpreter layout.
+    venv.EnvBuilder(with_pip=True, symlinks=os.name != "nt").create(path)
+
+
+def _secret_types(data: bytes) -> list[str]:
+    findings: list[str] = []
+    for label, pattern in SECRET_PATTERNS:
+        for match in pattern.finditer(data):
+            if label == "credential URL" and match.group(0).endswith(b"@example.test"):
+                continue
+            findings.append(label)
+            break
+    return findings
+
+
+def validate_repository() -> None:
+    result = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError("release validation requires a Git checkout")
+    names = [name.decode("utf-8") for name in result.stdout.split(b"\0") if name]
+    checked = 0
+    for name in names:
+        path = ROOT / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        if path.name == ".DS_Store" or path.name.startswith(".env"):
+            raise RuntimeError(f"forbidden tracked repository file: {name}")
+        data = os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
+        findings = _secret_types(data)
+        if findings:
+            raise RuntimeError(f"possible credential material in tracked file {name}: {', '.join(findings)}")
+        checked += 1
+    junk = sorted(
+        path.relative_to(ROOT) for path in ROOT.rglob(".DS_Store") if ".git" not in path.relative_to(ROOT).parts
+    )
+    if junk:
+        raise RuntimeError(f"remove local OS metadata before release: {[str(path) for path in junk]}")
+    print(f"Repository hygiene: {checked} tracked files checked; no credential patterns or OS metadata found")
+
+
 def archive_members(path: Path) -> Iterable[tuple[str, bytes]]:
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as archive:
@@ -87,8 +157,9 @@ def validate_archives(artifacts: list[Path]) -> None:
             parts = Path(name).parts
             if any(part in FORBIDDEN_PARTS for part in parts) or any(part.startswith(".env") for part in parts):
                 raise RuntimeError(f"forbidden archive member in {artifact.name}: {name}")
-            if any(pattern.search(data) for pattern in SECRET_PATTERNS):
-                raise RuntimeError(f"possible credential material in {artifact.name}: {name}")
+            findings = _secret_types(data)
+            if findings:
+                raise RuntimeError(f"possible credential material in {artifact.name}: {name}: {', '.join(findings)}")
             if artifact == wheel:
                 names.add(name)
     required_suffixes = {
@@ -107,7 +178,7 @@ def clean_environment_smoke(wheel: Path) -> None:
     temporary = Path(tempfile.mkdtemp(prefix="depfix-release-check-"))
     try:
         environment_root = temporary / "venv"
-        venv.EnvBuilder(with_pip=True).create(environment_root)
+        create_clean_environment(environment_root)
         scripts = environment_root / ("Scripts" if os.name == "nt" else "bin")
         python = scripts / ("python.exe" if os.name == "nt" else "python")
         command = scripts / ("depfix.exe" if os.name == "nt" else "depfix")
@@ -162,7 +233,7 @@ def private_uv_bootstrap_smoke(wheel: Path) -> None:
     temporary = Path(tempfile.mkdtemp(prefix="depfix-uv-bootstrap-check-"))
     try:
         environment_root = temporary / "venv"
-        venv.EnvBuilder(with_pip=True).create(environment_root)
+        create_clean_environment(environment_root)
         scripts = environment_root / ("Scripts" if os.name == "nt" else "bin")
         python = scripts / ("python.exe" if os.name == "nt" else "python")
         run(
@@ -261,7 +332,7 @@ def airgap_runtime_smoke(wheel: Path) -> None:
                 raise RuntimeError("air-gap bundle did not include the mandatory uv wheel")
 
         environment_root = temporary / "venv"
-        venv.EnvBuilder(with_pip=True).create(environment_root)
+        create_clean_environment(environment_root)
         scripts = environment_root / ("Scripts" if os.name == "nt" else "bin")
         python = scripts / ("python.exe" if os.name == "nt" else "python")
         command = scripts / ("depfix.exe" if os.name == "nt" else "depfix")
@@ -335,6 +406,7 @@ def main() -> int:
         "--quick", action="store_true", help="run code-quality gates without building/network smoke tests"
     )
     arguments = parser.parse_args()
+    validate_repository()
     quality_gates()
     if not arguments.quick:
         full_release_check()

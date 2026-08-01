@@ -14,8 +14,8 @@
 - editor cannot resolve `depfix_imports`: run `depfix ide sync` and apply the path from `depfix ide configure`.
 - generated alias mismatch: regenerate IDE data from the exact installed manifest and detach stale `.pth` files.
 - stale cache operation after an unclean process exit: inspect `depfix cache dir`; a lock timeout reports its exact path.
-- macOS `PermissionError` at `wheel.py: os.replace(...)`: PyPI 0.1.0 hardened the staging directory too early for Darwin;
-  use a source revision containing the post-0.1.0 promotion fix or a later release. Clearing the cache alone does not fix it.
+- macOS `PermissionError` at `wheel.py: os.replace(...)` with Depfix 0.1.0: upgrade to 0.2.0 or later. Clearing the cache
+  alone does not fix the 0.1.0 promotion bug.
 
 Run `depfix doctor --json` to report uv, cache, manifest, and native classifications. Remove private paths if needed before
 sharing diagnostics; secrets are redacted automatically but diagnostics should still be reviewed.

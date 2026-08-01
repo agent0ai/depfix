@@ -41,7 +41,5 @@ strict mypy: no issues in 14 source files
 
 ## Migration boundary
 
-The phase-one manifests and cache schema have provisional public identities and
-must not be consumed silently after the permanent product rename. Phase two
-will either import their exact graph through an explicit migration operation or
-raise a clear invalidation error instructing the user to export again.
+Phase-one manifests and cache entries had provisional identities. The permanent product rejects those formats and directs
+users to export a new `.depfix/imports.lock` rather than silently interpreting incomplete provenance.

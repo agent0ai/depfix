@@ -31,14 +31,16 @@ function execution decorators. `import_module()` returns exactly one module or r
 Package and schemas:
 
 - `src/depfix/__init__.py`, `__main__.py`, `_version.py`, `aliases.py`, `cache.py`, `cli.py`, `config.py`, `dispatcher.py`,
-  `errors.py`, `handles.py`, `manager.py`, `manifest.py`, `models.py`, `project.py`, `resolver.py`, `runtime.py`, `scanner.py`,
-  `scopes.py`, `settings.py`, `sources.py`, `specifiers.py`, `sync.py`, `uv_backend.py`, `wheel.py`, and `py.typed`;
+  `errors.py`, `handles.py`, `manager.py`, `manifest.py`, `models.py`, `progress.py`, `project.py`, `resolver.py`, `runtime.py`,
+  `scanner.py`, `scopes.py`, `settings.py`, `sources.py`, `specifiers.py`, `sync.py`, `uv_backend.py`, `wheel.py`, and
+  `py.typed`;
 - `src/depfix/schemas/depfix-manifest-v1.schema.json` and `schemas/depfix-manifest-v1.schema.json`.
 
 Packaging, release, and automation:
 
-- `pyproject.toml`, `MANIFEST.in`, `.gitignore`, `scripts/release_check.py`, and `scripts/name_preflight.py`;
-- `.github/workflows/ci.yml`, `publish-testpypi.yml`, and `publish-pypi.yml`;
+- `pyproject.toml`, `MANIFEST.in`, `.gitignore`, `LICENSE`, and `scripts/release_check.py`;
+- `.github/readme-banner.png`, `.github/REPOSITORY_METADATA.md`, and workflows `ci.yml`, `publish-testpypi.yml`, and
+  `publish-pypi.yml`;
 - `README.md`, `CHANGELOG.md`, `SECURITY.md`, `CONTRIBUTING.md`, and `RELEASING.md`.
 
 Documentation and examples:
@@ -47,7 +49,8 @@ Documentation and examples:
 - concept boundaries under `docs/concepts/` for artifacts/cache, deployment, import realms, manifests, and resolution;
 - task guides under `docs/guides/`, interfaces under `docs/reference/`, operations under `docs/operations/`, research under
   `docs/research/`, and implementation records under `docs/project/`;
-- `examples/two_idna_versions/application.py` and all files under `examples/container/`.
+- runnable examples under `examples/conflicting_botocore_versions/`, `container/`, `debug_basic/`, and
+  `two_idna_versions/`.
 
 Verification:
 
@@ -106,7 +109,7 @@ manifest-id = "sha256:<full graph digest>"
 
 [resolver]
 backend = "uv"
-backend-version = "0.12.0"
+backend-version = "<executing compatible uv version>"
 
 [[artifacts]]
 id = "sha256:<wheel digest>"
@@ -151,7 +154,7 @@ modules, policies, native classification, and absence of serialized credentials.
 
 - CPython 3.11–3.13: x64 Linux, macOS, and Windows.
 - CPython 3.13: arm64 Linux, macOS, and Windows CI runners.
-- uv minimum: 0.11.0. The release gate separately exercised 0.11.0; the final clean install selected 0.12.0.
+- uv minimum: 0.11.0. CI and the release gate exercise both 0.11.0 and the current compatible release.
 - uv is a mandatory distribution dependency, is found beside the active interpreter even when absent from `PATH`, and can
   be repaired into `.../v1/tools/uv/0.11.0/<platform>/` when policy allows network/bootstrap work.
 
@@ -168,7 +171,6 @@ python -m ruff check .
 python -m mypy src/depfix
 python -m pytest -q
 python scripts/release_check.py
-python scripts/name_preflight.py --json
 ```
 
 The full release check performs a clean PEP 517 build, Twine metadata validation, archive/credential inspection, clean-wheel
@@ -178,8 +180,8 @@ never uploads.
 
 Generated artifacts:
 
-- `dist/depfix-0.1.0-py3-none-any.whl`
-- `dist/depfix-0.1.0.tar.gz`
+- `dist/depfix-0.2.0-py3-none-any.whl`
+- `dist/depfix-0.2.0.tar.gz`
 
 ## Native and other known limitations
 
@@ -198,7 +200,7 @@ Generated artifacts:
   externally usable artifact URL/authentication path; credentials are deliberately never serialized.
 - Depfix enforces configured host/index policies on its own index, artifact, source, and redirect I/O. uv is constrained to
   configured indexes with `first-index` semantics, but uv's internal metadata transport remains governed by uv.
-- SBOM generation and vulnerability-scanner adapters are not included in 0.1.0.
+- SBOM generation and vulnerability-scanner adapters are not included in 0.2.0.
 
 ## Published alpha and owner follow-up
 
@@ -208,8 +210,8 @@ and PyPI reports the reviewed wheel SHA-256
 `b409bf4725dc1cb9c9a7c5a6461c8365207a7cebb2d46822730e300d6f2b4a67`.
 
 The public metadata records `agent0ai` as owner and `https://github.com/agent0ai/depfix` as the canonical repository. Depfix
-is MIT licensed. Remaining owner operations include GitHub About metadata, private security contact, protected trusted
-publishing, and release/tag administration.
+is MIT licensed, and `pr@agent-zero.ai` is the private security contact. Remaining owner operations include GitHub About
+metadata, protected trusted publishing, and release/tag administration.
 
 The workflows still have no push/tag publication trigger. Future workflow publication requires explicit manual dispatch,
 confirmation text, trusted-publisher configuration, and environment approval.

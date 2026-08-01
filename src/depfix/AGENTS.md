@@ -17,7 +17,11 @@
   before application scopes/defaults, and delegate unmanaged imports to the prior importer.
 - Resolved artifacts are hash-pinned and materialized outside ambient `site-packages`.
 - Realm imports preserve module identity and prevent undeclared cross-realm leakage.
+- Package compatibility fallbacks may use modules embedded in the same selected artifact; declared dependency providers
+  always take precedence.
 - Cold package preparation reports secret-safe progress on stderr by default; warning and higher log levels remain quiet.
+- Prepared installation never resolves or builds; a custom materialization target is valid only with explicit local copying.
+- Private uv repair must preserve dynamically linked uv-managed CPython layouts when it creates a temporary environment.
 - Native extensions fail with a typed isolation error unless a future backend provides honest isolation.
 - Public failures use typed, credential-redacted `DepfixError` subclasses.
 

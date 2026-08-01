@@ -91,7 +91,8 @@ Supported variables are `DEPFIX_MANIFEST`, `DEPFIX_FROZEN`, `DEPFIX_OFFLINE`, `D
 ## Project API
 
 `depfix.project` exports `scan_project`, `export_project`, `install_manifest`, `create_bundle`, and `verify_manifest`.
-These are the implementations called by the CLI; they return immutable result dataclasses.
+These are the implementations called by the CLI; they return immutable result dataclasses. `install_manifest()` never
+resolves or builds. Passing `target=` requires `local=True` so verified package trees are actually copied to that location.
 
 ## Exceptions
 

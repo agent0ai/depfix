@@ -174,6 +174,8 @@ def install_manifest(
     compile_bytecode: bool = False,
     cache_dir: str | os.PathLike[str] | None = None,
 ) -> InstallResult:
+    if target is not None and not local:
+        raise ValueError("target requires local=True so the selected artifacts are copied there")
     source = Path(manifest).expanduser().resolve()
     if source.suffix == ".depfixbundle":
         return _install_bundle(source, frozen=frozen, offline=True, local=local, target=target, cache_dir=cache_dir)

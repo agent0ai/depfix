@@ -9,6 +9,10 @@ dist/
 tmp/
 *.egg-info/
 .ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.DS_Store
 .env
 .env.*
 !.env.example

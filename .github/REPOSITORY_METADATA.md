@@ -2,7 +2,7 @@
 
 Use these values for the repository's GitHub **About** panel:
 
-- **Description:** Import multiple Python package versions side by side with isolated dependency realms.
+- **Description:** Run multiple Python package versions together without dependency conflicts.
 - **Website:** `https://pypi.org/project/depfix/`
 - **Topics:** `python`, `dependencies`, `dependency-isolation`, `imports`, `multiversion`, `packaging`, `uv`
 

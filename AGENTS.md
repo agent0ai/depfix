@@ -81,6 +81,8 @@ Default section order:
 - Maintain one polished `README.md` that renders well on both GitHub and PyPI.
 - Lead the public README with plain-language importing workflows and developer outcomes; keep internal implementation
   terminology in the deeper documentation.
+- Keep package, CLI, and GitHub summary metadata focused on dependency conflicts and multiversion imports; reserve
+  internal terms such as realms for technical documentation.
 - Open the public README with a compact visual summary of the primary developer wins before detailed API examples.
 - Present Depfix as production ready through its CLI and Python APIs for preinstallation and vendoring.
 - Treat `agent0ai` as the project owner and use `https://github.com/agent0ai/depfix` as the canonical repository URL.
@@ -104,3 +106,4 @@ Default section order:
 - [`tests/AGENTS.md`](tests/AGENTS.md) — product and regression verification.
 
 Generated directories such as `dist/`, build metadata, caches, virtual environments, and local `.depfix/` state do not receive DOX files. Root-level packaging, governance, release, security, and public README files remain owned here.
+DOX files are repository contracts and remain excluded from wheel and source-distribution artifacts.
