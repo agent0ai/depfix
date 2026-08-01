@@ -211,7 +211,7 @@ and PyPI reports the reviewed wheel SHA-256
 
 The public metadata records `agent0ai` as owner and `https://github.com/agent0ai/depfix` as the canonical repository. Depfix
 is MIT licensed, and `pr@agent-zero.ai` is the private security contact. The protected production Trusted Publisher and
-the `v0.2.0` GitHub/PyPI release are complete; remaining owner operations include GitHub About metadata, optional
+the `v0.2.1` GitHub/PyPI release are complete; remaining owner operations include GitHub About metadata, optional
 TestPyPI configuration, and future release administration.
 
 Pushes and tags do not publish. Publishing a version-matched GitHub Release starts the production workflow, which builds

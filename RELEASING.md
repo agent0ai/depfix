@@ -36,6 +36,16 @@ separate upload job. PyPI already contains Depfix 0.1.0.
 
 ## Published releases
 
+### 0.2.1 — 2026-08-01
+
+- PyPI: `https://pypi.org/project/depfix/0.2.1/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.2.1`
+- Wheel SHA-256: `41e7ae9208bd488e398c574d4c15b0ebcd90b0a08f7383dd5087ab9242303067`
+- Sdist SHA-256: `84ff65118d5de0c647fc6c91a18b62f300fb366b9c3e2b0e76d21a165fe038da`
+- Published from commit `7bb120deb06a14fd77982fac19987e37d6006801` after both the branch and tag cross-platform
+  CI matrices passed, including Windows 3.13, followed by the isolated Trusted Publishing workflow.
+- Verified through a clean public-index installation, CLI version check, and live `idna==3.10` runtime import.
+
 ### 0.2.0 — 2026-08-01
 
 - PyPI: `https://pypi.org/project/depfix/0.2.0/`
