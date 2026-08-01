@@ -18,6 +18,8 @@
 - Install the narrow standard-import dispatcher only on the first `default()` or `using()` call, preserve caller realms
   before application scopes/defaults, and delegate unmanaged imports to the prior importer.
 - Resolved artifacts are hash-pinned and materialized outside ambient `site-packages`.
+- Cross-process cache locks retry transient Windows permission races without masking permanent permission failures on
+  other platforms.
 - Decode local `file:` URLs with platform-native rules, including Windows drive-letter and UNC path forms.
 - Realm imports preserve module identity and prevent undeclared cross-realm leakage.
 - Package compatibility fallbacks may use modules embedded in the same selected artifact; declared dependency providers

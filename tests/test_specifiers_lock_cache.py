@@ -15,6 +15,7 @@ from conftest import file_spec, sha256
 from jsonschema import Draft202012Validator
 
 from depfix import _file_urls
+from depfix import cache as cache_module
 from depfix.cache import Cache
 from depfix.errors import CacheError, IntegrityError
 from depfix.manifest import computed_graph_id, dumps, load, write
@@ -104,6 +105,55 @@ def test_concurrent_cache_population_is_atomic(tmp_path: Path) -> None:
     processes = [subprocess.Popen([sys.executable, "-c", code]) for _ in range(4)]
     assert [process.wait() for process in processes] == [0, 0, 0, 0]
     assert Cache(cache_root).verify_blob(digest).read_bytes() == source.read_bytes()
+
+
+def test_windows_cache_lock_retries_transient_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = Cache(tmp_path / "cache", timeout=1.0)
+    digest = "a" * 64
+    lock = cache.root / "locks" / f"{digest}.lock"
+    real_mkdir = Path.mkdir
+    attempts = 0
+
+    def racing_mkdir(path: Path, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        nonlocal attempts
+        if path == lock and attempts < 2:
+            attempts += 1
+            raise PermissionError(13, "Windows lock directory is being removed", path)
+        real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(cache_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(Path, "mkdir", racing_mkdir)
+
+    with cache._artifact_lock(digest):
+        assert lock.is_dir()
+
+    assert attempts == 2
+    assert not lock.exists()
+
+
+def test_non_windows_cache_lock_preserves_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = Cache(tmp_path / "cache", timeout=1.0)
+    digest = "b" * 64
+    lock = cache.root / "locks" / f"{digest}.lock"
+    real_mkdir = Path.mkdir
+
+    def denied_mkdir(path: Path, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        if path == lock:
+            raise PermissionError(13, "Cache root is not writable", path)
+        real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(cache_module, "_IS_WINDOWS", False)
+    monkeypatch.setattr(Path, "mkdir", denied_mkdir)
+
+    with pytest.raises(PermissionError, match="Cache root is not writable"):
+        with cache._artifact_lock(digest):
+            raise AssertionError("unreachable")
 
 
 def test_malicious_wheel_path_is_rejected(tmp_path: Path) -> None:

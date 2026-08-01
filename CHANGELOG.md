@@ -4,6 +4,11 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.2.1 - 2026-08-01
+
+- Fixed a transient Windows cache-lock race where concurrent artifact writers could receive `PermissionError` while the
+  winning process removed its lock directory.
+
 ## 0.2.0 - 2026-08-01
 
 - Added version-aware standard imports through persistent `default()` selections and context-local `using()` scopes and

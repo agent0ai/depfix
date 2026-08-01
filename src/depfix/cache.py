@@ -23,6 +23,8 @@ from ._file_urls import file_url_to_path
 from .errors import CacheError, IntegrityError, redact
 from .models import Artifact
 
+_IS_WINDOWS = os.name == "nt"
+
 
 class Cache:
     def __init__(
@@ -237,7 +239,9 @@ class Cache:
             try:
                 lock.mkdir()
                 break
-            except FileExistsError:
+            except OSError as error:
+                if not isinstance(error, FileExistsError) and not (_IS_WINDOWS and isinstance(error, PermissionError)):
+                    raise
                 if time.monotonic() >= deadline:
                     raise CacheError("Timed out waiting for another cache writer", artifact_hash=digest) from None
                 time.sleep(0.025)

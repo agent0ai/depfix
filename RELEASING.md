@@ -25,7 +25,7 @@ separate upload job. PyPI already contains Depfix 0.1.0.
 
 ## Candidate validation
 
-- [x] Update `_version.py` and `CHANGELOG.md` for 0.2.0; confirm no unintended manifest format change.
+- [x] Update `_version.py` and `CHANGELOG.md` for 0.2.1; confirm no unintended manifest format change.
 - [x] Run `python scripts/release_check.py` on a clean connected host.
 - [x] Review the printed wheel/sdist SHA-256 values and archive inventories.
 - [x] Confirm the wheel is `py3-none-any`, contains `py.typed` and schemas, and contains no tests, caches, credentials,
