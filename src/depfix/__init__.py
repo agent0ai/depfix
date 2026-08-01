@@ -6,10 +6,10 @@ preparation begins only when a load API is called.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import warnings
 from types import ModuleType
+from typing import TYPE_CHECKING, Any
 
 from ._version import __version__
 from .errors import (
@@ -40,10 +40,37 @@ from .errors import (
     UvBootstrapError,
     UvNotFoundError,
 )
-from .handles import PackageHandle
-from .manager import activate_manifest, prepare_request
-from .scopes import default, using
-from .settings import Settings, configure, resolve_settings
+
+if TYPE_CHECKING:
+    from .handles import PackageHandle
+    from .scopes import default, using
+    from .settings import Settings
+
+
+def configure(
+    *,
+    manifest: str | os.PathLike[str] | None = None,
+    frozen: bool | None = None,
+    offline: bool | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    uv: str | os.PathLike[str] | None = None,
+    index_url: str | None = None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None = None,
+    log_level: str | None = None,
+) -> Settings:
+    """Set process-level defaults without loading the resolver until needed."""
+    from .settings import configure as configure_settings
+
+    return configure_settings(
+        manifest=manifest,
+        frozen=frozen,
+        offline=offline,
+        cache_dir=cache_dir,
+        uv=uv,
+        index_url=index_url,
+        extra_index_url=extra_index_url,
+        log_level=log_level,
+    )
 
 
 def import_module(
@@ -57,6 +84,9 @@ def import_module(
     isolation: str | None = None,
 ) -> ModuleType:
     """Return exactly one canonical module or raise a typed discovery error."""
+    from .manager import prepare_request
+    from .settings import resolve_settings
+
     settings = resolve_settings(manifest=manifest, frozen=frozen, offline=offline)
     runtime, request = prepare_request(
         specifier,
@@ -81,6 +111,10 @@ def load_package(
     isolation: str | None = None,
 ) -> PackageHandle:
     """Return one package handle without eagerly importing its root modules."""
+    from .handles import PackageHandle
+    from .manager import prepare_request
+    from .settings import resolve_settings
+
     settings = resolve_settings(manifest=manifest, frozen=frozen, offline=offline)
     runtime, request = prepare_request(
         specifier,
@@ -104,6 +138,8 @@ async def import_module_async(
     isolation: str | None = None,
 ) -> ModuleType:
     """Async-friendly wrapper sharing canonical identity with `import_module`."""
+    import asyncio
+
     return await asyncio.to_thread(
         import_module,
         specifier,
@@ -125,6 +161,8 @@ async def load_package_async(
     offline: bool | None = None,
     isolation: str | None = None,
 ) -> PackageHandle:
+    import asyncio
+
     return await asyncio.to_thread(
         load_package,
         specifier,
@@ -142,6 +180,9 @@ def activate(
     cache_dir: str | os.PathLike[str] | None = None,
 ) -> object:
     """Deprecated prototype alias for prepared-manifest activation."""
+    from .manager import activate_manifest
+    from .settings import resolve_settings
+
     warnings.warn(
         "depfix.activate() is deprecated; standard imports use depfix.default(), while prepared aliases auto-activate",
         DeprecationWarning,
@@ -168,9 +209,33 @@ def multiprocessing_initializer(
     manifest: str | os.PathLike[str],
     cache_dir: str | os.PathLike[str] | None = None,
 ) -> None:
+    from .manager import activate_manifest
+    from .settings import resolve_settings
+
     settings = resolve_settings(manifest=manifest, cache_dir=cache_dir, frozen=True, discover=False)
     assert settings.manifest is not None
     activate_manifest(settings.manifest, settings)
+
+
+def __getattr__(name: str) -> Any:
+    """Load public API objects only when code asks for them."""
+    if name in {"default", "using"}:
+        from .scopes import default, using
+
+        value = default if name == "default" else using
+        globals()[name] = value
+        return value
+    if name == "PackageHandle":
+        from .handles import PackageHandle
+
+        globals()[name] = PackageHandle
+        return PackageHandle
+    if name == "Settings":
+        from .settings import Settings
+
+        globals()[name] = Settings
+        return Settings
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [

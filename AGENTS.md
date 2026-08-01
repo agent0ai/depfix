@@ -90,6 +90,8 @@ Default section order:
 - Show concise, secret-safe package preparation progress on stderr by default; keep quiet and structured output modes clean.
 - Keep `default()` and `using()` as the lowercase public standard-import APIs; ordinary imports must preserve realm identity,
   scope isolation, frozen preparation, and unmanaged Python behavior.
+- Publish production PyPI releases only from deliberately published, version-matched GitHub Releases through the protected
+  `pypi` environment and OIDC Trusted Publishing; never store a PyPI API token or publish from a push/tag alone.
 - Keep the local `.env` owner-readable only for explicitly authorized publication; never print, package, or commit it or
   persist its credentials elsewhere.
 

@@ -11,11 +11,14 @@
 ## Local Contracts
 
 - Importing `depfix` performs no network, resolver, cache, or subprocess work.
+- Keep resolver and scope implementation imports lazy at the public package boundary so the import-only contract also
+  holds on Windows.
 - `import_module` returns exactly one selected module; `load_package` returns a lazy package handle.
 - `default()` owns persistent ordinary-import selections; context-local `using()` scopes and decorators own temporary ones.
 - Install the narrow standard-import dispatcher only on the first `default()` or `using()` call, preserve caller realms
   before application scopes/defaults, and delegate unmanaged imports to the prior importer.
 - Resolved artifacts are hash-pinned and materialized outside ambient `site-packages`.
+- Decode local `file:` URLs with platform-native rules, including Windows drive-letter and UNC path forms.
 - Realm imports preserve module identity and prevent undeclared cross-realm leakage.
 - Package compatibility fallbacks may use modules embedded in the same selected artifact; declared dependency providers
   always take precedence.

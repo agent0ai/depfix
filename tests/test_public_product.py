@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import sysconfig
 import warnings
 import zipfile
 from pathlib import Path
@@ -362,8 +363,12 @@ def test_uv_dependency_is_located_without_path(tmp_path: Path, monkeypatch: pyte
     settings = Settings(cache_dir=tmp_path / "cache")
     executable = UvBackend(settings, Cache(settings.cache_dir)).ensure_available(allow_bootstrap=False)
     assert executable.version >= Version("0.11.0")
-    assert executable.path.parent == Path(sys.executable).absolute().parent
-    assert executable.source == "Depfix runtime dependency"
+    candidates = {
+        "Depfix runtime dependency": (Path(sys.executable).absolute().parent / executable.path.name).resolve(),
+        "current Python scripts directory": (Path(sysconfig.get_path("scripts")) / executable.path.name).resolve(),
+    }
+    assert executable.source in candidates
+    assert executable.path == candidates[executable.source]
 
 
 def test_depfix_pip_version_reports_the_uv_backend() -> None:

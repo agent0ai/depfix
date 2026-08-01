@@ -1,7 +1,8 @@
 # Release checklist
 
-No command or workflow in this repository publishes automatically. PyPI already contains Depfix 0.1.0; every later release
-requires an explicit owner-run workflow. Configure the protected-environment approvals listed below before using it.
+Publishing a versioned GitHub Release starts the production Trusted Publishing workflow. A push or tag alone never
+publishes. The workflow builds and tests without OIDC permission, then the protected `pypi` environment authorizes the
+separate upload job. PyPI already contains Depfix 0.1.0.
 
 ## Owner-controlled blockers
 
@@ -10,8 +11,14 @@ requires an explicit owner-run workflow. Configure the protected-environment app
 - [x] Record the owner-specified canonical source, documentation, issue, and changelog URLs.
 - [ ] Apply [the prepared GitHub About metadata](.github/REPOSITORY_METADATA.md) in repository settings.
 - [x] Confirm normalized name `depfix` is owned by the published functional `0.1.0` Alpha release.
-- [ ] Configure protected `testpypi` and `pypi` repository environments with required reviewers.
-- [ ] Configure matching TestPyPI/PyPI trusted publishers for the workflow and environment names.
+- [ ] Configure the protected `pypi` repository environment with required reviewers and deployment tags restricted to
+  `v*`; configure `testpypi` separately only when that staging workflow is wanted.
+- [ ] Add the production Trusted Publisher under PyPI project `depfix` → Publishing with these exact values:
+  - Owner: `agent0ai`
+  - Repository: `depfix`
+  - Workflow filename: `publish-pypi.yml`
+  - Environment: `pypi`
+- [ ] Configure the optional TestPyPI publisher for `publish-testpypi.yml` and environment `testpypi`.
 - [x] Add the owner-approved private security reporting contact to `SECURITY.md`.
 - [ ] Push the reviewed source and `.github/readme-banner.png` to the public canonical repository before uploading 0.2.0;
   the PyPI README loads its banner from that absolute GitHub URL.
@@ -45,9 +52,9 @@ requires an explicit owner-run workflow. Configure the protected-environment app
 - [ ] Install from TestPyPI while sourcing dependencies from PyPI, then repeat CLI/live/prepared checks.
 - [ ] Verify rendered metadata, README, files, and dependency declarations.
 
-## PyPI (explicit manual workflow)
+## PyPI (GitHub Release workflow)
 
-- [ ] Create and push the deliberate signed/annotated release tag according to owner policy.
-- [ ] Invoke `Publish PyPI` manually with that tag and pass the protected-environment approval.
+- [ ] Confirm CI is green for the reviewed commit and create its deliberate signed/annotated `vX.Y.Z` tag.
+- [ ] Publish a GitHub Release for that tag; this starts the `Publish to PyPI` workflow from `publish-pypi.yml`.
+- [ ] Approve the protected `pypi` environment deployment after reviewing the build-and-test job.
 - [ ] Verify the PyPI page, artifact hashes, `pip install depfix`, `depfix --version`, uv installation, and a basic live import.
-- [ ] Create the repository-host release from the same tag and changelog entry.

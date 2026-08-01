@@ -213,5 +213,5 @@ The public metadata records `agent0ai` as owner and `https://github.com/agent0ai
 is MIT licensed, and `pr@agent-zero.ai` is the private security contact. Remaining owner operations include GitHub About
 metadata, protected trusted publishing, and release/tag administration.
 
-The workflows still have no push/tag publication trigger. Future workflow publication requires explicit manual dispatch,
-confirmation text, trusted-publisher configuration, and environment approval.
+Pushes and tags do not publish. Publishing a version-matched GitHub Release starts the production workflow, which builds
+and tests without OIDC permission before the protected `pypi` environment authorizes a separate Trusted Publishing job.

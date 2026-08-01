@@ -76,17 +76,17 @@ def test_fresh_import_has_no_import_hook_or_subprocess_activity() -> None:
         [
             sys.executable,
             "-c",
-            "import builtins, subprocess; before = builtins.__import__; "
+            "import builtins, subprocess, sys; before = builtins.__import__; "
             "fail = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('subprocess')); "
             "subprocess.run = fail; subprocess.Popen = fail; import depfix; "
-            "print(before is builtins.__import__)",
+            "print(before is builtins.__import__, 'depfix.manager' not in sys.modules)",
         ],
         check=True,
         text=True,
         capture_output=True,
         env=environment,
     )
-    assert result.stdout.strip() == "True"
+    assert result.stdout.strip() == "True True"
 
 
 def test_persistent_default_and_multiple_roots(tmp_path: Path, wheel_factory) -> None:

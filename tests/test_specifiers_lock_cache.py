@@ -7,12 +7,14 @@ import subprocess
 import sys
 import tomllib
 import zipfile
+from nturl2path import url2pathname as windows_url2pathname
 from pathlib import Path
 
 import pytest
 from conftest import file_spec, sha256
 from jsonschema import Draft202012Validator
 
+from depfix import _file_urls
 from depfix.cache import Cache
 from depfix.errors import CacheError, IntegrityError
 from depfix.manifest import computed_graph_id, dumps, load, write
@@ -36,6 +38,14 @@ def test_unified_source_grammar(tmp_path: Path) -> None:
     remote = parse_specifier("py:https://example.test/mod.py#sha256=" + "0" * 64)
     assert remote.kind == "py"
     assert remote.sha256 == "0" * 64
+
+
+def test_file_url_conversion_preserves_windows_drive_letters(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_file_urls, "url2pathname", windows_url2pathname)
+
+    path = _file_urls.file_url_to_path("file:///C:/Users/example/My%20Package/demo.py")
+
+    assert str(path) == r"C:\Users\example\My Package\demo.py"
 
 
 def test_lockfile_is_deterministic_and_round_trips(tmp_path: Path) -> None:

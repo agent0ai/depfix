@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name, parse_sdist_filename, parse_wheel_filename
 
+from ._file_urls import file_url_to_path
 from .errors import SourceError, SpecifierError, redact
 
 _HASH = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -84,7 +85,12 @@ def parse_source(specifier: str, *, base_dir: str | os.PathLike[str] | None = No
     if original.startswith("py:"):
         return _url_source(original, original[3:], kind="py")
     if original.startswith("file:") or _WINDOWS_DRIVE.match(original):
-        value = original[5:] if original.startswith("file:") else original
+        if original.startswith("file://"):
+            value = original
+        elif original.startswith("file:"):
+            value = original[5:]
+        else:
+            value = original
         return _file_source(original, value, base)
     try:
         requirement = Requirement(original)
@@ -240,9 +246,7 @@ def _file_source(original: str, value: str, base: Path) -> SourceInfo:
             # reinterpret the authority as a local path.
             if os.name != "nt":
                 raise SourceError("UNC file URLs are supported only on Windows", request=original)
-            path = Path(f"//{split.netloc}{unquote(split.path)}")
-        else:
-            path = Path(unquote(split.path))
+        path = file_url_to_path(clean)
     elif _WINDOWS_DRIVE.match(clean):
         path = Path(PureWindowsPath(clean))
     else:

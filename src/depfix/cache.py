@@ -15,10 +15,11 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 from platformdirs import user_cache_path
 
+from ._file_urls import file_url_to_path
 from .errors import CacheError, IntegrityError, redact
 from .models import Artifact
 
@@ -329,7 +330,7 @@ def _open_url(
     if split.scheme == "file":
         if split.netloc not in {"", "localhost"}:
             raise CacheError("Remote file URL authorities are not permitted")
-        return _LocalResponse(Path(unquote(split.path)))
+        return _LocalResponse(file_url_to_path(raw_url))
     request = (
         url
         if isinstance(url, urllib.request.Request)

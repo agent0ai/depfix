@@ -18,10 +18,14 @@ All notable changes use this file. The project follows semantic versioning after
 - Adopted the MIT License with Agent Zero ownership and contact metadata.
 - Fixed wheel target promotion on macOS by keeping the staging root owner-writable until `os.replace`, then restoring the
   final read-only cache invariant after atomic promotion.
+- Fixed Windows local module and wheel sources by preserving drive letters in `file:///C:/...` URLs, accepting the
+  platform `Scripts` location for `uv.exe`, and keeping resolver imports lazy until a Depfix API is used.
 - Fixed wheel identity inspection and runtime compatibility for packages such as setuptools that include nested vendored
   metadata, bundled dependencies, logical module-prefix checks, and several public import roots.
 - Reworked the public README around ordinary imports, runtime installation, multiversion packages, production preparation,
   and a GitHub/PyPI-compatible project banner.
+- Added OIDC Trusted Publishing from version-matched GitHub Releases, with package builds isolated from the protected PyPI
+  upload job and no stored PyPI token.
 - Removed ignored install CLI options, made custom install targets require explicit local materialization, modernized SPDX
   license metadata, removed the obsolete pre-registration name check, and expanded release checks for repository hygiene,
   credential patterns, and uv-managed interpreters.
