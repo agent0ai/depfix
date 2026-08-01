@@ -6,4 +6,5 @@ Use these values for the repository's GitHub **About** panel:
 - **Website:** `https://pypi.org/project/depfix/`
 - **Topics:** `python`, `dependencies`, `dependency-isolation`, `imports`, `multiversion`, `packaging`, `uv`
 
-The public README is `README.md`. Its header artwork is `.github/readme-banner.svg`.
+The public README is `README.md`. Its header artwork is `.github/readme-banner.png`, referenced through its absolute
+`raw.githubusercontent.com` URL so it renders on both GitHub and PyPI.

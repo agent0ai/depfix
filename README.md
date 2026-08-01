@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/agent0ai/depfix/main/.github/readme-banner.svg" alt="Depfix — install and import any Python package version" width="100%" />
+  <img src="https://raw.githubusercontent.com/agent0ai/depfix/main/.github/readme-banner.png" alt="Depfix — install and import any Python package version" width="100%" />
 </p>
 
 <h3 align="center">Python dependency problems, solved.</h3>
