@@ -644,7 +644,7 @@ class Cache:
 
     def _delete_artifact(self, digest: str) -> None:
         source_digest = self._source_digest(digest)
-        self.blob_path(digest).unlink(missing_ok=True)
+        _remove_path(self.blob_path(digest))
         _remove_path(self.root / "targets" / digest)
         _remove_path(self.root / "built-wheels" / digest)
         for path in (
@@ -654,11 +654,11 @@ class Cache:
             self.root / "metadata" / "origins" / f"{digest}.json",
             self.root / "metadata" / "imports" / f"{digest}.json",
         ):
-            path.unlink(missing_ok=True)
+            _remove_path(path)
         _remove_path(self._lease_root(digest))
         if source_digest is not None and not self._source_is_referenced(source_digest):
-            self.blob_path(source_digest).unlink(missing_ok=True)
-            (self.root / "metadata" / "origins" / f"{source_digest}.json").unlink(missing_ok=True)
+            _remove_path(self.blob_path(source_digest))
+            _remove_path(self.root / "metadata" / "origins" / f"{source_digest}.json")
 
     def _has_live_lease(self, digest: str) -> bool:
         root = self._lease_root(digest)

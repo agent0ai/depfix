@@ -117,6 +117,26 @@ def test_cleanup_repairs_read_only_tree_before_recursive_removal(
     assert not target.exists()
 
 
+def test_remove_path_repairs_read_only_file_before_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "artifact.whl"
+    artifact.write_bytes(b"wheel")
+    artifact.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    real_unlink = Path.unlink
+
+    def assert_writable_then_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        assert path.stat().st_mode & stat.S_IWUSR
+        real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", assert_writable_then_unlink)
+
+    cache_module._remove_path(artifact)
+
+    assert not artifact.exists()
+
+
 def test_cleanup_skips_active_runtime_then_removes_after_release(tmp_path: Path, wheel_factory) -> None:
     _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
     artifact = graph.artifacts[0]

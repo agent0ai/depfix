@@ -7,6 +7,8 @@ All notable changes use this file. The project follows semantic versioning after
 - Hardened production release automation so a manual annotated-tag dispatch must pass version, changelog, current-main,
   PyPI-absence, complete cross-platform CI, and distribution checks before staging a hidden release draft or enabling
   OIDC publication of the exact checked artifacts; the GitHub Release becomes public only after PyPI verification.
+- Fixed cache cleanup on Windows by restoring owner write permission before deleting read-only artifact and metadata
+  files, matching the existing recursive materialization cleanup behavior.
 
 ## 0.4.1 - 2026-08-02
 
