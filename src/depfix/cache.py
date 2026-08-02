@@ -780,10 +780,26 @@ def _remove_path(path: Path) -> None:
     def make_writable_and_retry(function, value, _error):  # type: ignore[no-untyped-def]
         candidate = Path(value)
         with contextlib.suppress(OSError):
+            candidate.parent.chmod(stat.S_IRWXU)
+        with contextlib.suppress(OSError):
             candidate.chmod(stat.S_IRUSR | stat.S_IWUSR | (stat.S_IXUSR if candidate.is_dir() else 0))
         function(value)
 
     if path.is_dir():
+        for directory, child_directories, files in os.walk(path, topdown=True, followlinks=False):
+            current = Path(directory)
+            with contextlib.suppress(OSError):
+                current.chmod(stat.S_IRWXU)
+            for name in child_directories:
+                candidate = current / name
+                if not candidate.is_symlink():
+                    with contextlib.suppress(OSError):
+                        candidate.chmod(stat.S_IRWXU)
+            for name in files:
+                candidate = current / name
+                if not candidate.is_symlink():
+                    with contextlib.suppress(OSError):
+                        candidate.chmod(stat.S_IRUSR | stat.S_IWUSR)
         shutil.rmtree(path, onerror=make_writable_and_retry)
     else:
         with contextlib.suppress(OSError):

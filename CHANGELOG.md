@@ -4,6 +4,11 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.4.1 - 2026-08-02
+
+- Fixed cleanup of read-only cache targets for non-root accounts by restoring owner write permissions across the target
+  tree before recursive removal.
+
 ## 0.4.0 - 2026-08-02
 
 - Added shared-cache lifecycle management with installation and last-use timestamps, total package footprint inventory,

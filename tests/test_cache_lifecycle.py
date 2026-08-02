@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -87,6 +88,33 @@ def test_cleanup_reclaims_stale_artifact_and_all_targets(tmp_path: Path, wheel_f
     assert not cache.blob_path(artifact.sha256).exists()
     assert not (cache.root / "targets" / artifact.sha256).exists()
     assert cache.list_packages() == ()
+
+
+def test_cleanup_repairs_read_only_tree_before_recursive_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    nested = target / "package"
+    nested.mkdir(parents=True)
+    module = nested / "module.py"
+    module.write_text("VALUE = 1\n", encoding="utf-8")
+    module.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    nested.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    target.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    real_rmtree = cache_module.shutil.rmtree
+
+    def assert_writable_then_remove(path, **kwargs):  # type: ignore[no-untyped-def]
+        tree = Path(path)
+        assert tree.stat().st_mode & stat.S_IWUSR
+        assert all(item.stat().st_mode & stat.S_IWUSR for item in tree.rglob("*") if not item.is_symlink())
+        real_rmtree(path, **kwargs)
+
+    monkeypatch.setattr(cache_module.shutil, "rmtree", assert_writable_then_remove)
+
+    cache_module._remove_path(target)
+
+    assert not target.exists()
 
 
 def test_cleanup_skips_active_runtime_then_removes_after_release(tmp_path: Path, wheel_factory) -> None:
