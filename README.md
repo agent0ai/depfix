@@ -240,9 +240,32 @@ python application.py
 This is optional. You can start with one import and add deployment controls only when you need them. Offline bundles,
 containers, and generated IDE aliases are also available.
 
+## The shared cache cleans itself
+
+Depfix reuses one package store across projects, repositories, and working directories. It records when each exact package
+artifact was installed and when Depfix last imported it. Once per day, a lightweight background check removes packages
+that have gone unused for 30 days. The graph being prepared and packages held by active Depfix runtimes are always
+protected, so returning to an older project does not delete and immediately reinstall its own dependencies.
+
+Inspect or clean the store explicitly from the CLI:
+
+```bash
+depfix cache list
+depfix cache cleanup --days 30
+depfix cache remove requests --version 2.31.0
+```
+
+The same operations are available as `depfix.list_cached_packages()`, `depfix.cleanup_cache()`, and
+`depfix.remove_cached_package()`. Change the retention window or disable automatic cleanup centrally:
+
+```python
+depfix.configure(cache_retention_days=60, cache_auto_cleanup=False)
+```
+
 ## Good to know
 
 - Importing `depfix` alone does nothing expensive. Installation starts only when you call a loading function.
+- Automatic cache cleanup defaults to packages unused for 30 days and runs off the import path in a background sweep.
 - Package preparation is shown on stderr, so you can see what is happening. Set `DEPFIX_LOG_LEVEL=WARNING` for quiet mode.
 - Depfix supports pure-Python and native wheel packages on CPython 3.11–3.13. Automatic mode isolates pure dependency
   graphs and loads native graphs through guarded, conventional Python imports.

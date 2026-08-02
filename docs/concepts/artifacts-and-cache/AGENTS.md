@@ -13,6 +13,10 @@
 - Blob identity is SHA-256 content identity; completed extracted targets are environment-specific and read-only.
 - Cache mutation uses bounded input, locks, temporary construction, verification, and atomic promotion.
 - Staging roots remain owner-writable only through promotion for Darwin compatibility; completed roots are hardened.
+- Lifecycle metadata is mutable and separate from package content: preserve the first installation time, mark successful
+  imports, include retained artifact/build/target size, and keep cleanup from removing reserved or live-leased packages.
+- Automatic retention defaults to 30 unused days, runs at most daily outside the foreground import path, and shares its
+  selection/removal rules with the Python and CLI cache APIs.
 
 ## Work Guidance
 

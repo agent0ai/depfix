@@ -20,6 +20,8 @@
   private-helper and compatibility-alias best effort, namespace contribution merging, and scoped first-use/reuse behavior.
 - Unsafe-loading tests must cover per-request/global precedence, deny-by-default remediation, manifest persistence, and a
   real compiled-extension path when the interpreter provides a suitable test extension.
+- Cache lifecycle tests must cover installation/use timestamps, total reclaimed targets, returning-graph reservations,
+  active-runtime leases, retention configuration precedence, and equivalent Python/CLI list and removal behavior.
 
 ## Work Guidance
 

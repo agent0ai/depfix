@@ -21,6 +21,23 @@ The default root comes from `platformdirs.user_cache_path("depfix")`, with forma
 areas include `artifacts/sha256`, `targets`, `resolutions`, `manifests`, `metadata`, `ide`, `locks`, `tools/uv`, and
 `built-wheels`. `DEPFIX_CACHE_DIR` or `depfix.configure(cache_dir=...)` changes the parent location.
 
+Mutable lifecycle records are separate from immutable content. Depfix records an artifact's first installation time once,
+then updates a coalesced usage marker after successful package imports. `depfix cache list` combines those records with the
+blob, materialized targets, retained build output, and source-archive footprint. Legacy installed targets without
+lifecycle metadata remain visible as `unknown` artifacts and use their filesystem modification time as the conservative
+installation time.
+
+Automatic retention defaults to 30 unused days. A missing maintenance clock is initialized without scanning, and later
+daily checks run in a daemon thread so ordinary imports only pay a constant-time timestamp check. The current graph is
+reserved before synchronization, which prevents a returning application from evicting and refetching its own packages.
+Active runtimes hold per-artifact, cross-process leases; cleanup skips live leases and clears stale process markers.
+Removal takes the same target and artifact mutation locks as installation before deleting the blob, every environment
+target, lifecycle metadata, retained built wheel, and an unshared source archive.
+
+Explicit `cleanup_cache()` / `depfix cache cleanup` operations use the same retention and lease rules. Exact package
+removal uses `remove_cached_package()` / `depfix cache remove`; dry-run mode reports the selection and reclaimable bytes
+without deleting it. Full `depfix cache clean` remains the deliberate operation for deleting the complete cache root.
+
 Extracted files and child directories are hardened before promotion. The staging root remains owner-writable until the
 atomic rename because Darwin rejects renaming a write-disabled directory; Depfix hardens the completed root immediately
 after promotion while the cache mutation lock is still held.

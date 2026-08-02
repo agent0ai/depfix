@@ -24,7 +24,12 @@ Inspection and operation:
 - `migrate requirements.txt` or `migrate pyproject.toml` creates reviewable dynamic declarations.
 - `requirements export MANIFEST --realm NODE --output FILE` emits one realm with exact hashes.
 - `pip ...` delegates conventional environment work to `uv pip`; it does not create a Depfix realm.
-- `cache dir|list|verify|prune|clean` inspects or explicitly maintains the global cache.
+- `cache dir` prints the shared cache path. `cache list` reports each installed distribution/version with its artifact
+  hash, UTC installation and last-use timestamps, and total bytes.
+- `cache cleanup [--days N] [--dry-run]` removes inactive artifacts older than the configured 30-day default.
+- `cache remove PACKAGE [--version VERSION] [--artifact SHA256] [--dry-run]` removes an exact package selection while
+  preserving artifacts being prepared or leased by active runtimes.
+- `cache verify|prune|clean` retains the low-level integrity, manifest-reference, and complete-root maintenance commands.
 
 IDE commands are `ide sync`, `path`, `configure`, `attach`, `detach`, `status`, and `clean`. Attaching is allowed only in an
 active virtual environment and writes a graph-specific `.pth`; `detach` removes it. Generated configuration puts the

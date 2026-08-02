@@ -4,6 +4,12 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.4.0 - 2026-08-02
+
+- Added shared-cache lifecycle management with installation and last-use timestamps, total package footprint inventory,
+  cross-process active-runtime leases, returning-graph protection, configurable 30-day background retention, and matched
+  Python/CLI list, cleanup, dry-run, and exact-removal operations.
+
 ## 0.3.0 - 2026-08-02
 
 - Added request-scoped `auto`, `inprocess`, and `shared` import modes. Pure graphs retain synthetic multiversion realms;

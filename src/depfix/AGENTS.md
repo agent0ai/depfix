@@ -23,6 +23,9 @@
   before cache promotion.
 - Cross-process cache locks retry transient Windows permission races without masking permanent permission failures on
   other platforms.
+- Cache lifecycle metadata preserves first installation time and coalesces successful-import usage writes. Automatic
+  retention uses a daily background sweep, protects the graph before synchronization, and skips cross-process leases held
+  by active runtimes; explicit inventory, cleanup, dry-run, and removal APIs use the same artifact/target lock boundary.
 - Decode local `file:` URLs with platform-native rules, including Windows drive-letter and UNC path forms.
 - Realm imports preserve module identity and prevent undeclared cross-realm leakage.
 - Package compatibility fallbacks may use modules embedded in the same selected artifact; declared dependency providers

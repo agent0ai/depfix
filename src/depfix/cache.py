@@ -2,22 +2,29 @@
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import hashlib
 import http.client
 import json
 import os
 import platform
+import shutil
 import stat
 import sys
 import sysconfig
 import tempfile
+import threading
 import time
 import urllib.request
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from packaging.utils import canonicalize_name
 from platformdirs import user_cache_path
 
 from ._file_urls import file_url_to_path
@@ -27,6 +34,60 @@ from .models import Artifact
 _IS_WINDOWS = os.name == "nt"
 _DEFAULT_MAX_ARTIFACT_SIZE = 1024 * 1024 * 1024
 _DOWNLOAD_ATTEMPTS = 3
+_AUTOMATIC_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
+_RESERVATION_GRACE_SECONDS = 60 * 60
+_USAGE_WRITE_INTERVAL_SECONDS = 60 * 60
+
+
+@dataclass(frozen=True, slots=True)
+class CachedPackage:
+    """One installed, content-addressed package artifact."""
+
+    distribution: str
+    version: str
+    artifact_hash: str
+    filename: str
+    installed_at: datetime
+    last_used_at: datetime | None
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class CacheCleanupResult:
+    """Packages selected by a cleanup/removal operation."""
+
+    removed: tuple[CachedPackage, ...]
+    skipped_active: tuple[CachedPackage, ...]
+    reclaimed_bytes: int
+    dry_run: bool = False
+
+
+class CacheLease:
+    """Cross-process marker keeping active runtime artifacts out of cleanup."""
+
+    def __init__(self, cache: Cache, artifact_hashes: set[str]) -> None:
+        self._cache = cache
+        self._paths: list[Path] = []
+        token = f"{os.getpid()}-{uuid.uuid4().hex}.lease"
+        try:
+            for digest in sorted(artifact_hashes):
+                with cache._artifact_lock(digest):
+                    path = cache._lease_root(digest) / token
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(str(os.getpid()) + "\n", encoding="ascii")
+                    self._paths.append(path)
+        except BaseException:
+            self.close()
+            raise
+        atexit.register(self.close)
+
+    def close(self) -> None:
+        paths, self._paths = self._paths, []
+        for path in paths:
+            with contextlib.suppress(OSError):
+                path.unlink()
+            with contextlib.suppress(OSError):
+                path.parent.rmdir()
 
 
 class Cache:
@@ -41,6 +102,8 @@ class Cache:
         self.root = (root or (Path(configured) if configured else user_cache_path("depfix"))) / "v1"
         self.max_artifact_size = max_artifact_size
         self.timeout = timeout
+        self._usage_updates: dict[str, float] = {}
+        self._usage_guard = threading.Lock()
 
     def blob_path(self, sha256: str) -> Path:
         return self.root / "artifacts" / "sha256" / sha256[:2] / sha256
@@ -323,6 +386,137 @@ class Cache:
                 removed.append(path)
         return removed
 
+    def record_artifact(self, artifact: Artifact) -> None:
+        """Persist immutable installation identity without resetting its age."""
+        path = self._package_metadata_path(artifact.sha256)
+        if path.is_file():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._artifact_lock("metadata-" + artifact.sha256):
+            if not path.is_file():
+                data = {
+                    "format_version": 1,
+                    "sha256": artifact.sha256,
+                    "distribution": artifact.distribution,
+                    "version": artifact.version,
+                    "filename": artifact.filename,
+                    "installed_at": time.time(),
+                    "source_sha256": artifact.source_sha256,
+                }
+                temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+                try:
+                    temporary.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
+                    os.replace(temporary, path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+        self._initialize_cleanup_clock()
+
+    def mark_used(self, artifact: Artifact) -> None:
+        """Record successful package use, coalescing writes within one process."""
+        self.record_artifact(artifact)
+        now = time.time()
+        with self._usage_guard:
+            previous = self._usage_updates.get(artifact.sha256)
+            if previous is not None and now - previous < _USAGE_WRITE_INTERVAL_SECONDS:
+                return
+            self._usage_updates[artifact.sha256] = now
+        path = self._usage_path(artifact.sha256)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+        os.utime(path, (now, now))
+
+    def reserve_artifacts(self, artifact_hashes: set[str]) -> None:
+        """Briefly protect a graph that is about to synchronize and activate."""
+        now = time.time()
+        root = self.root / "metadata" / "reservations"
+        root.mkdir(parents=True, exist_ok=True)
+        for digest in artifact_hashes:
+            path = root / f"{digest}.touch"
+            path.touch(exist_ok=True)
+            os.utime(path, (now, now))
+
+    def lease(self, artifact_hashes: set[str]) -> CacheLease:
+        return CacheLease(self, artifact_hashes)
+
+    def list_packages(self) -> tuple[CachedPackage, ...]:
+        """Return installed artifacts with lifecycle and total footprint data."""
+        digests: set[str] = set()
+        targets = self.root / "targets"
+        if targets.is_dir():
+            digests.update(path.name for path in targets.iterdir() if path.is_dir() and _is_sha256(path.name))
+        built_wheels = self.root / "built-wheels"
+        if built_wheels.is_dir():
+            digests.update(path.name for path in built_wheels.iterdir() if path.is_dir() and _is_sha256(path.name))
+        metadata = self.root / "metadata" / "packages"
+        if metadata.is_dir():
+            digests.update(path.stem for path in metadata.glob("*.json") if _is_sha256(path.stem))
+        entries = [entry for digest in digests if (entry := self._package_entry(digest)) is not None]
+        return tuple(sorted(entries, key=lambda item: (item.distribution, item.version, item.artifact_hash)))
+
+    def cleanup(
+        self,
+        days: int,
+        *,
+        protected_hashes: set[str] | None = None,
+        dry_run: bool = False,
+    ) -> CacheCleanupResult:
+        """Remove artifacts unused for at least ``days`` while preserving active leases."""
+        if isinstance(days, bool) or not isinstance(days, int) or days < 0:
+            raise ValueError("cache cleanup days must be a non-negative integer")
+        now = time.time()
+        cutoff = now - days * 24 * 60 * 60
+        protected = protected_hashes or set()
+        candidates = [
+            entry
+            for entry in self.list_packages()
+            if entry.artifact_hash not in protected and self._last_relevant_time(entry, now) <= cutoff
+        ]
+        result = self._remove_entries(
+            candidates,
+            protected_hashes=protected,
+            dry_run=dry_run,
+            eligible_before=cutoff,
+        )
+        self._touch_cleanup_clock()
+        return result
+
+    def remove_package(
+        self,
+        distribution: str,
+        *,
+        version: str | None = None,
+        artifact_hash: str | None = None,
+        dry_run: bool = False,
+    ) -> CacheCleanupResult:
+        """Remove cached artifacts matching one normalized distribution selection."""
+        selected = str(canonicalize_name(distribution))
+        entries = tuple(
+            entry
+            for entry in self.list_packages()
+            if entry.distribution == selected
+            and (version is None or entry.version == version)
+            and (artifact_hash is None or entry.artifact_hash == artifact_hash.removeprefix("sha256:"))
+        )
+        return self._remove_entries(entries, protected_hashes=set(), dry_run=dry_run)
+
+    def automatic_cleanup_due(self, *, interval_seconds: int = _AUTOMATIC_CLEANUP_INTERVAL_SECONDS) -> bool:
+        """Cheaply report whether the background retention sweep is due."""
+        marker = self._cleanup_clock_path()
+        if not marker.exists():
+            self._initialize_cleanup_clock()
+            return False
+        try:
+            return time.time() - marker.stat().st_mtime >= interval_seconds
+        except OSError:
+            return False
+
+    def automatic_cleanup(self, days: int, *, protected_hashes: set[str]) -> CacheCleanupResult | None:
+        """Run one cross-process daily sweep, or return when another process already did."""
+        with self.lock("automatic-cleanup"):
+            if not self.automatic_cleanup_due():
+                return None
+            return self.cleanup(days, protected_hashes=protected_hashes)
+
     @contextlib.contextmanager
     def lock(self, key: str):  # type: ignore[no-untyped-def]
         """Serialize a cache mutation across threads/processes using a bounded key."""
@@ -351,6 +545,297 @@ class Cache:
             encoding="utf-8",
         )
         os.replace(temporary, path)
+
+    def _package_entry(self, digest: str) -> CachedPackage | None:
+        blob = self.blob_path(digest)
+        target = self.root / "targets" / digest
+        built_wheel = self.root / "built-wheels" / digest
+        if not blob.is_file() and not target.is_dir() and not built_wheel.is_dir():
+            return None
+        data: dict[str, object] = {}
+        try:
+            loaded = json.loads(self._package_metadata_path(digest).read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, TypeError, json.JSONDecodeError):
+            pass
+        installed = _positive_timestamp(data.get("installed_at"))
+        if installed is None:
+            installed = min(self._artifact_mtimes(digest), default=time.time())
+        usage = self._usage_path(digest)
+        try:
+            last_used = usage.stat().st_mtime
+        except OSError:
+            last_used = None
+        distribution = str(data.get("distribution") or "unknown")
+        if distribution != "unknown":
+            distribution = str(canonicalize_name(distribution))
+        source_digest = str(data.get("source_sha256") or "")
+        source_blob = (
+            self.blob_path(source_digest)
+            if _is_sha256(source_digest)
+            and source_digest != digest
+            and self._source_is_exclusive(source_digest, owner_digest=digest)
+            else None
+        )
+        return CachedPackage(
+            distribution=distribution,
+            version=str(data.get("version") or ""),
+            artifact_hash=digest,
+            filename=str(data.get("filename") or blob.name),
+            installed_at=datetime.fromtimestamp(installed, UTC),
+            last_used_at=datetime.fromtimestamp(last_used, UTC) if last_used is not None else None,
+            size_bytes=(
+                (blob.stat().st_size if blob.is_file() else 0)
+                + _directory_size(target)
+                + _directory_size(built_wheel)
+                + (source_blob.stat().st_size if source_blob is not None and source_blob.is_file() else 0)
+            ),
+        )
+
+    def _last_relevant_time(self, entry: CachedPackage, now: float) -> float:
+        relevant = entry.last_used_at.timestamp() if entry.last_used_at is not None else entry.installed_at.timestamp()
+        reservation = self.root / "metadata" / "reservations" / f"{entry.artifact_hash}.touch"
+        try:
+            reserved_at = reservation.stat().st_mtime
+        except OSError:
+            return relevant
+        if now - reserved_at <= _RESERVATION_GRACE_SECONDS:
+            relevant = max(relevant, reserved_at)
+        return relevant
+
+    def _has_live_reservation(self, digest: str, now: float) -> bool:
+        path = self.root / "metadata" / "reservations" / f"{digest}.touch"
+        try:
+            return now - path.stat().st_mtime <= _RESERVATION_GRACE_SECONDS
+        except OSError:
+            return False
+
+    def _remove_entries(
+        self,
+        entries: tuple[CachedPackage, ...] | list[CachedPackage],
+        *,
+        protected_hashes: set[str],
+        dry_run: bool,
+        eligible_before: float | None = None,
+    ) -> CacheCleanupResult:
+        removed: list[CachedPackage] = []
+        skipped: list[CachedPackage] = []
+        reclaimed = 0
+        for original in entries:
+            digest = original.artifact_hash
+            if digest in protected_hashes:
+                skipped.append(original)
+                continue
+            with self.lock("target:sha256:" + digest), self._artifact_lock(digest):
+                current = self._package_entry(digest)
+                if current is None:
+                    continue
+                if eligible_before is not None and self._last_relevant_time(current, time.time()) > eligible_before:
+                    continue
+                if self._has_live_reservation(digest, time.time()) or self._has_live_lease(digest):
+                    skipped.append(current)
+                    continue
+                removed.append(current)
+                reclaimed += current.size_bytes
+                if not dry_run:
+                    self._delete_artifact(digest)
+        return CacheCleanupResult(tuple(removed), tuple(skipped), reclaimed, dry_run)
+
+    def _delete_artifact(self, digest: str) -> None:
+        source_digest = self._source_digest(digest)
+        self.blob_path(digest).unlink(missing_ok=True)
+        _remove_path(self.root / "targets" / digest)
+        _remove_path(self.root / "built-wheels" / digest)
+        for path in (
+            self._package_metadata_path(digest),
+            self._usage_path(digest),
+            self.root / "metadata" / "reservations" / f"{digest}.touch",
+            self.root / "metadata" / "origins" / f"{digest}.json",
+            self.root / "metadata" / "imports" / f"{digest}.json",
+        ):
+            path.unlink(missing_ok=True)
+        _remove_path(self._lease_root(digest))
+        if source_digest is not None and not self._source_is_referenced(source_digest):
+            self.blob_path(source_digest).unlink(missing_ok=True)
+            (self.root / "metadata" / "origins" / f"{source_digest}.json").unlink(missing_ok=True)
+
+    def _has_live_lease(self, digest: str) -> bool:
+        root = self._lease_root(digest)
+        if not root.is_dir():
+            return False
+        live = False
+        for path in root.glob("*.lease"):
+            try:
+                pid = int(path.name.split("-", 1)[0])
+            except (ValueError, IndexError):
+                path.unlink(missing_ok=True)
+                continue
+            if _pid_is_running(pid):
+                live = True
+            else:
+                path.unlink(missing_ok=True)
+        if not live:
+            with contextlib.suppress(OSError):
+                root.rmdir()
+        return live
+
+    def _artifact_mtimes(self, digest: str) -> list[float]:
+        paths = (
+            self.blob_path(digest),
+            self.root / "targets" / digest,
+            self.root / "built-wheels" / digest,
+        )
+        result: list[float] = []
+        for path in paths:
+            try:
+                result.append(path.stat().st_mtime)
+            except OSError:
+                pass
+        return result
+
+    def _source_digest(self, digest: str) -> str | None:
+        try:
+            data = json.loads(self._package_metadata_path(digest).read_text(encoding="utf-8"))
+        except (OSError, TypeError, json.JSONDecodeError):
+            return None
+        value = str(data.get("source_sha256") or "") if isinstance(data, dict) else ""
+        return value if _is_sha256(value) and value != digest else None
+
+    def _source_is_referenced(self, source_digest: str) -> bool:
+        metadata = self.root / "metadata" / "packages"
+        if not metadata.is_dir():
+            return False
+        if self._package_metadata_path(source_digest).is_file():
+            return True
+        return any(self._source_digest(path.stem) == source_digest for path in metadata.glob("*.json"))
+
+    def _source_is_exclusive(self, source_digest: str, *, owner_digest: str) -> bool:
+        metadata = self.root / "metadata" / "packages"
+        if self._package_metadata_path(source_digest).is_file():
+            return False
+        if not metadata.is_dir():
+            return True
+        return not any(
+            path.stem != owner_digest and self._source_digest(path.stem) == source_digest
+            for path in metadata.glob("*.json")
+        )
+
+    def _package_metadata_path(self, digest: str) -> Path:
+        return self.root / "metadata" / "packages" / f"{digest}.json"
+
+    def _usage_path(self, digest: str) -> Path:
+        return self.root / "metadata" / "usage" / f"{digest}.touch"
+
+    def _lease_root(self, digest: str) -> Path:
+        return self.root / "metadata" / "leases" / digest
+
+    def _cleanup_clock_path(self) -> Path:
+        return self.root / "metadata" / "cleanup.touch"
+
+    def _initialize_cleanup_clock(self) -> None:
+        marker = self._cleanup_clock_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            marker.touch(exist_ok=False)
+        except FileExistsError:
+            pass
+
+    def _touch_cleanup_clock(self) -> None:
+        marker = self._cleanup_clock_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch(exist_ok=True)
+        os.utime(marker, None)
+
+
+def _positive_timestamp(value: object) -> float | None:
+    try:
+        timestamp = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return timestamp if timestamp > 0 else None
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value.lower())
+
+
+def _directory_size(path: Path) -> int:
+    if not path.is_dir():
+        return 0
+    total = 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _remove_path(path: Path) -> None:
+    if not path.exists():
+        return
+
+    def make_writable_and_retry(function, value, _error):  # type: ignore[no-untyped-def]
+        candidate = Path(value)
+        with contextlib.suppress(OSError):
+            candidate.chmod(stat.S_IRUSR | stat.S_IWUSR | (stat.S_IXUSR if candidate.is_dir() else 0))
+        function(value)
+
+    if path.is_dir():
+        shutil.rmtree(path, onerror=make_writable_and_retry)
+    else:
+        with contextlib.suppress(OSError):
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        path.unlink(missing_ok=True)
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if _IS_WINDOWS:
+        return _windows_pid_is_running(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _windows_pid_is_running(pid: int) -> bool:
+    """Query process state without using ``os.kill(pid, 0)``, which terminates on Windows."""
+    import ctypes
+
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        return False
+    kernel32 = windll.kernel32
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.GetLastError.restype = ctypes.c_ulong
+    handle = kernel32.OpenProcess(process_query_limited_information, 0, pid)
+    if not handle:
+        return int(kernel32.GetLastError()) == 5
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _hash_file(path: Path) -> str:

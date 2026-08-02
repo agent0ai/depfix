@@ -96,6 +96,9 @@ Default section order:
   native loading instead of overstating isolation.
 - Keep `depfix.configure()` as the single process-wide Python configuration entry point. Unsafe loading stays disabled by
   default, is overridable per loading request, and never bypasses integrity, network, or incompatible-owner checks.
+- Keep the cross-project package cache observable and bounded: record first installation and successful import use,
+  protect returning graphs and active runtimes, run configurable retention work off the import path, and expose matching
+  Python and CLI inventory/removal operations.
 - Publish production PyPI releases only from deliberately published, version-matched GitHub Releases through the protected
   `pypi` environment and OIDC Trusted Publishing; never store a PyPI API token or publish from a push/tag alone.
 - Keep the local `.env` owner-readable only for explicitly authorized publication; never print, package, or commit it or

@@ -7,7 +7,7 @@ import json
 import platform
 import sys
 from pathlib import Path
-from threading import RLock
+from threading import RLock, Thread
 from types import ModuleType
 from typing import TYPE_CHECKING
 
@@ -15,6 +15,7 @@ from .cache import Cache
 from .config import ImportDeclaration, ProjectConfig
 from .dispatcher import ImportSelection, ModuleBinding, reset_dispatcher_state
 from .errors import (
+    CacheError,
     FrozenManifestError,
     InvalidUsingScopeError,
     ManifestMismatchError,
@@ -38,6 +39,7 @@ _active_runtimes: dict[tuple[str, str, str, bool], DepfixRuntime] = {}
 _memory_requests: dict[str, tuple[DepfixRuntime, Alias]] = {}
 _memory_groups: dict[str, ImportSelection] = {}
 _request_locks: dict[str, RLock] = {}
+_maintenance_roots: set[str] = set()
 _guard = RLock()
 
 
@@ -87,7 +89,7 @@ def prepare_request(
                 selected_isolation,
                 settings,
             )
-            sync_graph(graph, cache, offline=settings.offline, progress=progress)
+            _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
             runtime = _runtime(
                 graph,
                 cache,
@@ -104,7 +106,7 @@ def prepare_request(
                 alias = graph.aliases[0]
                 # A warm resolution may refetch an evicted exact artifact, but
                 # it never asks uv to resolve the request again.
-                sync_graph(graph, cache, offline=settings.offline, progress=progress)
+                _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
                 runtime = _runtime(
                     graph,
                     cache,
@@ -144,7 +146,7 @@ def prepare_request(
                     )
                 )
                 alias = graph.aliases[0]
-                sync_graph(graph, cache, offline=settings.offline, progress=progress)
+                _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
                 resolution_path.parent.mkdir(parents=True, exist_ok=True)
                 write_manifest(graph, resolution_path)
                 runtime = _runtime(
@@ -155,6 +157,7 @@ def prepare_request(
                     allow_unsafe=settings.allow_unsafe,
                     root_nodes=(alias.node,),
                 )
+        _schedule_cache_cleanup(cache, settings, graph)
         with _guard:
             _memory_requests[identity] = (runtime, alias)
         root = graph.node_index[alias.node]
@@ -226,7 +229,7 @@ def prepare_import_selection(
             graph = load_manifest(settings.manifest)
             assert_compatible_environment(graph, settings.manifest)
             aliases = _match_manifest_group(graph, normalized, mode, selected_isolation, settings)
-            sync_graph(graph, cache, offline=settings.offline, progress=progress)
+            _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
             runtime = _runtime(
                 graph,
                 cache,
@@ -241,7 +244,7 @@ def prepare_import_selection(
                 graph = load_manifest(resolution_path)
                 assert_compatible_environment(graph, resolution_path)
                 aliases = graph.aliases
-                sync_graph(graph, cache, offline=settings.offline, progress=progress)
+                _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
                 runtime = _runtime(
                     graph,
                     cache,
@@ -282,7 +285,7 @@ def prepare_import_selection(
                     )
                 )
                 aliases = graph.aliases
-                sync_graph(graph, cache, offline=settings.offline, progress=progress)
+                _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
                 resolution_path.parent.mkdir(parents=True, exist_ok=True)
                 write_manifest(graph, resolution_path)
                 runtime = _runtime(
@@ -293,6 +296,7 @@ def prepare_import_selection(
                     allow_unsafe=settings.allow_unsafe,
                     root_nodes=tuple(alias.node for alias in aliases),
                 )
+        _schedule_cache_cleanup(cache, settings, graph)
         selection = _selection_from_aliases(
             graph,
             runtime,
@@ -314,6 +318,7 @@ def activate_manifest(path: Path, settings: Settings) -> DepfixRuntime:
     graph = load_manifest(path)
     assert_compatible_environment(graph, path)
     cache = Cache(settings.cache_dir)
+    cache.reserve_artifacts({artifact.sha256 for artifact in graph.artifacts})
     for artifact in graph.artifacts:
         cache.verify_blob(artifact.sha256, size=artifact.size)
     sync_graph(graph, cache, offline=True)
@@ -327,6 +332,7 @@ def activate_manifest(path: Path, settings: Settings) -> DepfixRuntime:
         register_active=False,
     )
     runtime.enable_alias_mode_dispatch()
+    _schedule_cache_cleanup(cache, settings, graph)
     return runtime
 
 
@@ -360,6 +366,43 @@ def reset_runtime_state() -> None:
         _memory_groups.clear()
         _request_locks.clear()
     reset_dispatcher_state()
+
+
+def _sync_with_reservation(
+    graph: LockedGraph,
+    cache: Cache,
+    *,
+    offline: bool,
+    progress: ProgressReporter | None,
+) -> None:
+    cache.reserve_artifacts({artifact.sha256 for artifact in graph.artifacts})
+    sync_graph(graph, cache, offline=offline, progress=progress)
+
+
+def _schedule_cache_cleanup(cache: Cache, settings: Settings, graph: LockedGraph) -> None:
+    if not settings.cache_auto_cleanup or not cache.automatic_cleanup_due():
+        return
+    root = str(cache.root.resolve())
+    with _guard:
+        if root in _maintenance_roots:
+            return
+        _maintenance_roots.add(root)
+        protected = {artifact.sha256 for artifact in graph.artifacts}
+        for runtime in set(_runtimes.values()):
+            if runtime.cache.root.resolve() == cache.root.resolve():
+                protected.update(runtime.artifact_hashes)
+
+    def maintain() -> None:
+        try:
+            cache.automatic_cleanup(settings.cache_retention_days, protected_hashes=protected)
+        except (CacheError, OSError, ValueError):
+            # Retention is opportunistic; explicit cache commands surface errors.
+            pass
+        finally:
+            with _guard:
+                _maintenance_roots.discard(root)
+
+    Thread(target=maintain, name="depfix-cache-cleanup", daemon=True).start()
 
 
 def runtime_for_graph(graph_id: str, node_id: str, allow_unsafe: bool = False) -> DepfixRuntime:

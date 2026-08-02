@@ -14,6 +14,7 @@ import sys
 import sysconfig
 import tomllib
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +132,14 @@ def _parser() -> argparse.ArgumentParser:
     cache_commands = cache.add_subparsers(dest="cache_command", required=True)
     for name in ("dir", "list", "prune", "clean", "verify"):
         cache_commands.add_parser(name)
+    cleanup = cache_commands.add_parser("cleanup", help="remove packages unused beyond a retention window")
+    cleanup.add_argument("--days", type=int, help="unused days; defaults to configured cache retention")
+    cleanup.add_argument("--dry-run", action="store_true")
+    remove = cache_commands.add_parser("remove", help="remove one cached distribution selection")
+    remove.add_argument("package")
+    remove.add_argument("--version")
+    remove.add_argument("--artifact")
+    remove.add_argument("--dry-run", action="store_true")
     for command in commands.choices.values():
         _common_output_options(command)
     return parser
@@ -288,7 +297,7 @@ def _dispatch(args: argparse.Namespace) -> object | None:
             return 0
         return backend.passthrough(args.arguments)
     if args.command == "cache":
-        return _cache(args.cache_command, args.cache_dir)
+        return _cache(args)
     raise ValueError(f"unsupported command {args.command}")
 
 
@@ -543,13 +552,14 @@ def _ide(args: argparse.Namespace) -> object:
     raise ValueError(args.ide_command)
 
 
-def _cache(command: str, cache_dir: Path | None) -> object:
-    settings = resolve_settings(cache_dir=cache_dir, discover=False)
+def _cache(args: argparse.Namespace) -> object:
+    settings = resolve_settings(cache_dir=args.cache_dir, discover=True)
     cache = Cache(settings.cache_dir)
+    command = args.cache_command
     if command == "dir":
         return {"path": str(cache.root)}
     if command == "list":
-        return [{"sha256": path.name, "size": path.stat().st_size, "path": str(path)} for path in cache.list_blobs()]
+        return list(cache.list_packages())
     if command == "verify":
         for path in cache.list_blobs():
             cache.verify_blob(path.name)
@@ -564,6 +574,16 @@ def _cache(command: str, cache_dir: Path | None) -> object:
         if cache.root.exists():
             shutil.rmtree(cache.root)
         return {"cleaned": str(cache.root)}
+    if command == "cleanup":
+        days = settings.cache_retention_days if args.days is None else args.days
+        return cache.cleanup(days, dry_run=args.dry_run)
+    if command == "remove":
+        return cache.remove_package(
+            args.package,
+            version=args.version,
+            artifact_hash=args.artifact,
+            dry_run=args.dry_run,
+        )
     raise ValueError(command)
 
 
@@ -604,6 +624,8 @@ def _serialize(value: object) -> object:
         return {name: _serialize(getattr(value, name)) for name in value.__dataclass_fields__}
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
     if isinstance(value, tuple):
         return [_serialize(item) for item in value]
     if isinstance(value, list):

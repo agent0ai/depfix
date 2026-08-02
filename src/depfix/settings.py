@@ -22,6 +22,8 @@ class Settings:
     offline: bool = False
     allow_unsafe: bool = False
     cache_dir: Path = user_cache_path("depfix")
+    cache_retention_days: int = 30
+    cache_auto_cleanup: bool = True
     uv: Path | None = None
     index_url: str | None = None
     extra_index_url: tuple[str, ...] = ()
@@ -40,6 +42,8 @@ def configure(
     offline: bool | None = None,
     allow_unsafe: bool | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
+    cache_retention_days: int | None = None,
+    cache_auto_cleanup: bool | None = None,
     uv: str | os.PathLike[str] | None = None,
     index_url: str | None = None,
     extra_index_url: str | tuple[str, ...] | list[str] | None = None,
@@ -52,6 +56,8 @@ def configure(
         "offline": offline,
         "allow_unsafe": allow_unsafe,
         "cache_dir": Path(cache_dir).expanduser().resolve() if cache_dir is not None else None,
+        "cache_retention_days": _validate_retention_days(cache_retention_days),
+        "cache_auto_cleanup": cache_auto_cleanup,
         "uv": Path(uv).expanduser().resolve() if uv is not None else None,
         "index_url": index_url,
         "extra_index_url": _split_indexes(extra_index_url) if extra_index_url is not None else None,
@@ -76,6 +82,8 @@ def resolve_settings(
     offline: bool | None = None,
     allow_unsafe: bool | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
+    cache_retention_days: int | None = None,
+    cache_auto_cleanup: bool | None = None,
     uv: str | os.PathLike[str] | None = None,
     index_url: str | None = None,
     extra_index_url: str | tuple[str, ...] | list[str] | None = None,
@@ -92,6 +100,8 @@ def resolve_settings(
         "offline": _env_bool("DEPFIX_OFFLINE"),
         "allow_unsafe": _env_bool("DEPFIX_ALLOW_UNSAFE"),
         "cache_dir": _env_path("DEPFIX_CACHE_DIR"),
+        "cache_retention_days": _env_nonnegative_int("DEPFIX_CACHE_RETENTION_DAYS"),
+        "cache_auto_cleanup": _env_bool("DEPFIX_CACHE_AUTO_CLEANUP"),
         "uv": _env_path("DEPFIX_UV"),
         "index_url": os.environ.get("DEPFIX_INDEX_URL"),
         "extra_index_url": _split_indexes(os.environ.get("DEPFIX_EXTRA_INDEX_URL")),
@@ -103,6 +113,8 @@ def resolve_settings(
         "offline": offline,
         "allow_unsafe": allow_unsafe,
         "cache_dir": Path(cache_dir).expanduser().resolve() if cache_dir is not None else None,
+        "cache_retention_days": _validate_retention_days(cache_retention_days),
+        "cache_auto_cleanup": cache_auto_cleanup,
         "uv": Path(uv).expanduser().resolve() if uv is not None else None,
         "index_url": index_url,
         "extra_index_url": _split_indexes(extra_index_url) if extra_index_url is not None else None,
@@ -128,6 +140,8 @@ def resolve_settings(
         offline=bool(choose("offline")),
         allow_unsafe=bool(choose("allow_unsafe")),
         cache_dir=Path(choose("cache_dir")),
+        cache_retention_days=int(choose("cache_retention_days")),
+        cache_auto_cleanup=bool(choose("cache_auto_cleanup")),
         uv=Path(choose("uv")) if choose("uv") is not None else None,
         index_url=choose("index_url"),
         extra_index_url=tuple(choose("extra_index_url")),
@@ -191,6 +205,27 @@ def _env_bool(name: str) -> bool | None:
     raise SpecifierError(f"{name} must be a boolean value", source="environment")
 
 
+def _env_nonnegative_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise SpecifierError(f"{name} must be a non-negative integer", source="environment") from None
+    if parsed < 0:
+        raise SpecifierError(f"{name} must be a non-negative integer", source="environment")
+    return parsed
+
+
+def _validate_retention_days(value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("cache_retention_days must be a non-negative integer")
+    return value
+
+
 def _split_indexes(value: str | tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -225,11 +260,13 @@ def _project_config_values(start: Path | None = None) -> dict[str, Any]:
         "index-url": "index_url",
         "extra-index-url": "extra_index_url",
         "cache-dir": "cache_dir",
+        "cache-retention-days": "cache_retention_days",
+        "cache-auto-cleanup": "cache_auto_cleanup",
         "log-level": "log_level",
     }
     values = {aliases.get(key, key.replace("-", "_")): value for key, value in selected.items()}
     result: dict[str, Any] = {}
-    for key in ("frozen", "offline", "allow_unsafe"):
+    for key in ("frozen", "offline", "allow_unsafe", "cache_auto_cleanup"):
         if key in values:
             if not isinstance(values[key], bool):
                 raise SpecifierError(
@@ -237,6 +274,14 @@ def _project_config_values(start: Path | None = None) -> dict[str, Any]:
                     source=str(path),
                 )
             result[key] = values[key]
+    if "cache_retention_days" in values:
+        value = values["cache_retention_days"]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise SpecifierError(
+                "cache-retention-days in .depfix/config.toml must be a non-negative integer",
+                source=str(path),
+            )
+        result["cache_retention_days"] = value
     for key in ("index_url", "log_level"):
         if key in values:
             if not isinstance(values[key], str):

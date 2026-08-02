@@ -46,19 +46,19 @@ def sync_graph(
         )
         destination = cache.unpacked_path(artifact.id)
         with cache.lock("target:" + artifact.id):
-            if _valid_target(destination, artifact.sha256):
-                continue
-            if destination.exists():
-                _remove_incomplete_target(destination)
-            if artifact.filename.lower().endswith(".whl"):
-                extract_wheel(blob, destination)
-            elif artifact.filename.lower().endswith(".py"):
-                roots = sorted(set(nodes_by_artifact.get(artifact.id, ())))
-                if len(roots) != 1:
-                    raise ValueError(f"single-file artifact {artifact.id} must expose exactly one root")
-                _materialize_python_file(blob, destination, roots[0], artifact.sha256)
-            else:
-                raise ValueError(f"unsupported locked artifact type: {artifact.filename}")
+            if not _valid_target(destination, artifact.sha256):
+                if destination.exists():
+                    _remove_incomplete_target(destination)
+                if artifact.filename.lower().endswith(".whl"):
+                    extract_wheel(blob, destination)
+                elif artifact.filename.lower().endswith(".py"):
+                    roots = sorted(set(nodes_by_artifact.get(artifact.id, ())))
+                    if len(roots) != 1:
+                        raise ValueError(f"single-file artifact {artifact.id} must expose exactly one root")
+                    _materialize_python_file(blob, destination, roots[0], artifact.sha256)
+                else:
+                    raise ValueError(f"unsupported locked artifact type: {artifact.filename}")
+        cache.record_artifact(artifact)
 
 
 def _materialize_python_file(

@@ -22,7 +22,7 @@ from pathlib import Path
 from types import MappingProxyType, ModuleType
 from typing import Any, SupportsIndex
 
-from .cache import Cache
+from .cache import Cache, CacheLease
 from .errors import (
     AmbiguousMetadataError,
     CacheError,
@@ -355,6 +355,7 @@ class DepfixRuntime:
         self._shared_paths: tuple[str, ...] = ()
         self._shared_claims: dict[str, dict[tuple[str, str, str], bool]] = {}
         self._dispatch_alias_modes = False
+        self._cache_lease: CacheLease | None = None
 
     @property
     def shared(self) -> bool:
@@ -375,26 +376,42 @@ class DepfixRuntime:
         return runtime_for_alias(self.graph.graph_id, alias.node, alias_name)
 
     def activate(self) -> DepfixRuntime:
-        for artifact in self.graph.artifacts:
-            root = self.cache.unpacked_path(artifact.id)
-            if not (root / ".complete").is_file():
-                raise CacheError(
-                    "Locked artifact has not been synchronized",
-                    manifest=self.manifest,
-                    artifact_hash=artifact.sha256,
-                    remediation="run `depfix install <manifest> --frozen` before activating it",
-                )
-        if self.shared:
-            self._activate_shared()
-        if not any(finder is self._finder for finder in sys.meta_path):
-            sys.meta_path.insert(0, self._finder)
-        return self
+        lease = self._cache_lease
+        if lease is None:
+            lease = self.cache.lease(self.artifact_hashes)
+            self._cache_lease = lease
+        try:
+            for artifact in self.graph.artifacts:
+                root = self.cache.unpacked_path(artifact.id)
+                if not (root / ".complete").is_file():
+                    raise CacheError(
+                        "Locked artifact has not been synchronized",
+                        manifest=self.manifest,
+                        artifact_hash=artifact.sha256,
+                        remediation="run `depfix install <manifest> --frozen` before activating it",
+                    )
+            if self.shared:
+                self._activate_shared()
+            if not any(finder is self._finder for finder in sys.meta_path):
+                sys.meta_path.insert(0, self._finder)
+            return self
+        except BaseException:
+            lease.close()
+            self._cache_lease = None
+            raise
 
     def deactivate(self) -> None:
         """Remove runtime hooks and release shared-path registrations."""
         sys.meta_path[:] = [finder for finder in sys.meta_path if finder is not self._finder]
         if self.shared:
             self._deactivate_shared()
+        if self._cache_lease is not None:
+            self._cache_lease.close()
+            self._cache_lease = None
+
+    @property
+    def artifact_hashes(self) -> set[str]:
+        return {self._artifacts[self._nodes[node_id].artifact].sha256 for node_id in self._active_node_ids}
 
     def _activate_shared(self) -> None:
         claims = self._shared_graph_claims()
@@ -589,6 +606,7 @@ class DepfixRuntime:
                 module.__dict__["__depfix_logical_package__"] = (
                     logical_name if hasattr(module, "__path__") else logical_name.rpartition(".")[0]
                 )
+            self._mark_used(providers)
             return module
         providers = self._provider_nodes(caller, logical_name)
         if not providers:
@@ -615,7 +633,9 @@ class DepfixRuntime:
                     candidates=tuple(f"{node.distribution}=={node.version}" for node in providers),
                 )
             if logical_name == root or all(self._locate(node, logical_name).is_namespace for node in providers):
-                return self._load_namespace(caller, logical_name, providers)
+                module = self._load_namespace(caller, logical_name, providers)
+                self._mark_used(providers)
+                return module
             concrete = [node for node in providers if self._location_exists(self._locate(node, logical_name))]
             if len(concrete) != 1:
                 raise ImportOwnershipError(
@@ -628,7 +648,18 @@ class DepfixRuntime:
             provider = concrete[0]
         else:
             provider = providers[0]
-        return self._load_from_provider(provider, logical_name)
+        module = self._load_from_provider(provider, logical_name)
+        self._mark_used((provider,))
+        return module
+
+    def _mark_used(self, providers: Iterable[Node]) -> None:
+        artifact_ids = dict.fromkeys(provider.artifact for provider in providers)
+        for artifact_id in artifact_ids:
+            try:
+                self.cache.mark_used(self._artifacts[artifact_id])
+            except (CacheError, OSError):
+                # Usage telemetry must not turn a successful package import into a failure.
+                pass
 
     def _provider_nodes(self, caller: Node, logical_name: str) -> list[Node]:
         root = logical_name.split(".", 1)[0]

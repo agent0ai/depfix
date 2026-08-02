@@ -113,9 +113,10 @@ decision. Loaded package code still has the normal authority of the Python proce
 ## Configuration
 
 `depfix.configure(...)` is the single process-wide Python configuration entry point, including for future global
-parameters. It accepts `manifest`, `frozen`, `offline`, `allow_unsafe`, `cache_dir`, `uv`, `index_url`, `extra_index_url`,
-and `log_level`. Precedence is per-call, `configure`, environment, optional project config/manifest discovery, defaults.
-An explicit per-call `False` therefore overrides a process-wide `True`.
+parameters. It accepts `manifest`, `frozen`, `offline`, `allow_unsafe`, `cache_dir`, `cache_retention_days`,
+`cache_auto_cleanup`, `uv`, `index_url`, `extra_index_url`, and `log_level`. Precedence is per-call, `configure`,
+environment, optional project config/manifest discovery, defaults. An explicit per-call `False` therefore overrides a
+process-wide `True`.
 
 Persistent project defaults live together in `.depfix/config.toml`. For example:
 
@@ -123,6 +124,8 @@ Persistent project defaults live together in `.depfix/config.toml`. For example:
 [settings]
 allow-unsafe = false
 offline = false
+cache-retention-days = 30
+cache-auto-cleanup = true
 ```
 
 Unsafe loading can be enabled process-wide with `depfix.configure(allow_unsafe=True)`, persistently with
@@ -133,9 +136,38 @@ accept the reduced isolation guarantee.
 download, materialization, and ready lines to stderr. `WARNING`, `ERROR`, `CRITICAL`, and `OFF` suppress progress.
 
 Supported variables are `DEPFIX_MANIFEST`, `DEPFIX_FROZEN`, `DEPFIX_OFFLINE`, `DEPFIX_ALLOW_UNSAFE`, `DEPFIX_CACHE_DIR`,
-`DEPFIX_UV`, `DEPFIX_INDEX_URL`, `DEPFIX_EXTRA_INDEX_URL`, and `DEPFIX_LOG_LEVEL`.
+`DEPFIX_CACHE_RETENTION_DAYS`, `DEPFIX_CACHE_AUTO_CLEANUP`, `DEPFIX_UV`, `DEPFIX_INDEX_URL`,
+`DEPFIX_EXTRA_INDEX_URL`, and `DEPFIX_LOG_LEVEL`.
 
 `multiprocessing_initializer(manifest, cache_dir)` is a spawn-safe worker initializer for prepared graphs.
+
+## Cache API
+
+```python
+depfix.list_cached_packages(*, cache_dir=None) -> tuple[CachedPackage, ...]
+depfix.cleanup_cache(*, days=None, cache_dir=None, dry_run=False) -> CacheCleanupResult
+depfix.remove_cached_package(
+    distribution,
+    *,
+    version=None,
+    artifact_hash=None,
+    cache_dir=None,
+    dry_run=False,
+) -> CacheCleanupResult
+```
+
+`CachedPackage` reports normalized `distribution`, `version`, `artifact_hash`, `filename`, UTC `installed_at`, optional
+UTC `last_used_at`, and total `size_bytes`. Size includes the immutable blob, all materialized environment targets, and
+associated retained build/source data. `cleanup_cache()` uses the configured 30-day retention when `days` is omitted;
+zero selects every inactive installed artifact. `remove_cached_package()` matches one normalized distribution and can be
+narrowed by version or SHA-256.
+
+`CacheCleanupResult.removed` contains the selected entries (the would-remove entries for `dry_run=True`),
+`skipped_active` contains matching artifacts protected by preparation reservations or live runtimes, and
+`reclaimed_bytes` reports the removed or would-remove package footprint. Automatic cleanup uses the same policy once
+daily in the background. It protects the graph currently being
+prepared and every live runtime lease; it can be disabled with `cache_auto_cleanup=False` without disabling explicit
+cleanup.
 
 ## Project API
 

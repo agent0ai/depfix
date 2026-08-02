@@ -44,6 +44,7 @@ from .errors import (
 )
 
 if TYPE_CHECKING:
+    from .cache import CacheCleanupResult, CachedPackage
     from .handles import PackageHandle
     from .scopes import default, using
     from .settings import Settings
@@ -56,6 +57,8 @@ def configure(
     offline: bool | None = None,
     allow_unsafe: bool | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
+    cache_retention_days: int | None = None,
+    cache_auto_cleanup: bool | None = None,
     uv: str | os.PathLike[str] | None = None,
     index_url: str | None = None,
     extra_index_url: str | tuple[str, ...] | list[str] | None = None,
@@ -70,6 +73,8 @@ def configure(
         offline=offline,
         allow_unsafe=allow_unsafe,
         cache_dir=cache_dir,
+        cache_retention_days=cache_retention_days,
+        cache_auto_cleanup=cache_auto_cleanup,
         uv=uv,
         index_url=index_url,
         extra_index_url=extra_index_url,
@@ -194,6 +199,51 @@ async def load_package_async(
     )
 
 
+def list_cached_packages(*, cache_dir: str | os.PathLike[str] | None = None) -> tuple[CachedPackage, ...]:
+    """List installed package artifacts in the shared Depfix cache."""
+    from .cache import Cache
+    from .settings import resolve_settings
+
+    settings = resolve_settings(cache_dir=cache_dir, discover=True)
+    return Cache(settings.cache_dir).list_packages()
+
+
+def cleanup_cache(
+    *,
+    days: int | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    dry_run: bool = False,
+) -> CacheCleanupResult:
+    """Remove package artifacts unused beyond the configured retention window."""
+    from .cache import Cache
+    from .settings import resolve_settings
+
+    settings = resolve_settings(cache_dir=cache_dir, discover=True)
+    retention = settings.cache_retention_days if days is None else days
+    return Cache(settings.cache_dir).cleanup(retention, dry_run=dry_run)
+
+
+def remove_cached_package(
+    distribution: str,
+    *,
+    version: str | None = None,
+    artifact_hash: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    dry_run: bool = False,
+) -> CacheCleanupResult:
+    """Remove one distribution selection from the shared Depfix cache."""
+    from .cache import Cache
+    from .settings import resolve_settings
+
+    settings = resolve_settings(cache_dir=cache_dir, discover=True)
+    return Cache(settings.cache_dir).remove_package(
+        distribution,
+        version=version,
+        artifact_hash=artifact_hash,
+        dry_run=dry_run,
+    )
+
+
 def activate(
     manifest: str | os.PathLike[str] = ".depfix/imports.lock",
     *,
@@ -250,6 +300,12 @@ def __getattr__(name: str) -> Any:
 
         globals()[name] = PackageHandle
         return PackageHandle
+    if name in {"CachedPackage", "CacheCleanupResult"}:
+        from .cache import CacheCleanupResult, CachedPackage
+
+        cache_type = CachedPackage if name == "CachedPackage" else CacheCleanupResult
+        globals()[name] = cache_type
+        return cache_type
     if name == "Settings":
         from .settings import Settings
 
@@ -261,6 +317,8 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     "ArtifactError",
     "BundleError",
+    "CacheCleanupResult",
+    "CachedPackage",
     "DefaultImportConflictError",
     "DepfixError",
     "FrozenManifestError",
@@ -289,13 +347,16 @@ __all__ = [
     "UvBootstrapError",
     "UvNotFoundError",
     "UnsafePackageError",
+    "cleanup_cache",
     "configure",
     "default",
     "import_module",
     "import_module_async",
     "load_package",
     "load_package_async",
+    "list_cached_packages",
     "multiprocessing_initializer",
+    "remove_cached_package",
     "using",
     "__version__",
 ]
