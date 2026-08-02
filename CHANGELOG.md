@@ -4,6 +4,10 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+- Hardened production release automation so a manual annotated-tag dispatch must pass version, changelog, current-main,
+  PyPI-absence, complete cross-platform CI, and distribution checks before staging a hidden release draft or enabling
+  OIDC publication of the exact checked artifacts; the GitHub Release becomes public only after PyPI verification.
+
 ## 0.4.1 - 2026-08-02
 
 - Fixed cleanup of read-only cache targets for non-root accounts by restoring owner write permissions across the target

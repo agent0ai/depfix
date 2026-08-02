@@ -4,6 +4,7 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -11,6 +12,7 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -26,6 +28,7 @@ jobs:
   tests-x64:
     name: tests (${{ matrix.runner }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +47,7 @@ jobs:
   tests-arm64:
     name: tests (${{ matrix.runner }}, arm64)
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +65,7 @@ jobs:
   uv-boundaries:
     name: uv ${{ matrix.uv }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -93,6 +98,7 @@ jobs:
 
   distributions:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [quality, tests-x64, tests-arm64, uv-boundaries]
     steps:
       - uses: actions/checkout@v6
@@ -108,3 +114,4 @@ jobs:
           name: python-package-distributions
           path: dist/
           if-no-files-found: error
+          retention-days: 7

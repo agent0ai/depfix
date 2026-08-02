@@ -99,8 +99,10 @@ Default section order:
 - Keep the cross-project package cache observable and bounded: record first installation and successful import use,
   protect returning graphs and active runtimes, run configurable retention work off the import path, and expose matching
   Python and CLI inventory/removal operations.
-- Publish production PyPI releases only from deliberately published, version-matched GitHub Releases through the protected
-  `pypi` environment and OIDC Trusted Publishing; never store a PyPI API token or publish from a push/tag alone.
+- Publish production PyPI releases only through an explicit manual workflow dispatch from a version-matched annotated tag.
+  The complete CI and distribution gate must pass before automation stages a hidden GitHub Release draft, then the
+  protected `pypi` environment and OIDC Trusted Publishing may upload those exact artifacts. Make the release public only
+  after PyPI verification; never store a PyPI token or publish from a push/tag alone.
 - Keep the local `.env` owner-readable only for explicitly authorized publication; never print, package, or commit it or
   persist its credentials elsewhere.
 

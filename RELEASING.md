@@ -1,8 +1,11 @@
 # Release checklist
 
-Publishing a versioned GitHub Release starts the production Trusted Publishing workflow. A push or tag alone never
-publishes. The workflow builds and tests without OIDC permission, then the protected `pypi` environment authorizes the
-separate upload job. The records below are the publication authority for reviewed artifacts.
+Production releases start only when an owner manually dispatches `Publish to PyPI` from an existing annotated `vX.Y.Z`
+tag. A push or tag alone never publishes. The workflow validates the tag at the current `main`, runs the complete reusable
+CI and distribution gate without write or OIDC permission, and stages a hidden draft with the checked artifacts only after
+every check passes. The protected `pypi` environment then authorizes a separate OIDC upload job. A clean public-index
+verification makes the GitHub Release public; failed publication removes the draft. The records below are the publication
+authority for reviewed artifacts.
 
 ## Owner-controlled blockers
 
@@ -25,16 +28,33 @@ separate upload job. The records below are the publication authority for reviewe
 
 ## Candidate validation
 
-- [x] Update `_version.py` and `CHANGELOG.md` for 0.3.0; confirm the additive manifest policy fields are intentional.
-- [x] Run `python scripts/release_check.py` on a clean connected host.
-- [x] Review the printed wheel/sdist SHA-256 values and archive inventories.
-- [x] Confirm the wheel is `py3-none-any`, contains `py.typed` and schemas, and contains no tests, caches, credentials,
+- [ ] Update `_version.py` and add a dated `CHANGELOG.md` section for the exact stable `X.Y.Z` version.
+- [ ] Run `python scripts/release_check.py` on a clean connected host.
+- [ ] Review the printed wheel/sdist SHA-256 values and archive inventories.
+- [ ] Confirm the wheel is `py3-none-any`, contains `py.typed` and schemas, and contains no tests, caches, credentials,
   third-party packages, uv binaries, or project manifests.
-- [x] Install the exact wheel locally and verify `import depfix`, `depfix --help`, `depfix --version`, uv discovery, one live
+- [ ] Install the exact wheel locally and verify `import depfix`, `depfix --help`, `depfix --version`, uv discovery, one live
   import, and one export/install/offline run.
-- [x] Confirm CI passes Windows, macOS, Linux, supported Python versions, minimum uv, current uv, build, and clean-wheel jobs.
+- [ ] Commit and push the reviewed source to `main`, then create and push an annotated `vX.Y.Z` tag at that exact commit.
+- [ ] Confirm ordinary tag CI is green; the production workflow will independently rerun every required job.
 
 ## Published releases
+
+### 0.4.1 — 2026-08-02
+
+- PyPI: `https://pypi.org/project/depfix/0.4.1/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.4.1`
+- Wheel SHA-256: `69f10ac5a7b62883c06edab5efa00ef8a1a9d9b372bad70c41ff5ebacdcc6123`
+- Sdist SHA-256: `aa2eec7c9ef21de5347e78a58d3319f3cb8abfdc50c8d169800309100fb7b1c2`
+- Published from commit `d906f280b3f257b43768798b1d3cde613199ceb7` after the hosted Python 3.13 gate caught
+  and the patch fixed non-root removal of read-only cache targets.
+- Verified through the protected `pypi` environment, PyPI release metadata, and a clean CPython 3.13 public-index install.
+
+### 0.4.0 — 2026-08-02 (superseded before PyPI publication)
+
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.4.0`
+- The pre-upload hosted gate exposed the non-root cache cleanup issue fixed in `0.4.1`; the upload job was skipped and
+  PyPI never received `0.4.0`.
 
 ### 0.3.0 — 2026-08-02
 
@@ -87,9 +107,15 @@ separate upload job. The records below are the publication authority for reviewe
 - [ ] Install from TestPyPI while sourcing dependencies from PyPI, then repeat CLI/live/prepared checks.
 - [ ] Verify rendered metadata, README, files, and dependency declarations.
 
-## PyPI (GitHub Release workflow)
+## PyPI (checked manual workflow)
 
-- [x] Confirm CI is green for the reviewed commit and create its deliberate signed/annotated `vX.Y.Z` tag.
-- [x] Publish a GitHub Release for that tag; this starts the `Publish to PyPI` workflow from `publish-pypi.yml`.
-- [x] Approve the protected `pypi` environment deployment after reviewing the build-and-test job.
-- [x] Verify the PyPI page, artifact hashes, `pip install depfix`, `depfix --version`, uv installation, and a basic live import.
+- [ ] Dispatch the workflow against the reviewed tag explicitly:
+  `gh workflow run publish-pypi.yml --ref vX.Y.Z -f version=X.Y.Z -f confirmation=release-depfix-X.Y.Z`.
+- [ ] Open the resulting `Publish to PyPI` run and confirm its ref is `vX.Y.Z`, never `main`.
+- [ ] Confirm request validation and the complete reusable CI matrix pass; any failure must leave GitHub Releases and PyPI
+  unchanged.
+- [ ] Confirm the workflow stages a hidden draft with only the checked wheel and sdist attached.
+- [ ] Approve the protected `pypi` deployment after reviewing the completed checks and draft assets.
+- [ ] Confirm OIDC publishing and the clean public-index installation job pass, then confirm the GitHub Release becomes
+  public. A failed deployment must remove its unpublished draft.
+- [ ] Record the PyPI/GitHub URLs, public artifact hashes, tagged commit, and verification result above.

@@ -1,47 +1,183 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact package version without the leading v
+        required: true
+        type: string
+      confirmation:
+        description: Type release-depfix-X.Y.Z for this version
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: publish-pypi-${{ github.event.release.tag_name }}
+  group: publish-pypi-${{ inputs.version }}
   cancel-in-progress: false
 
 jobs:
-  build-and-test:
+  validate-request:
+    name: Validate release request
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[test,release]"
-      - name: Verify tag matches the package version
+      - name: Verify tag, version, changelog, and main identity
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: >-
-          python -c "import os; from depfix import __version__;
-          assert os.environ['RELEASE_TAG'] == f'v{__version__}',
-          f'tag {os.environ[\"RELEASE_TAG\"]!r} does not match v{__version__}'"
-      - run: python scripts/release_check.py
-      - uses: actions/upload-artifact@v7
+          CONFIRMATION: ${{ inputs.confirmation }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SHA: ${{ github.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          tag = f"v{version}"
+          if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+              raise SystemExit("version must be a stable X.Y.Z release")
+          if os.environ["CONFIRMATION"] != f"release-depfix-{version}":
+              raise SystemExit(f"confirmation must be release-depfix-{version}")
+          if os.environ["RELEASE_REF"] != f"refs/tags/{tag}":
+              raise SystemExit(f"run this workflow from the existing {tag} tag")
+
+          source = Path("src/depfix/_version.py").read_text(encoding="utf-8")
+          match = re.fullmatch(r'__version__ = "([^"]+)"\n?', source)
+          if match is None or match.group(1) != version:
+              raise SystemExit("tag and package version do not match")
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          if re.search(rf"^## {re.escape(version)} - [0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$", changelog, re.MULTILINE) is None:
+              raise SystemExit(f"CHANGELOG.md has no dated {version} release section")
+
+          tag_type = subprocess.check_output(
+              ["git", "cat-file", "-t", f"refs/tags/{tag}"], text=True
+          ).strip()
+          if tag_type != "tag":
+              raise SystemExit(f"{tag} must be an annotated tag")
+          tag_commit = subprocess.check_output(
+              ["git", "rev-parse", f"refs/tags/{tag}^{{commit}}"], text=True
+          ).strip()
+          if tag_commit != os.environ["RELEASE_SHA"]:
+              raise SystemExit("workflow SHA does not match the annotated tag commit")
+          main_commit = subprocess.check_output(
+              ["git", "ls-remote", "origin", "refs/heads/main"], text=True
+          ).split()[0]
+          if tag_commit != main_commit:
+              raise SystemExit("release tag must point to the current main commit")
+          PY
+      - name: Verify release and PyPI version do not exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "GitHub Release v${VERSION} already exists" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import os
+          import urllib.error
+          import urllib.request
+
+          url = f"https://pypi.org/pypi/depfix/{os.environ['VERSION']}/json"
+          try:
+              urllib.request.urlopen(url, timeout=30).close()
+          except urllib.error.HTTPError as error:
+              if error.code == 404:
+                  raise SystemExit(0)
+              raise
+          raise SystemExit(f"depfix {os.environ['VERSION']} already exists on PyPI")
+          PY
+
+  checks:
+    name: Complete release checks
+    needs: validate-request
+    uses: ./.github/workflows/ci.yml
+
+  stage-release:
+    name: Stage checked GitHub Release
+    needs: [validate-request, checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
         with:
           name: python-package-distributions
           path: dist/
-          if-no-files-found: error
+      - name: Revalidate immutable release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          main_sha="$(git ls-remote origin refs/heads/main | awk '{print $1}')"
+          test "$main_sha" = "$RELEASE_SHA" || {
+            echo "main moved after release checks; create a new tag and rerun" >&2
+            exit 1
+          }
+          test "$(git rev-parse "v${VERSION}^{commit}")" = "$RELEASE_SHA"
+          test -f "dist/depfix-${VERSION}-py3-none-any.whl"
+          test -f "dist/depfix-${VERSION}.tar.gz"
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "GitHub Release v${VERSION} appeared while checks were running" >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import os
+          import urllib.error
+          import urllib.request
+
+          url = f"https://pypi.org/pypi/depfix/{os.environ['VERSION']}/json"
+          try:
+              urllib.request.urlopen(url, timeout=30).close()
+          except urllib.error.HTTPError as error:
+              if error.code == 404:
+                  raise SystemExit(0)
+              raise
+          raise SystemExit(f"depfix {os.environ['VERSION']} appeared on PyPI while checks were running")
+          PY
+      - name: Create draft with the checked distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: >-
+          gh release create "v${VERSION}" dist/depfix-${VERSION}-py3-none-any.whl
+          dist/depfix-${VERSION}.tar.gz --draft --verify-tag --title "Depfix ${VERSION}" --generate-notes
+      - name: Remove an incomplete draft
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if test "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft 2>/dev/null)" = true; then
+            gh release delete "v${VERSION}" --yes
+          fi
 
   publish:
-    needs: build-and-test
+    name: Publish checked distributions to PyPI
+    needs: stage-release
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: pypi
       url: https://pypi.org/p/depfix
@@ -52,5 +188,88 @@ jobs:
         with:
           name: python-package-distributions
           path: dist/
+      - name: Verify exact publication set
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          test -f "dist/depfix-${VERSION}-py3-none-any.whl"
+          test -f "dist/depfix-${VERSION}.tar.gz"
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  verify-publication:
+    name: Verify public release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Wait for PyPI and verify a clean install
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          version = os.environ["VERSION"]
+          url = f"https://pypi.org/pypi/depfix/{version}/json"
+          expected = {f"depfix-{version}-py3-none-any.whl", f"depfix-{version}.tar.gz"}
+          for _ in range(60):
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as response:
+                      data = json.load(response)
+              except urllib.error.HTTPError as error:
+                  if error.code != 404:
+                      raise
+              else:
+                  files = {item["filename"] for item in data["urls"]}
+                  if files == expected:
+                      break
+              time.sleep(5)
+          else:
+              raise SystemExit("PyPI release did not become visible with the exact artifact set")
+          PY
+          python -m pip install --no-cache-dir "depfix==${VERSION}"
+          python -c "import depfix; assert depfix.__version__ == '${VERSION}'"
+          depfix --version
+
+  finalize-release:
+    name: Publish verified GitHub Release
+    needs: [stage-release, verify-publication]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          test "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft)" = true
+          gh release edit "v${VERSION}" --draft=false
+
+  cleanup-release-draft:
+    name: Clean up failed release draft
+    if: ${{ always() && needs.stage-release.result == 'success' && needs.verify-publication.result != 'success' }}
+    needs: [stage-release, publish, verify-publication]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Remove unpublished draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if test "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft 2>/dev/null)" = true; then
+            gh release delete "v${VERSION}" --yes
+          fi

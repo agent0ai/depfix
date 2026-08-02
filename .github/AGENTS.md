@@ -12,8 +12,10 @@
 ## Local Contracts
 
 - Workflows use least-privilege permissions and immutable, explicit release gates.
-- Production publication begins only when an owner publishes a version-matched GitHub Release, then uses the protected
-  `pypi` environment and OIDC trusted publishing; pushes and tags alone must not publish.
+- Production publication requires an explicit manual workflow dispatch from a version-matched annotated tag. Automation
+  must run the complete release gate before staging a hidden release draft, then use the protected `pypi` environment and
+  OIDC trusted publishing for the exact checked artifacts. The release becomes public only after PyPI verification;
+  pushes and tags alone must not publish.
 - README presentation assets use plain developer language and emphasize runtime installation and multiversion imports.
 
 ## Work Guidance
