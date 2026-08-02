@@ -32,9 +32,22 @@ separate upload job. The records below are the publication authority for reviewe
   third-party packages, uv binaries, or project manifests.
 - [x] Install the exact wheel locally and verify `import depfix`, `depfix --help`, `depfix --version`, uv discovery, one live
   import, and one export/install/offline run.
-- [ ] Confirm CI passes Windows, macOS, Linux, supported Python versions, minimum uv, current uv, build, and clean-wheel jobs.
+- [x] Confirm CI passes Windows, macOS, Linux, supported Python versions, minimum uv, current uv, build, and clean-wheel jobs.
 
 ## Published releases
+
+### 0.3.0 — 2026-08-02
+
+- PyPI: `https://pypi.org/project/depfix/0.3.0/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.3.0`
+- Wheel SHA-256: `002bb3c08a77ef1adef0af2005bb05d2d69b80a806268538b2a5e1cbbebb1179`
+- Sdist SHA-256: `15419d58dcb677d82a350bb5c4cf791b3742f91dcbdb5c87de58bc0b6ec10116`
+- Published from commit `2d45ad8c66810ff31f3fdc046ff809cdc6b6b15d` after branch and annotated-tag CI passed all
+  quality, uv, distribution, Windows, macOS, Linux, x64, and arm64 jobs, including Windows 3.13 and live incompatible
+  OpenAI imports.
+- Published through the protected `pypi` environment after the isolated Trusted Publishing build-and-test job passed.
+- Verified through PyPI release metadata and artifact digests, a clean public-index installation, CLI version check, and a
+  live `idna==3.10` runtime import.
 
 ### 0.2.1 — 2026-08-01
 
