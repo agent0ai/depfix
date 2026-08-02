@@ -170,6 +170,8 @@ def test_auto_uses_process_shared_imports_for_native_graphs_and_rejects_a_second
     loaded = depfix.import_module(file_spec(first), module="shared_native_demo")
     assert loaded.VERSION == "one"
     assert loaded.__name__ == "shared_native_demo"
+    assert loaded.__depfix_distribution__ == "shared-native-demo"
+    assert loaded.__depfix_version__ == "1.0.0"
     assert sys.modules["shared_native_demo"] is loaded
     assert depfix.import_module(file_spec(first), module="shared_native_demo") is loaded
 
@@ -323,6 +325,23 @@ def test_shared_mode_tolerates_preloaded_private_helpers_for_public_requests(tmp
             depfix.import_module(file_spec(wheel), module="private_native_helper")
     finally:
         sys.modules.pop(ambient.__name__, None)
+
+    assert loaded.VALUE == "locked"
+
+
+def test_shared_mode_tolerates_compatibility_alias_submodules(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "compatibility-alias-demo",
+        "1.0.0",
+        {"compatibility_alias_demo.py": "VALUE = 'locked'\n", "compatibility_alias_accelerator.so": b"native marker"},
+    )
+    alias = "compatibility_alias_demo.packages.json"
+    sys.modules[alias] = json
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    try:
+        loaded = depfix.import_module(file_spec(wheel), module="compatibility_alias_demo")
+    finally:
+        sys.modules.pop(alias, None)
 
     assert loaded.VALUE == "locked"
 

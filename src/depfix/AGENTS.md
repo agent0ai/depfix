@@ -32,8 +32,9 @@
 - Private uv repair must preserve dynamically linked uv-managed CPython layouts when it creates a temporary environment.
 - `auto` selects in-process isolation for pure request closures and shared logical imports for closures containing native
   artifacts; mode selection is request-scoped inside mixed manifests and does not use package-name allowlists.
-- Shared mode owns public and explicitly requested roots exactly, tolerates process-global private helpers as conventional
-  best effort, and raises `SharedImportConflictError` rather than replacing an incompatible public owner.
+- Shared mode owns public and explicitly requested roots exactly, tolerates process-global private helpers and deliberate
+  compatibility aliases below an owned root as conventional best effort, and raises `SharedImportConflictError` rather
+  than replacing an incompatible public owner.
 - `using()` may expose the first compatible shared/native selection as scoped syntax sugar. Its native modules remain the
   process owner after scope exit, so a later incompatible version raises `SharedImportConflictError`. Explicit `inprocess`
   mode rejects a required native extension with `NativeIsolationRequired`; `process` remains reserved.

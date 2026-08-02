@@ -17,7 +17,7 @@
 - Regressions should assert observable public behavior or a named safety invariant.
 - Standard-import tests reset the dispatcher, persistent defaults, context scopes, runtimes, and configuration.
 - Shared-mode tests must clean up process-global import roots and paths, and cover compatible reuse, public-owner conflicts,
-  private-helper best effort, namespace contribution merging, and scoped first-use/reuse behavior.
+  private-helper and compatibility-alias best effort, namespace contribution merging, and scoped first-use/reuse behavior.
 - Unsafe-loading tests must cover per-request/global precedence, deny-by-default remediation, manifest persistence, and a
   real compiled-extension path when the interpreter provides a suitable test extension.
 

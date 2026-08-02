@@ -68,6 +68,13 @@ def _loaded_module_locations(root: str) -> tuple[bool, tuple[Path, ...]]:
             continue
         if module is None:
             continue
+        intrinsic_name = getattr(module, "__name__", None)
+        if name != root and isinstance(intrinsic_name, str) and intrinsic_name != name:
+            # Compatibility packages such as requests intentionally register a
+            # dependency module under one of their own submodule keys. The
+            # package root remains owned by requests; the alias does not make
+            # the dependency's file an incompatible requests implementation.
+            continue
         found = True
         for path in _module_locations(module):
             if path not in locations:
@@ -574,7 +581,15 @@ class DepfixRuntime:
                     manifest=self.manifest,
                     remediation="declare the package or dependency before importing it",
                 )
-            return _STANDARD_IMPORT_MODULE(logical_name)
+            module = _STANDARD_IMPORT_MODULE(logical_name)
+            providers = self._provider_nodes(caller, logical_name)
+            if len(providers) == 1 and "__depfix_node_id__" not in module.__dict__:
+                provider = providers[0]
+                module.__dict__.update(self._metadata(provider, logical_name))
+                module.__dict__["__depfix_logical_package__"] = (
+                    logical_name if hasattr(module, "__path__") else logical_name.rpartition(".")[0]
+                )
+            return module
         providers = self._provider_nodes(caller, logical_name)
         if not providers:
             redirected = self._compatibility_import_name(caller, logical_name)

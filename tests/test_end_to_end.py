@@ -68,7 +68,7 @@ def test_openai_0_7_and_0_28_load_side_by_side(tmp_path: Path) -> None:
         assert hasattr(openai_0_7, "Completion")
         assert not hasattr(openai_0_7, "ChatCompletion")
         assert hasattr(openai_0_28, "ChatCompletion")
-        assert "openai" not in sys.modules
+        assert sys.modules["openai"] is openai_0_28
     finally:
         reset_runtime_state()
         reset_configuration()

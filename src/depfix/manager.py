@@ -365,8 +365,10 @@ def reset_runtime_state() -> None:
 def runtime_for_graph(graph_id: str, node_id: str, allow_unsafe: bool = False) -> DepfixRuntime:
     with _guard:
         runtime = _active_runtimes.get((graph_id, node_id, "inprocess", allow_unsafe))
+        if runtime is None:
+            runtime = _active_runtimes.get((graph_id, node_id, "shared", allow_unsafe))
     if runtime is None:
-        raise RuntimeError(f"No active in-process runtime owns node {node_id!r} in graph {graph_id!r}")
+        raise RuntimeError(f"No active runtime owns node {node_id!r} in graph {graph_id!r}")
     return runtime
 
 

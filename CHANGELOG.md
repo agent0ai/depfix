@@ -8,7 +8,7 @@ All notable changes use this file. The project follows semantic versioning after
 
 - Added request-scoped `auto`, `inprocess`, and `shared` import modes. Pure graphs retain synthetic multiversion realms;
   native graphs use guarded logical imports, compatible requests are idempotent, and incompatible public-root replacement
-  raises `SharedImportConflictError`.
+  raises `SharedImportConflictError` without misclassifying deliberate compatibility aliases below an owned root.
 - Let `using()` expose a first compatible shared/native selection as scoped syntax sugar. Native modules remain loaded and
   keep process ownership after scope exit, so later incompatible versions fail explicitly instead of being swapped.
 - Added deny-by-default unsafe package handling with per-request `allow_unsafe` options on every loading API, centralized
