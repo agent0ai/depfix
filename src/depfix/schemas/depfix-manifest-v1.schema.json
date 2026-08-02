@@ -160,7 +160,8 @@
         "source-column": {"type": "integer", "minimum": 0},
         "assignment": {"type": "string"},
         "explicit-module": {"type": "boolean"},
-        "isolation": {"enum": ["inprocess", "process"]},
+        "isolation": {"enum": ["auto", "inprocess", "shared", "process"]},
+        "allow-unsafe": {"type": "boolean"},
         "index-identity": {"type": "string"},
         "source-policy": {"type": "string"},
         "group": {"type": "string"},
@@ -199,7 +200,8 @@
           "additionalProperties": {"type": "string"}
         },
         "source-base-directory": {"type": "string"},
-        "isolation": {"enum": ["inprocess", "process"]},
+        "isolation": {"enum": ["auto", "inprocess", "shared", "process"]},
+        "allow-unsafe": {"type": "boolean"},
         "options": {
           "type": "object",
           "additionalProperties": {"type": "string"}

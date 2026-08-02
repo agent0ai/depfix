@@ -2,7 +2,7 @@
 
 Publishing a versioned GitHub Release starts the production Trusted Publishing workflow. A push or tag alone never
 publishes. The workflow builds and tests without OIDC permission, then the protected `pypi` environment authorizes the
-separate upload job. PyPI already contains Depfix 0.1.0.
+separate upload job. The records below are the publication authority for reviewed artifacts.
 
 ## Owner-controlled blockers
 
@@ -20,19 +20,19 @@ separate upload job. PyPI already contains Depfix 0.1.0.
   - Environment: `pypi`
 - [ ] Configure the optional TestPyPI publisher for `publish-testpypi.yml` and environment `testpypi`.
 - [x] Add the owner-approved private security reporting contact to `SECURITY.md`.
-- [x] Push the reviewed source and `.github/readme-banner.png` to the public canonical repository before uploading 0.2.0;
+- [x] Push the reviewed source and `.github/readme-banner.png` to the public canonical repository before publishing;
   the PyPI README loads its banner from that absolute GitHub URL.
 
 ## Candidate validation
 
-- [x] Update `_version.py` and `CHANGELOG.md` for 0.2.1; confirm no unintended manifest format change.
+- [x] Update `_version.py` and `CHANGELOG.md` for 0.3.0; confirm the additive manifest policy fields are intentional.
 - [x] Run `python scripts/release_check.py` on a clean connected host.
 - [x] Review the printed wheel/sdist SHA-256 values and archive inventories.
 - [x] Confirm the wheel is `py3-none-any`, contains `py.typed` and schemas, and contains no tests, caches, credentials,
   third-party packages, uv binaries, or project manifests.
 - [x] Install the exact wheel locally and verify `import depfix`, `depfix --help`, `depfix --version`, uv discovery, one live
   import, and one export/install/offline run.
-- [x] Confirm CI passes Windows, macOS, Linux, supported Python versions, minimum uv, current uv, build, and clean-wheel jobs.
+- [ ] Confirm CI passes Windows, macOS, Linux, supported Python versions, minimum uv, current uv, build, and clean-wheel jobs.
 
 ## Published releases
 

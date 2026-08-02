@@ -84,6 +84,7 @@ class Alias:
     assignment: str = ""
     explicit_module: bool = False
     isolation: str = "inprocess"
+    allow_unsafe: bool = False
     index_identity: str = ""
     source_policy: str = "default"
     group: str = ""
@@ -108,6 +109,7 @@ class RequestGroup:
     module_aliases: Mapping[str, str] = field(default_factory=dict)
     source_base_dir: str = ""
     isolation: str = "inprocess"
+    allow_unsafe: bool = False
     options: Mapping[str, str] = field(default_factory=dict)
 
 

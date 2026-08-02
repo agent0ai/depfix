@@ -200,7 +200,7 @@ Generated artifacts:
   externally usable artifact URL/authentication path; credentials are deliberately never serialized.
 - Depfix enforces configured host/index policies on its own index, artifact, source, and redirect I/O. uv is constrained to
   configured indexes with `first-index` semantics, but uv's internal metadata transport remains governed by uv.
-- SBOM generation and vulnerability-scanner adapters are not included in 0.2.0.
+- SBOM generation and vulnerability-scanner adapters are not included.
 
 ## Published alpha and owner follow-up
 
@@ -211,7 +211,7 @@ and PyPI reports the reviewed wheel SHA-256
 
 The public metadata records `agent0ai` as owner and `https://github.com/agent0ai/depfix` as the canonical repository. Depfix
 is MIT licensed, and `pr@agent-zero.ai` is the private security contact. The protected production Trusted Publisher and
-the `v0.2.1` GitHub/PyPI release are complete; remaining owner operations include GitHub About metadata, optional
+the production GitHub/PyPI release path are complete; remaining owner operations include GitHub About metadata, optional
 TestPyPI configuration, and future release administration.
 
 Pushes and tags do not publish. Publishing a version-matched GitHub Release starts the production workflow, which builds

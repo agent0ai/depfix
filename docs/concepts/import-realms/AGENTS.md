@@ -2,7 +2,7 @@
 
 ## Purpose
 
-- Document Depfix's in-process pure-Python module identity and dependency isolation model.
+- Document Depfix's isolated pure-Python realms and guarded process-shared native import model.
 
 ## Ownership
 
@@ -14,8 +14,13 @@
 - Realm code resolves third-party imports only through declared parent-specific edges.
 - Package-specific compatibility fallbacks stay inside the selected artifact and never override declared dependency edges.
 - Standard-import dispatch prioritizes a loaded caller's realm, then context-local scopes, then persistent defaults.
-- Managed versions stay under synthetic identities; the dispatcher delegates unrelated imports unchanged.
-- Native isolation claims must remain conservative and evidence-based.
+- Pure managed versions stay under synthetic identities; the dispatcher delegates unrelated imports unchanged.
+- Native request closures use logical process-global identities in `auto` mode, with one compatible public owner per root;
+  private helpers follow conventional best-effort import behavior.
+- Native isolation and compatibility claims must remain conservative, evidence-based, and explicit about process-global
+  state.
+- Unsafe-loading overrides may relax only known-unsafe classification and strict in-process extension guards; document
+  integrity, network, process-backend, and incompatible-owner boundaries as non-overridable.
 
 ## Work Guidance
 

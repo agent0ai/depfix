@@ -32,8 +32,10 @@ from .errors import (
     OfflineArtifactMissingError,
     ResolutionError,
     ScopeModuleNotProvidedError,
+    SharedImportConflictError,
     SourceError,
     SpecifierError,
+    UnsafePackageError,
     UnsupportedManifestVersionError,
     UnsupportedUvVersionError,
     UvBackendError,
@@ -52,6 +54,7 @@ def configure(
     manifest: str | os.PathLike[str] | None = None,
     frozen: bool | None = None,
     offline: bool | None = None,
+    allow_unsafe: bool | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     uv: str | os.PathLike[str] | None = None,
     index_url: str | None = None,
@@ -65,6 +68,7 @@ def configure(
         manifest=manifest,
         frozen=frozen,
         offline=offline,
+        allow_unsafe=allow_unsafe,
         cache_dir=cache_dir,
         uv=uv,
         index_url=index_url,
@@ -82,12 +86,18 @@ def import_module(
     frozen: bool | None = None,
     offline: bool | None = None,
     isolation: str | None = None,
+    allow_unsafe: bool | None = None,
 ) -> ModuleType:
     """Return exactly one canonical module or raise a typed discovery error."""
     from .manager import prepare_request
     from .settings import resolve_settings
 
-    settings = resolve_settings(manifest=manifest, frozen=frozen, offline=offline)
+    settings = resolve_settings(
+        manifest=manifest,
+        frozen=frozen,
+        offline=offline,
+        allow_unsafe=allow_unsafe,
+    )
     runtime, request = prepare_request(
         specifier,
         module=module,
@@ -109,13 +119,19 @@ def load_package(
     frozen: bool | None = None,
     offline: bool | None = None,
     isolation: str | None = None,
+    allow_unsafe: bool | None = None,
 ) -> PackageHandle:
     """Return one package handle without eagerly importing its root modules."""
     from .handles import PackageHandle
     from .manager import prepare_request
     from .settings import resolve_settings
 
-    settings = resolve_settings(manifest=manifest, frozen=frozen, offline=offline)
+    settings = resolve_settings(
+        manifest=manifest,
+        frozen=frozen,
+        offline=offline,
+        allow_unsafe=allow_unsafe,
+    )
     runtime, request = prepare_request(
         specifier,
         module=None,
@@ -136,6 +152,7 @@ async def import_module_async(
     frozen: bool | None = None,
     offline: bool | None = None,
     isolation: str | None = None,
+    allow_unsafe: bool | None = None,
 ) -> ModuleType:
     """Async-friendly wrapper sharing canonical identity with `import_module`."""
     import asyncio
@@ -149,6 +166,7 @@ async def import_module_async(
         frozen=frozen,
         offline=offline,
         isolation=isolation,
+        allow_unsafe=allow_unsafe,
     )
 
 
@@ -160,6 +178,7 @@ async def load_package_async(
     frozen: bool | None = None,
     offline: bool | None = None,
     isolation: str | None = None,
+    allow_unsafe: bool | None = None,
 ) -> PackageHandle:
     import asyncio
 
@@ -171,6 +190,7 @@ async def load_package_async(
         frozen=frozen,
         offline=offline,
         isolation=isolation,
+        allow_unsafe=allow_unsafe,
     )
 
 
@@ -259,6 +279,7 @@ __all__ = [
     "PackageHandle",
     "ResolutionError",
     "ScopeModuleNotProvidedError",
+    "SharedImportConflictError",
     "Settings",
     "SourceError",
     "SpecifierError",
@@ -267,6 +288,7 @@ __all__ = [
     "UvBackendError",
     "UvBootstrapError",
     "UvNotFoundError",
+    "UnsafePackageError",
     "configure",
     "default",
     "import_module",

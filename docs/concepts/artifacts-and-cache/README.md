@@ -5,7 +5,7 @@ materializes verified, environment-specific targets for the import runtime.
 
 ```text
 source or index
-  → size-bounded artifact download
+  → size-bounded artifact download with bounded resume/retry
   → SHA-256 blob
   → wheel identity, metadata, path, and RECORD checks
   → temporary extraction
@@ -28,3 +28,6 @@ after promotion while the cache mutation lock is still held.
 Offline mode rejects absent content instead of fetching it. Integrity failures never promote partial state. See the
 [threat model](../../operations/threat-model.md) for hostile-input assumptions and
 [deployment modes](../deployment/) for cache preparation and bundles.
+
+The default per-artifact download limit and per-wheel expanded-size limit are each 1 GiB. A truncated transfer may resume
+up to the bounded attempt count, but only exact expected size and SHA-256 content are promoted.

@@ -2,7 +2,8 @@
 
 ## Purpose
 
-- Resolve Python dependency requests and load pure-Python packages into isolated, version-aware import realms.
+- Resolve Python dependency requests and load pure packages into isolated realms or native graphs through a guarded
+  process-shared import mode.
 
 ## Ownership
 
@@ -18,6 +19,8 @@
 - Install the narrow standard-import dispatcher only on the first `default()` or `using()` call, preserve caller realms
   before application scopes/defaults, and delegate unmanaged imports to the prior importer.
 - Resolved artifacts are hash-pinned and materialized outside ambient `site-packages`.
+- Pinned downloads retry and resume bounded transient truncation, but exact size and SHA-256 verification remain mandatory
+  before cache promotion.
 - Cross-process cache locks retry transient Windows permission races without masking permanent permission failures on
   other platforms.
 - Decode local `file:` URLs with platform-native rules, including Windows drive-letter and UNC path forms.
@@ -27,7 +30,16 @@
 - Cold package preparation reports secret-safe progress on stderr by default; warning and higher log levels remain quiet.
 - Prepared installation never resolves or builds; a custom materialization target is valid only with explicit local copying.
 - Private uv repair must preserve dynamically linked uv-managed CPython layouts when it creates a temporary environment.
-- Native extensions fail with a typed isolation error unless a future backend provides honest isolation.
+- `auto` selects in-process isolation for pure request closures and shared logical imports for closures containing native
+  artifacts; mode selection is request-scoped inside mixed manifests and does not use package-name allowlists.
+- Shared mode owns public and explicitly requested roots exactly, tolerates process-global private helpers as conventional
+  best effort, and raises `SharedImportConflictError` rather than replacing an incompatible public owner.
+- `using()` may expose the first compatible shared/native selection as scoped syntax sugar. Its native modules remain the
+  process owner after scope exit, so a later incompatible version raises `SharedImportConflictError`. Explicit `inprocess`
+  mode rejects a required native extension with `NativeIsolationRequired`; `process` remains reserved.
+- `settings.py` owns the precedence and representation of all process-wide parameters exposed by `depfix.configure()`.
+  Every loading API accepts a per-request `allow_unsafe` override; its effective default is false, and enabling it may
+  relax only unsafe-classification and strict in-process native-loading guards.
 - Public failures use typed, credential-redacted `DepfixError` subclasses.
 
 ## Work Guidance

@@ -25,6 +25,8 @@ class ImportDeclaration:
     group_id: str = ""
     mode: str = "explicit"
     enclosing_function: str = ""
+    isolation: str = "auto"
+    allow_unsafe: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +45,7 @@ def load_config(path: Path) -> ProjectConfig:
     declarations: list[ImportDeclaration] = []
     try:
         imports = raw.get("imports", {})
+        policy = dict(raw.get("policy", {}))
         if not isinstance(imports, dict) or not imports:
             raise ValueError("[imports] must declare at least one alias table")
         for name, declaration in sorted(imports.items()):
@@ -53,8 +56,21 @@ def load_config(path: Path) -> ProjectConfig:
                 not isinstance(module, str) or not module or not all(part.isidentifier() for part in module.split("."))
             ):
                 raise ValueError(f"module {module!r} for alias {name!r} is not a dotted Python name")
-            declarations.append(ImportDeclaration(name, declaration["specifier"], module))
-        policy = dict(raw.get("policy", {}))
+            isolation = declaration.get("isolation", policy.get("isolation", "auto"))
+            if isolation not in {"auto", "inprocess", "shared", "process"}:
+                raise ValueError(f"isolation {isolation!r} for alias {name!r} is unsupported")
+            allow_unsafe = declaration.get("allow-unsafe", policy.get("allow-unsafe", False))
+            if not isinstance(allow_unsafe, bool):
+                raise ValueError(f"allow-unsafe for alias {name!r} must be boolean")
+            declarations.append(
+                ImportDeclaration(
+                    name,
+                    declaration["specifier"],
+                    module,
+                    isolation=isolation,
+                    allow_unsafe=allow_unsafe,
+                )
+            )
     except (KeyError, TypeError, ValueError) as exc:
         raise LockError("Malformed Depfix project configuration", manifest=path, remediation=str(exc)) from exc
     return ProjectConfig(path, tuple(declarations), policy)

@@ -12,6 +12,8 @@
 
 - Files must match their public counterparts under root `schemas/` byte for byte.
 - Package data declarations in `pyproject.toml` must continue to include this folder.
+- Preserve additive unsafe-loading request/group fields in lockfiles while accepting older format-v1 manifests that omit
+  them.
 
 ## Work Guidance
 

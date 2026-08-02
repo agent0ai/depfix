@@ -24,6 +24,7 @@ from depfix.errors import (
     FrozenManifestError,
     ImportDispatcherConflictError,
     ScopeModuleNotProvidedError,
+    SharedImportConflictError,
 )
 from depfix.manager import reset_runtime_state
 from depfix.manifest import load_manifest
@@ -105,6 +106,58 @@ def test_persistent_default_and_multiple_roots(tmp_path: Path, wheel_factory) ->
 
     assert (default_first.VALUE, default_second.VALUE, default_extra.VALUE) == (1, 2, 3)
     assert "default_first" not in sys.modules
+
+
+def test_native_auto_mode_supports_using_as_a_single_version_scope(tmp_path: Path, wheel_factory) -> None:
+    first = wheel_factory(
+        "shared-default-demo",
+        "1.0.0",
+        {"shared_default_demo.py": "VALUE = 7\n", "shared_default_accelerator.so": b"native marker"},
+    )
+    second = wheel_factory(
+        "shared-default-demo",
+        "2.0.0",
+        {"shared_default_demo.py": "VALUE = 8\n", "shared_default_accelerator.so": b"native marker"},
+    )
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+
+    with depfix.using(file_spec(first)):
+        imported = importlib.import_module("shared_default_demo")
+        assert imported.VALUE == 7
+        assert imported.__name__ == "shared_default_demo"
+
+    with pytest.raises(ScopeModuleNotProvidedError):
+        importlib.import_module("shared_default_demo")
+
+    with depfix.using(file_spec(first)):
+        assert importlib.import_module("shared_default_demo") is imported
+
+    with pytest.raises(SharedImportConflictError):
+        with depfix.using(file_spec(second)):
+            pass
+
+    depfix.default(file_spec(first))
+    assert importlib.import_module("shared_default_demo") is imported
+
+
+def test_shared_defaults_merge_locked_namespace_contributions(tmp_path: Path, wheel_factory) -> None:
+    first = wheel_factory(
+        "shared-namespace-one",
+        "1.0.0",
+        {"acme/one.py": "VALUE = 'one'\n", "shared_namespace_one.so": b"native marker"},
+    )
+    second = wheel_factory(
+        "shared-namespace-two",
+        "1.0.0",
+        {"acme/two.py": "VALUE = 'two'\n", "shared_namespace_two.so": b"native marker"},
+    )
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+
+    depfix.default(file_spec(first), file_spec(second))
+    from acme import one, two
+
+    assert (one.VALUE, two.VALUE) == ("one", "two")
+    assert len(sys.modules["acme"].__path__) == 2
 
 
 def test_default_is_additive_idempotent_and_rejects_conflicts(tmp_path: Path, wheel_factory) -> None:
@@ -348,10 +401,10 @@ def test_scanner_groups_defaults_contexts_decorators_and_aliases(tmp_path: Path)
         "from depfix import using as selected\n"
         "BASE = 'requests=='\n"
         "VERSION = '2.31.0'\n"
-        "select_defaults(BASE + VERSION, 'PyYAML==6.0.2')\n"
+        "select_defaults(BASE + VERSION, 'PyYAML==6.0.2', allow_unsafe=True)\n"
         "import requests\n"
         "import yaml as configuration\n"
-        "with selected('requests==2.32.3'):\n"
+        "with selected('requests==2.32.3', allow_unsafe=False):\n"
         "    import requests as current_requests\n"
         "@dependencies.using('requests==2.31.0')\n"
         "async def operation():\n"
@@ -362,7 +415,11 @@ def test_scanner_groups_defaults_contexts_decorators_and_aliases(tmp_path: Path)
     result = scan_project(tmp_path)
 
     assert [group.mode for group in result.groups] == ["default", "using-context", "using-decorator"]
+    assert all(site.isolation == "auto" for site in result.requests)
     default_group, context_group, decorator_group = result.groups
+    assert dict(default_group.options)["allow_unsafe"] == "true"
+    assert dict(context_group.options)["allow_unsafe"] == "false"
+    assert "allow_unsafe" not in dict(decorator_group.options)
     assert default_group.normalized_specifiers == ("requests==2.31.0", "pyyaml==6.0.2")
     assert ("yaml", "configuration") in default_group.module_aliases
     assert context_group.ordinary_imports == ("requests",)

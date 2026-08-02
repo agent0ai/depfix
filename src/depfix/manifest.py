@@ -201,6 +201,7 @@ def dumps_manifest(graph: LockedGraph) -> str:
                 f"assignment = {_q(request.assignment)}",
                 f"explicit-module = {str(request.explicit_module).lower()}",
                 f"isolation = {_q(request.isolation)}",
+                f"allow-unsafe = {str(request.allow_unsafe).lower()}",
                 f"index-identity = {_q(request.index_identity)}",
                 f"source-policy = {_q(request.source_policy)}",
                 f"group = {_q(request.group)}",
@@ -228,6 +229,7 @@ def dumps_manifest(graph: LockedGraph) -> str:
                 f"module-aliases = {_inline_table(dict(group.module_aliases))}",
                 f"source-base-directory = {_q(group.source_base_dir)}",
                 f"isolation = {_q(group.isolation)}",
+                f"allow-unsafe = {str(group.allow_unsafe).lower()}",
                 f"options = {_inline_table(dict(group.options))}",
             ]
         )
@@ -345,6 +347,7 @@ def load_manifest(path: Path) -> LockedGraph:
                 assignment=item.get("assignment", ""),
                 explicit_module=item.get("explicit-module", False),
                 isolation=item.get("isolation", "inprocess"),
+                allow_unsafe=item.get("allow-unsafe", False),
                 index_identity=item.get("index-identity", ""),
                 source_policy=item.get("source-policy", "default"),
                 group=item.get("group", ""),
@@ -370,6 +373,7 @@ def load_manifest(path: Path) -> LockedGraph:
                 module_aliases=dict(item.get("module-aliases", {})),
                 source_base_dir=item.get("source-base-directory", ""),
                 isolation=item.get("isolation", "inprocess"),
+                allow_unsafe=item.get("allow-unsafe", False),
                 options=dict(item.get("options", {})),
             )
             for item in raw.get("groups", [])
@@ -420,6 +424,8 @@ def _validate(graph: LockedGraph, path: Path) -> None:
             raise ManifestError(f"Policy {policy_name!r} contains serialized credentials", manifest=path)
     if not isinstance(graph.policy.get("allow-insecure-transport", False), bool):
         raise ManifestError("Policy 'allow-insecure-transport' must be boolean", manifest=path)
+    if not isinstance(graph.policy.get("allow-unsafe", False), bool):
+        raise ManifestError("Policy 'allow-unsafe' must be boolean", manifest=path)
     for artifact in graph.artifacts:
         if artifact.id != f"sha256:{artifact.sha256}" or not digest_pattern.fullmatch(artifact.sha256):
             raise ManifestError(f"Artifact {artifact.id!r} has an invalid content identity", manifest=path)
@@ -470,8 +476,10 @@ def _validate(graph: LockedGraph, path: Path) -> None:
             raise ManifestError(f"Alias {request.name!r} has an invalid logical module", manifest=path)
         if not request.module and request.api != "load_package":
             raise ManifestError(f"Import request {request.name!r} has no selected module", manifest=path)
-        if request.isolation not in {"inprocess", "process"}:
+        if request.isolation not in {"auto", "inprocess", "shared", "process"}:
             raise ManifestError(f"Request {request.name!r} has an unsupported isolation policy", manifest=path)
+        if not isinstance(request.allow_unsafe, bool):
+            raise ManifestError(f"Request {request.name!r} has an invalid allow-unsafe policy", manifest=path)
         if request.mode not in {"explicit", "default", "using-context", "using-decorator"}:
             raise ManifestError(f"Request {request.name!r} has an unsupported declaration mode", manifest=path)
         if _contains_secret(request.specifier) or _contains_secret(request.index_identity):
@@ -493,8 +501,10 @@ def _validate(graph: LockedGraph, path: Path) -> None:
             raise ManifestError(f"Request group {group.id!r} references missing module aliases", manifest=path)
         if any(not re.fullmatch(r"realm_[0-9a-f]{24}", item) for item in group.resolved_graph_ids):
             raise ManifestError(f"Request group {group.id!r} has an invalid resolved realm identity", manifest=path)
-        if group.isolation not in {"inprocess", "process"}:
+        if group.isolation not in {"auto", "inprocess", "shared", "process"}:
             raise ManifestError(f"Request group {group.id!r} has unsupported isolation", manifest=path)
+        if not isinstance(group.allow_unsafe, bool):
+            raise ManifestError(f"Request group {group.id!r} has an invalid allow-unsafe policy", manifest=path)
         serialized_group = (*group.specifiers, *group.normalized_specifiers, *group.options.values())
         if any(_contains_secret(value) for value in serialized_group):
             raise ManifestError(f"Request group {group.id!r} contains serialized credentials", manifest=path)

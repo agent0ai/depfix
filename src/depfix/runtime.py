@@ -1,4 +1,4 @@
-"""Realm-scoped synthetic module runtime for pure-Python artifacts."""
+"""Synthetic isolated and conventional shared runtimes for locked artifacts."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ from .errors import (
     ModuleNotProvidedError,
     NativeIsolationRequired,
     RealmImportError,
+    SharedImportConflictError,
     UndeclaredImportError,
 )
 from .models import Alias, Artifact, LockedGraph, Node
@@ -38,6 +39,48 @@ _FACADE_ROOTS = {"importlib", "pkgutil"}
 _COMPATIBILITY_IMPORT_ALIASES = {
     "setuptools": {"distutils": "setuptools._distutils"},
 }
+_STANDARD_IMPORT_MODULE = importlib.import_module
+_SHARED_LOCK = threading.RLock()
+_SHARED_ROOT_OWNERS: dict[str, dict[tuple[str, str, str], tuple[bool, int]]] = {}
+_SHARED_PATH_STATE: dict[str, tuple[int, int | None]] = {}
+
+
+def _module_locations(module: object) -> tuple[Path, ...]:
+    locations: list[Path] = []
+    filename = getattr(module, "__file__", None)
+    if isinstance(filename, str):
+        locations.append(Path(filename).absolute())
+    package_paths = getattr(module, "__path__", ())
+    if package_paths is not None:
+        for value in package_paths:
+            if isinstance(value, str):
+                path = Path(value).absolute()
+                if path not in locations:
+                    locations.append(path)
+    return tuple(locations)
+
+
+def _loaded_module_locations(root: str) -> tuple[bool, tuple[Path, ...]]:
+    found = False
+    locations: list[Path] = []
+    for name, module in tuple(sys.modules.items()):
+        if name != root and not name.startswith(root + "."):
+            continue
+        if module is None:
+            continue
+        found = True
+        for path in _module_locations(module):
+            if path not in locations:
+                locations.append(path)
+    return found, tuple(locations)
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,12 +271,13 @@ class AliasRootLoader(importlib.abc.Loader):
             alias = runtime.graph.alias_index.get(name)
             if alias is None:
                 raise AttributeError(name)
+            selected_runtime = runtime.alias_runtime(name)
             if alias.api == "load_package":
                 from .handles import PackageHandle
 
-                value: object = PackageHandle(runtime, alias)
+                value: object = PackageHandle(selected_runtime, alias)
             else:
-                value = runtime.load_alias(name)
+                value = selected_runtime.import_for_node(alias.node, alias.module)
             module.__dict__[name] = value
             return value
 
@@ -272,18 +316,56 @@ class AliasFinder(importlib.abc.MetaPathFinder):
 
 class DepfixRuntime:
     def __init__(
-        self, graph: LockedGraph, cache: Cache, *, manifest: Path | None = None, lockfile: Path | None = None
+        self,
+        graph: LockedGraph,
+        cache: Cache,
+        *,
+        manifest: Path | None = None,
+        lockfile: Path | None = None,
+        import_mode: str = "inprocess",
+        active_node_ids: Iterable[str] | None = None,
+        allow_unsafe: bool = False,
     ) -> None:
+        if import_mode not in {"inprocess", "shared"}:
+            raise ValueError("import_mode must be 'inprocess' or 'shared'")
         self.graph = graph
         self.cache = cache
         self.manifest = manifest or lockfile
+        self.import_mode = import_mode
+        self.allow_unsafe = allow_unsafe
         self._nodes = graph.node_index
         self._artifacts = graph.artifact_index
+        selected_nodes = tuple(dict.fromkeys(active_node_ids or self._nodes))
+        missing_nodes = set(selected_nodes) - set(self._nodes)
+        if missing_nodes:
+            raise ValueError(f"active_node_ids contains unknown nodes: {sorted(missing_nodes)}")
+        self._active_node_ids = selected_nodes
         self._locks: dict[tuple[str, str], threading.RLock] = {}
         self._locks_guard = threading.Lock()
         self._locations: dict[str, tuple[Node, str, _Location]] = {}
         self._facades: dict[tuple[str, str, str], ModuleType] = {}
         self._finder = AliasFinder(self)
+        self._shared_paths: tuple[str, ...] = ()
+        self._shared_claims: dict[str, dict[tuple[str, str, str], bool]] = {}
+        self._dispatch_alias_modes = False
+
+    @property
+    def shared(self) -> bool:
+        return self.import_mode == "shared"
+
+    def enable_alias_mode_dispatch(self) -> None:
+        """Select each prepared alias's runtime mode when aliases are loaded through this manifest runtime."""
+        self._dispatch_alias_modes = True
+
+    def alias_runtime(self, alias_name: str) -> DepfixRuntime:
+        alias = self.graph.alias_index.get(alias_name)
+        if alias is None:
+            raise RealmImportError("Unknown manifest alias", module=alias_name, manifest=self.manifest)
+        if not self._dispatch_alias_modes:
+            return self
+        from .manager import runtime_for_alias
+
+        return runtime_for_alias(self.graph.graph_id, alias.node, alias_name)
 
     def activate(self) -> DepfixRuntime:
         for artifact in self.graph.artifacts:
@@ -295,19 +377,182 @@ class DepfixRuntime:
                     artifact_hash=artifact.sha256,
                     remediation="run `depfix install <manifest> --frozen` before activating it",
                 )
+        if self.shared:
+            self._activate_shared()
         if not any(finder is self._finder for finder in sys.meta_path):
             sys.meta_path.insert(0, self._finder)
         return self
 
     def deactivate(self) -> None:
-        """Remove this runtime's public alias finder; loaded realm modules remain valid."""
+        """Remove runtime hooks and release shared-path registrations."""
         sys.meta_path[:] = [finder for finder in sys.meta_path if finder is not self._finder]
+        if self.shared:
+            self._deactivate_shared()
+
+    def _activate_shared(self) -> None:
+        claims = self._shared_graph_claims()
+        externally_owned_roots = self._shared_externally_owned_roots()
+        paths = self._shared_graph_paths()
+        with _SHARED_LOCK:
+            conflicts: list[str] = []
+            for root, requested in claims.items():
+                combined = dict(_SHARED_ROOT_OWNERS.get(root, {}))
+                for fingerprint, is_namespace in requested.items():
+                    previous = combined.get(fingerprint)
+                    combined[fingerprint] = (is_namespace, previous[1] if previous else 0)
+                if len(combined) > 1 and not all(namespace for namespace, _count in combined.values()):
+                    owner_names = ", ".join(
+                        f"{distribution}=={version}" for distribution, version, _artifact in sorted(combined)
+                    )
+                    conflicts.append(f"{root}: {owner_names}")
+                    continue
+                loaded, locations = _loaded_module_locations(root)
+                desired = self._shared_owner_paths(combined)
+                if (
+                    root in externally_owned_roots
+                    and loaded
+                    and (
+                        not locations
+                        or any(not any(_is_relative_to(location, base) for base in desired) for location in locations)
+                    )
+                ):
+                    origin = locations[0] if locations else "an unknown location"
+                    conflicts.append(f"{root}: already imported from {origin}")
+            if conflicts:
+                raise SharedImportConflictError(
+                    "Shared import mode cannot replace an incompatible module already owned by this process",
+                    candidates=tuple(conflicts),
+                    manifest=self.manifest,
+                    remediation="reuse the loaded version, start a fresh process, or isolate pure packages",
+                )
+            for root, requested in claims.items():
+                registered_owners = _SHARED_ROOT_OWNERS.setdefault(root, {})
+                for fingerprint, is_namespace in requested.items():
+                    previous = registered_owners.get(fingerprint)
+                    registered_owners[fingerprint] = (is_namespace, (previous[1] if previous else 0) + 1)
+            original_positions = {
+                value: sys.path.index(value) for value in paths if value not in _SHARED_PATH_STATE and value in sys.path
+            }
+            new_paths: list[str] = []
+            for value in paths:
+                state = _SHARED_PATH_STATE.get(value)
+                if state is not None:
+                    _SHARED_PATH_STATE[value] = (state[0] + 1, state[1])
+                    continue
+                original_index = original_positions.get(value)
+                sys.path[:] = [entry for entry in sys.path if entry != value]
+                _SHARED_PATH_STATE[value] = (1, original_index)
+                new_paths.append(value)
+            sys.path[:0] = new_paths
+            importlib.invalidate_caches()
+            self._shared_paths = paths
+            self._shared_claims = claims
+
+    def _deactivate_shared(self) -> None:
+        with _SHARED_LOCK:
+            removable_paths: dict[str, int | None] = {}
+            for root, requested in self._shared_claims.items():
+                owners = _SHARED_ROOT_OWNERS.get(root)
+                if owners is None:
+                    continue
+                for fingerprint in requested:
+                    previous = owners.get(fingerprint)
+                    if previous is None:
+                        continue
+                    if previous[1] <= 1:
+                        del owners[fingerprint]
+                    else:
+                        owners[fingerprint] = (previous[0], previous[1] - 1)
+                if not owners:
+                    del _SHARED_ROOT_OWNERS[root]
+            for value in self._shared_paths:
+                state = _SHARED_PATH_STATE.get(value)
+                if state is None:
+                    continue
+                if state[0] <= 1:
+                    _SHARED_PATH_STATE.pop(value, None)
+                    removable_paths[value] = state[1]
+                else:
+                    _SHARED_PATH_STATE[value] = (state[0] - 1, state[1])
+            if removable_paths:
+                sys.path[:] = [value for value in sys.path if value not in removable_paths]
+                for name, module in tuple(sys.modules.items()):
+                    locations = _module_locations(module)
+                    if locations and all(
+                        any(_is_relative_to(location, Path(root)) for root in removable_paths) for location in locations
+                    ):
+                        sys.modules.pop(name, None)
+                for value, index in sorted(
+                    removable_paths.items(), key=lambda item: item[1] if item[1] is not None else len(sys.path)
+                ):
+                    if index is not None and value not in sys.path:
+                        sys.path.insert(min(index, len(sys.path)), value)
+                importlib.invalidate_caches()
+            self._shared_paths = ()
+            self._shared_claims = {}
+
+    def _shared_graph_claims(self) -> dict[str, dict[tuple[str, str, str], bool]]:
+        claims: dict[str, dict[tuple[str, str, str], bool]] = {}
+        for node_id in self._active_node_ids:
+            node = self._nodes[node_id]
+            fingerprint = (node.distribution, node.version, node.artifact)
+            for provided in node.provided_modules:
+                root = provided.split(".", 1)[0]
+                is_namespace = root in node.namespace_contributions
+                claims.setdefault(root, {})[fingerprint] = is_namespace
+        for root, owners in claims.items():
+            if len(owners) > 1 and not all(owners.values()):
+                raise SharedImportConflictError(
+                    "One resolved graph contains incompatible providers for shared import mode",
+                    module=root,
+                    candidates=tuple(
+                        f"{distribution}=={version}" for distribution, version, _artifact in sorted(owners)
+                    ),
+                    manifest=self.manifest,
+                    remediation="use inprocess isolation for multiversion pure-Python graphs",
+                )
+        return claims
+
+    def _shared_externally_owned_roots(self) -> set[str]:
+        """Return public and explicitly requested roots that shared mode must own exactly."""
+        roots = {
+            name.split(".", 1)[0] for node_id in self._active_node_ids for name in self._nodes[node_id].public_modules
+        }
+        roots.update(
+            alias.module.split(".", 1)[0]
+            for alias in self.graph.aliases
+            if alias.node in self._active_node_ids and alias.module
+        )
+        return roots
+
+    def _shared_graph_paths(self) -> tuple[str, ...]:
+        paths: list[str] = []
+        artifact_ids = dict.fromkeys(self._nodes[node_id].artifact for node_id in self._active_node_ids)
+        for artifact_id in artifact_ids:
+            target = self.cache.unpacked_path(artifact_id)
+            for category in ("purelib", "platlib"):
+                root = target / category
+                value = str(root)
+                if root.is_dir() and value not in paths:
+                    paths.append(value)
+        return tuple(paths)
+
+    def _shared_owner_paths(self, owners: Iterable[tuple[str, str, str]]) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        for _distribution, _version, artifact_id in owners:
+            target = self.cache.unpacked_path(artifact_id)
+            for category in ("purelib", "platlib"):
+                root = target / category
+                if root.is_dir() and root not in paths:
+                    paths.append(root)
+        return tuple(paths)
 
     def load_alias(self, alias_name: str) -> ModuleType:
         alias = self.graph.alias_index.get(alias_name)
         if alias is None:
             raise RealmImportError("Unknown manifest alias", module=alias_name, manifest=self.manifest)
-        return self.import_for_node(alias.node, alias.module)
+        runtime = self.alias_runtime(alias_name)
+        return runtime.import_for_node(alias.node, alias.module)
 
     def import_for_node(self, caller_node_id: str, logical_name: str) -> ModuleType:
         if not logical_name or not all(part.isidentifier() for part in logical_name.split(".")):
@@ -319,6 +564,17 @@ class DepfixRuntime:
                 manifest=self.manifest,
             )
         caller = self._nodes[caller_node_id]
+        root = logical_name.split(".", 1)[0]
+        if self.shared:
+            if root not in self._shared_claims:
+                raise UndeclaredImportError(
+                    "No locked artifact exposes this import in shared mode",
+                    module=logical_name,
+                    referrer=caller.id,
+                    manifest=self.manifest,
+                    remediation="declare the package or dependency before importing it",
+                )
+            return _STANDARD_IMPORT_MODULE(logical_name)
         providers = self._provider_nodes(caller, logical_name)
         if not providers:
             redirected = self._compatibility_import_name(caller, logical_name)
@@ -334,7 +590,6 @@ class DepfixRuntime:
                     "declare the dependency in package metadata; ambient site-packages are intentionally ignored"
                 ),
             )
-        root = logical_name.split(".", 1)[0]
         if len(providers) > 1:
             if not all(root in node.namespace_contributions for node in providers):
                 raise ImportOwnershipError(
@@ -399,6 +654,25 @@ class DepfixRuntime:
         canonical = self.canonical_name(node.id, logical_name)
         lock = self._module_lock(node.id, logical_name)
         with lock:
+            location = self._locate(node, logical_name)
+            if (
+                location.source is not None
+                and location.source.suffix.lower() in {".so", ".pyd", ".dll", ".dylib"}
+                and not self.allow_unsafe
+            ):
+                raise NativeIsolationRequired(
+                    "Native module loading is unsafe in an in-process Depfix realm",
+                    module=logical_name,
+                    referrer=node.id,
+                    realm=node.id,
+                    manifest=self.manifest,
+                    artifact_hash=self._artifacts[node.artifact].sha256,
+                    remediation=(
+                        "use automatic/shared isolation, pass allow_unsafe=True for this request, "
+                        "call depfix.configure(allow_unsafe=True) process-wide, or set "
+                        "DEPFIX_ALLOW_UNSAFE=1"
+                    ),
+                )
             existing = sys.modules.get(canonical)
             if existing is not None:
                 return existing
@@ -414,7 +688,6 @@ class DepfixRuntime:
                         return dynamic
                     if self.is_standard_library(dynamic_name.split(".", 1)[0]):
                         return dynamic
-            location = self._locate(node, logical_name)
             if not self._location_exists(location):
                 raise RealmImportError(
                     "Provider does not contain the requested module",
@@ -430,16 +703,8 @@ class DepfixRuntime:
                 ".dll",
                 ".dylib",
             }:
-                raise NativeIsolationRequired(
-                    "Native module loading is not safe in an in-process Depfix realm",
-                    module=logical_name,
-                    referrer=node.id,
-                    realm=node.id,
-                    manifest=self.manifest,
-                    artifact_hash=self._artifacts[node.artifact].sha256,
-                    remediation="run this package in an application-owned worker process",
-                )
-            if location.is_namespace:
+                module = self._create_native_module(node, logical_name, location)
+            elif location.is_namespace:
                 module = self._create_namespace(
                     node, logical_name, (location.package_dir,) if location.package_dir else location.namespace_paths
                 )
@@ -467,6 +732,38 @@ class DepfixRuntime:
         self._locations[canonical] = (node, logical_name, location)
         try:
             loader.exec_module(module)
+        except BaseException:
+            if sys.modules.get(canonical) is module:
+                del sys.modules[canonical]
+            self._locations.pop(canonical, None)
+            raise
+        return module
+
+    def _create_native_module(self, node: Node, logical_name: str, location: _Location) -> ModuleType:
+        if location.source is None:
+            raise RealmImportError("Native module has no source path", module=logical_name, realm=node.id)
+        canonical = self.canonical_name(node.id, logical_name)
+        self._ensure_synthetic_parents(canonical)
+        loader = importlib.machinery.ExtensionFileLoader(canonical, str(location.source))
+        search_locations = [str(location.package_dir)] if location.is_package and location.package_dir else None
+        spec = importlib.util.spec_from_file_location(
+            canonical,
+            location.source,
+            loader=loader,
+            submodule_search_locations=search_locations,
+        )
+        if spec is None:
+            raise RealmImportError("Unable to construct native module spec", module=logical_name, realm=node.id)
+        spec.loader_state = self._loader_state(node, logical_name)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[canonical] = module
+        self._locations[canonical] = (node, logical_name, location)
+        try:
+            loader.exec_module(module)
+            module.__dict__.update(self._metadata(node, logical_name))
+            module.__dict__["__depfix_logical_package__"] = (
+                logical_name if location.is_package else logical_name.rpartition(".")[0]
+            )
         except BaseException:
             if sys.modules.get(canonical) is module:
                 del sys.modules[canonical]
@@ -545,32 +842,34 @@ class DepfixRuntime:
         return module
 
     def _locate(self, node: Node, logical_name: str) -> _Location:
-        root = self.cache.unpacked_path(node.artifact) / "purelib"
         relative = Path(*logical_name.split("."))
-        package_dir = root / relative
-        initializer = package_dir / "__init__.py"
-        if initializer.is_file():
-            return _Location(initializer, package_dir)
-        module_file = (root / relative).with_suffix(".py")
-        if module_file.is_file():
-            return _Location(module_file, None)
-        native_stem = root / relative
-        native_candidates = sorted(
-            (
-                *native_stem.parent.glob(native_stem.name + ".*.so"),
-                *native_stem.parent.glob(native_stem.name + ".*.pyd"),
-                native_stem.with_suffix(".so"),
-                native_stem.with_suffix(".pyd"),
-                *native_stem.parent.glob(native_stem.name + ".dll"),
-                *native_stem.parent.glob(native_stem.name + ".dylib"),
-            ),
-            key=lambda item: item.name,
+        unpacked = self.cache.unpacked_path(node.artifact)
+        roots = tuple(root for category in ("purelib", "platlib") if (root := unpacked / category).is_dir())
+        namespace_paths: list[Path] = []
+        native_suffixes = tuple(
+            dict.fromkeys((*importlib.machinery.EXTENSION_SUFFIXES, ".pyd", ".so", ".dll", ".dylib"))
         )
-        native_candidates = [item for item in native_candidates if item.is_file()]
-        if native_candidates:
-            return _Location(native_candidates[0], None)
-        if package_dir.is_dir():
-            return _Location(None, package_dir, (package_dir,))
+        for root in roots:
+            package_dir = root / relative
+            initializer = package_dir / "__init__.py"
+            if initializer.is_file():
+                return _Location(initializer, package_dir)
+            for suffix in native_suffixes:
+                native_initializer = package_dir / f"__init__{suffix}"
+                if native_initializer.is_file():
+                    return _Location(native_initializer, package_dir)
+            module_file = (root / relative).with_suffix(".py")
+            if module_file.is_file():
+                return _Location(module_file, None)
+            native_stem = root / relative
+            for suffix in native_suffixes:
+                native_module = native_stem.parent / f"{native_stem.name}{suffix}"
+                if native_module.is_file():
+                    return _Location(native_module, None)
+            if package_dir.is_dir():
+                namespace_paths.append(package_dir)
+        if namespace_paths:
+            return _Location(None, namespace_paths[0], tuple(namespace_paths))
         return _Location(None, None)
 
     @staticmethod
@@ -631,6 +930,7 @@ class DepfixRuntime:
             "__depfix_distribution__": node.distribution,
             "__depfix_version__": node.version,
             "__depfix_artifact_id__": artifact.id,
+            "__depfix_allow_unsafe__": self.allow_unsafe,
             "__depfix_specifier__": aliases[0].specifier if aliases else None,
             "__depfix_dependency_map__": MappingProxyType(dict(node.dependencies)),
         }

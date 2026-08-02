@@ -138,7 +138,12 @@ class Resolver:
                     source_column=declaration.source_column,
                     assignment=declaration.assignment,
                     explicit_module=declaration.module is not None,
-                    isolation=str(config.policy.get("isolation", "inprocess")),
+                    isolation=declaration.isolation or str(config.policy.get("isolation", "auto")),
+                    allow_unsafe=(
+                        declaration.allow_unsafe
+                        if declaration.allow_unsafe is not None
+                        else bool(config.policy.get("allow-unsafe", False))
+                    ),
                     index_identity=_index_policy_identity(self._project_indexes),
                     source_policy=str(config.policy.get("source-policy", "default")),
                     group=declaration.group_id,
@@ -328,7 +333,9 @@ class Resolver:
             allow_insecure=self._allow_insecure,
         )
         inspection = self._inspect_artifact(blob, candidate)
-        if inspection.distribution != candidate.distribution or inspection.version != candidate.version:
+        if inspection.distribution != candidate.distribution or not _versions_equivalent(
+            inspection.version, candidate.version
+        ):
             raise ResolutionError(
                 "Repository record and downloaded wheel metadata disagree",
                 artifact_hash=candidate.sha256,
@@ -894,6 +901,13 @@ class Resolver:
 
 def _node_id(path: str, artifact_id: str) -> str:
     return "node_" + hashlib.sha256(f"{path}\0{artifact_id}".encode()).hexdigest()[:24]
+
+
+def _versions_equivalent(left: str, right: str) -> bool:
+    try:
+        return Version(left) == Version(right)
+    except InvalidVersion:
+        return left == right
 
 
 def _index_identity(value: str) -> str:

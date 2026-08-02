@@ -180,6 +180,14 @@ class NativeIsolationRequired(ModuleNotProvidedError):
     pass
 
 
+class SharedImportConflictError(ModuleDiscoveryError):
+    """A process-global import name is already owned by incompatible code."""
+
+
+class UnsafePackageError(ModuleDiscoveryError):
+    """A request needs an explicit unsafe-loading policy override."""
+
+
 class BundleError(DepfixError):
     pass
 

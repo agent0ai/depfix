@@ -27,11 +27,17 @@ def default(
     frozen: bool | None = None,
     offline: bool | None = None,
     isolation: str | None = None,
+    allow_unsafe: bool | None = None,
 ) -> None:
     """Persist package selections for subsequent ordinary imports."""
     ensure_dispatcher()
     source_file, source_line, base_dir = _caller_location(1)
-    settings = resolve_settings(manifest=manifest, frozen=frozen, offline=offline)
+    settings = resolve_settings(
+        manifest=manifest,
+        frozen=frozen,
+        offline=offline,
+        allow_unsafe=allow_unsafe,
+    )
     selection = prepare_import_selection(
         _validate_specifiers(specifiers, "default"),
         mode="default",
@@ -52,6 +58,7 @@ def using(
     frozen: bool | None = None,
     offline: bool | None = None,
     isolation: str | None = None,
+    allow_unsafe: bool | None = None,
 ) -> _Using:
     """Create a context manager/decorator for temporary ordinary imports."""
     ensure_dispatcher()
@@ -64,6 +71,7 @@ def using(
         frozen=frozen,
         offline=offline,
         isolation=isolation,
+        allow_unsafe=allow_unsafe,
         source_file=source_file,
         source_line=source_line,
         base_dir=base_dir,
@@ -80,6 +88,7 @@ class _Using:
         frozen: bool | None,
         offline: bool | None,
         isolation: str | None,
+        allow_unsafe: bool | None,
         source_file: str,
         source_line: int,
         base_dir: Path,
@@ -91,6 +100,7 @@ class _Using:
         self.frozen = frozen
         self.offline = offline
         self.isolation = isolation
+        self.allow_unsafe = allow_unsafe
         self.source_file = source_file
         self.source_line = source_line
         self.base_dir = base_dir
@@ -100,7 +110,12 @@ class _Using:
     def __enter__(self) -> _Using:
         if self._token is not None:
             raise InvalidUsingScopeError("The same depfix.using() context manager is already active")
-        settings = resolve_settings(manifest=self.manifest, frozen=self.frozen, offline=self.offline)
+        settings = resolve_settings(
+            manifest=self.manifest,
+            frozen=self.frozen,
+            offline=self.offline,
+            allow_unsafe=self.allow_unsafe,
+        )
         selection = prepare_import_selection(
             self.specifiers,
             mode=self.mode,
@@ -175,6 +190,7 @@ class _Using:
             frozen=self.frozen,
             offline=self.offline,
             isolation=self.isolation,
+            allow_unsafe=self.allow_unsafe,
             source_file=self.source_file,
             source_line=self.source_line,
             base_dir=self.base_dir,

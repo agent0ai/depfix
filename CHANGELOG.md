@@ -4,6 +4,20 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-02
+
+- Added request-scoped `auto`, `inprocess`, and `shared` import modes. Pure graphs retain synthetic multiversion realms;
+  native graphs use guarded logical imports, compatible requests are idempotent, and incompatible public-root replacement
+  raises `SharedImportConflictError`.
+- Let `using()` expose a first compatible shared/native selection as scoped syntax sugar. Native modules remain loaded and
+  keep process ownership after scope exit, so later incompatible versions fail explicitly instead of being swapped.
+- Added deny-by-default unsafe package handling with per-request `allow_unsafe` options on every loading API, centralized
+  process/project/environment configuration, manifest persistence, typed remediation, and deliberate in-process extension
+  loading for trusted callers.
+- Raised the verified artifact limit to 1 GiB, added bounded resumable downloads without weakening exact size/SHA-256
+  promotion, and accepted PEP 440-equivalent registry/wheel version spellings.
+- Added an offline compatibility probe covering Pydantic, orjson, NumPy, Pillow, psutil, cryptography, and optional Torch.
+
 ## 0.2.1 - 2026-08-01
 
 - Fixed a transient Windows cache-lock race where concurrent artifact writers could receive `PermissionError` while the

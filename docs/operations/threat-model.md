@@ -7,21 +7,28 @@ the normal Python process authority.
 Controls include:
 
 - SHA-256 content addressing, size checks, wheel identity/Core Metadata checks, and full wheel `RECORD` validation;
-- HTTPS-only remote artifact downloads, explicit frozen hashes, redirect provenance, bounded reads, and secret redaction;
+- HTTPS-only remote artifact downloads, explicit frozen hashes, redirect provenance, bounded resumable retries, and secret
+  redaction; exact size and SHA-256 checks still gate promotion after every retry;
 - traversal, absolute/drive path, backslash, link/device, duplicate/case-collision, file-count, and expanded-size rejection;
 - canonical manifest/bundle identities and complete graph-reference validation;
 - no credential serialization, optional index/host allowlists, redirect validation, and first-index uv policy to reduce
   dependency-confusion exposure;
 - temporary construction, cross-process locks, read-only immutable targets, and atomic promotion;
-- no changes to `sys.path` or active `site-packages` and no ambient third-party import fallback;
-- rejection of unknown native module loading in an in-process realm;
+- no `sys.path` changes or ambient third-party fallback for in-process realms;
+- guarded shared mode prepends only verified cache targets, owns public/requested roots exactly, rejects incompatible
+  replacement, and treats private top-level helpers as conventional process-global best effort;
+- denial by default of native extension loading in strict in-process realms and packages classified as known unsafe;
+  explicit `allow_unsafe` requests record and accept that reduced isolation without weakening artifact or network checks;
+- shared `using()` scopes limit lookup visibility but retain native process ownership after exit;
 - offline/frozen enforcement before resolution or network work.
 
 Residual risks include malicious Python code, compromised build backends during permitted source builds, compromised
 credentials supplied by external tools, denial of service below configured limits, local users able to mutate the same
-cache account, and package behavior that depends on unsupported process-global discovery. Prefer exact wheels, trusted
-indices, frozen manifests, offline bundles, least-privilege build workers, and isolated operating-system identities for
-untrusted packages.
+cache account, native ABI/system-library incompatibility, process-global private-helper collisions in shared mode, and
+package behavior that depends on unsupported discovery. Unsafe loading is an execution-policy opt-in, not a sandbox escape
+control: enabled package code has normal process authority. Prefer exact wheels, trusted indices, frozen manifests, offline
+bundles, fresh workers for native version changes, least-privilege build workers, and isolated operating-system identities
+for untrusted packages.
 
 Report vulnerabilities according to [SECURITY.md](../../SECURITY.md), without including live credentials or private package
 contents.

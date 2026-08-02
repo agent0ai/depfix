@@ -104,6 +104,13 @@ def export_project(
             source=str(project_root),
             remediation="add import_module/load_package calls or pass include=[...]",
         )
+    settings = resolve_settings(
+        cache_dir=None,
+        index_url=index_url,
+        extra_index_url=tuple(extra_index_url),
+        discover=True,
+        discovery_start=project_root,
+    )
     aliases = _unique_aliases(site.suggested_alias for site in sites)
     declarations = tuple(
         ImportDeclaration(
@@ -119,15 +126,10 @@ def export_project(
             group_id=site.group_id,
             mode=site.mode,
             enclosing_function=site.enclosing_function,
+            isolation=site.isolation,
+            allow_unsafe=settings.allow_unsafe if site.allow_unsafe is None else site.allow_unsafe,
         )
         for alias, site in zip(aliases, sites, strict=True)
-    )
-    settings = resolve_settings(
-        cache_dir=None,
-        index_url=index_url,
-        extra_index_url=tuple(extra_index_url),
-        discover=True,
-        discovery_start=project_root,
     )
     cache = Cache(settings.cache_dir)
     progress = ProgressReporter(settings.log_level)
@@ -138,6 +140,7 @@ def export_project(
             "frozen": True,
             "index": _sanitized_index(settings.index_url),
             "extra-indexes": tuple(_sanitized_index(item) for item in settings.extra_index_url),
+            "allow-unsafe": settings.allow_unsafe,
         }
     )
     graph = Resolver(cache, settings=settings, progress=progress).resolve(
@@ -582,6 +585,7 @@ def _attach_scan_groups(graph: LockedGraph, scanned: tuple[ScanGroup, ...]) -> t
                     assignment=source_alias,
                     explicit_module=True,
                     isolation=provider.isolation,
+                    allow_unsafe=provider.allow_unsafe,
                     index_identity=provider.index_identity,
                     source_policy=provider.source_policy,
                     group=group.id,
@@ -592,9 +596,19 @@ def _attach_scan_groups(graph: LockedGraph, scanned: tuple[ScanGroup, ...]) -> t
             generated[name] = logical
         realm_id = resolved_realm_id(graph, tuple(alias.node for alias in roots))
         options = {key: redact(value) for key, value in group.options}
-        isolation = json.loads(options.get("isolation", '"inprocess"'))
+        isolation = json.loads(options.get("isolation", '"auto"'))
         if not isinstance(isolation, str):
-            isolation = "inprocess"
+            isolation = "auto"
+        rendered_allow_unsafe = options.get("allow_unsafe")
+        if rendered_allow_unsafe is None:
+            allow_unsafe = roots[0].allow_unsafe if roots else False
+        else:
+            try:
+                allow_unsafe = json.loads(rendered_allow_unsafe)
+            except json.JSONDecodeError:
+                allow_unsafe = False
+            if not isinstance(allow_unsafe, bool):
+                allow_unsafe = False
         groups.append(
             RequestGroup(
                 group.id,
@@ -612,6 +626,7 @@ def _attach_scan_groups(graph: LockedGraph, scanned: tuple[ScanGroup, ...]) -> t
                 module_aliases=generated,
                 source_base_dir=PurePosixPath(group.source_file).parent.as_posix(),
                 isolation=isolation,
+                allow_unsafe=allow_unsafe,
                 options=options,
             )
         )
@@ -709,6 +724,7 @@ def _dynamic_config_sites(path: Path, root: Path):  # type: ignore[no-untyped-de
                 root,
                 "included",
                 item.get("alias") or _suggest_alias(None, parsed.distribution or module or "package"),
+                allow_unsafe=item.get("allow-unsafe"),
             )
         )
     return result

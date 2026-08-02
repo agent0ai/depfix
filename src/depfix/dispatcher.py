@@ -174,9 +174,10 @@ def _realm_importer(globals: dict[str, Any] | None) -> BoundImporter | None:
     node_id = globals.get("__depfix_node_id__")
     if not isinstance(graph_id, str) or not isinstance(node_id, str):
         return None
+    allow_unsafe = globals.get("__depfix_allow_unsafe__", False)
     from .manager import runtime_for_graph
 
-    runtime = runtime_for_graph(graph_id)
+    runtime = runtime_for_graph(graph_id, node_id, allow_unsafe is True)
     logical_package = globals.get("__depfix_logical_package__", "")
     return BoundImporter(runtime, node_id, logical_package if isinstance(logical_package, str) else "")
 

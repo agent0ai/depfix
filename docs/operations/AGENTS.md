@@ -12,6 +12,8 @@
 ## Local Contracts
 
 - Safety claims state both the protected boundary and residual authority.
+- Unsafe-loading documentation must distinguish an explicit execution/isolation opt-in from artifact, network, and owner
+  correctness controls that cannot be bypassed.
 - Verification docs describe existing checks only.
 
 ## Work Guidance

@@ -13,6 +13,8 @@
 
 - Reference names and defaults must match implementation help and signatures.
 - Document `default()` and `using()` as the standard-import APIs; deprecated prototype activation is not a preferred API.
+- Keep `depfix.configure()` documented as the canonical process-wide Python configuration entry point and distinguish
+  effective defaults from inheriting per-call `None` values.
 
 ## Work Guidance
 

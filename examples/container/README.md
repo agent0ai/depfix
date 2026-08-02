@@ -4,7 +4,7 @@ Export `.depfix/imports.lock` on a matching CPython 3.13 Linux target before bui
 only when package declarations change; application source can change independently. For an offline image build, transfer a
 `.depfixbundle` and install it with `--offline --frozen` instead of reaching an index.
 
-From the repository root after Depfix 0.2.0 is published:
+From the repository root with Depfix 0.3.0 or later:
 
 ```bash
 depfix export examples/container -o .depfix/imports.lock

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -24,6 +25,8 @@ from .errors import CacheError, IntegrityError, redact
 from .models import Artifact
 
 _IS_WINDOWS = os.name == "nt"
+_DEFAULT_MAX_ARTIFACT_SIZE = 1024 * 1024 * 1024
+_DOWNLOAD_ATTEMPTS = 3
 
 
 class Cache:
@@ -31,7 +34,7 @@ class Cache:
         self,
         root: Path | None = None,
         *,
-        max_artifact_size: int = 256 * 1024 * 1024,
+        max_artifact_size: int = _DEFAULT_MAX_ARTIFACT_SIZE,
         timeout: float = 30.0,
     ) -> None:
         configured = os.environ.get("DEPFIX_CACHE_DIR")
@@ -123,6 +126,8 @@ class Cache:
         allow_insecure: bool = False,
     ) -> tuple[Path, str]:
         _validate_network_url(url, allowed_hosts=allowed_hosts, allow_insecure=allow_insecure)
+        if expected_size is not None and expected_size > self.max_artifact_size:
+            raise CacheError("Artifact exceeds configured download limit", artifact_hash=sha256)
         destination = self.blob_path(sha256)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.is_file():
@@ -138,41 +143,95 @@ class Cache:
             try:
                 digest = hashlib.sha256()
                 total = 0
-                with os.fdopen(fd, "wb") as output:
-                    with _open_url(
-                        url,
-                        timeout=self.timeout,
-                        allowed_hosts=allowed_hosts,
-                        allow_insecure=allow_insecure,
-                    ) as response:
-                        final_url = response.geturl()
-                        declared = response.headers.get("Content-Length")
-                        if declared and int(declared) > self.max_artifact_size:
-                            raise CacheError("Artifact exceeds configured download limit", artifact_hash=sha256)
-                        while True:
-                            chunk = response.read(1024 * 1024)
-                            if not chunk:
-                                break
-                            total += len(chunk)
-                            if total > self.max_artifact_size:
-                                raise CacheError("Artifact exceeds configured download limit", artifact_hash=sha256)
-                            digest.update(chunk)
-                            output.write(chunk)
+                with os.fdopen(fd, "w+b") as output:
+                    for attempt in range(_DOWNLOAD_ATTEMPTS):
+                        resume_from = total
+                        request: str | urllib.request.Request = url
+                        if resume_from:
+                            request = urllib.request.Request(
+                                url,
+                                headers={
+                                    "User-Agent": "depfix/0.1",
+                                    "Range": f"bytes={resume_from}-",
+                                },
+                            )
+                        response_total: int | None = None
+                        try:
+                            with _open_url(
+                                request,
+                                timeout=self.timeout,
+                                allowed_hosts=allowed_hosts,
+                                allow_insecure=allow_insecure,
+                            ) as response:
+                                final_url = response.geturl()
+                                content_range = response.headers.get("Content-Range")
+                                if resume_from and _content_range_start(content_range) != resume_from:
+                                    output.seek(0)
+                                    output.truncate()
+                                    digest = hashlib.sha256()
+                                    total = 0
+                                    resume_from = 0
+                                declared = _header_integer(response.headers.get("Content-Length"))
+                                range_total = _content_range_total(content_range)
+                                response_total = range_total or (
+                                    resume_from + declared if declared is not None else None
+                                )
+                                if response_total is not None and response_total > self.max_artifact_size:
+                                    raise CacheError(
+                                        "Artifact exceeds configured download limit",
+                                        artifact_hash=sha256,
+                                    )
+                                while True:
+                                    chunk = response.read(1024 * 1024)
+                                    if not chunk:
+                                        break
+                                    total += len(chunk)
+                                    if total > self.max_artifact_size:
+                                        raise CacheError(
+                                            "Artifact exceeds configured download limit",
+                                            artifact_hash=sha256,
+                                        )
+                                    digest.update(chunk)
+                                    output.write(chunk)
+                        except (OSError, http.client.HTTPException):
+                            if attempt + 1 == _DOWNLOAD_ATTEMPTS:
+                                raise CacheError(
+                                    "Artifact download failed after bounded retries",
+                                    artifact_hash=sha256,
+                                ) from None
+                            continue
+
+                        required_size = expected_size if expected_size is not None else response_total
+                        if required_size is not None and total < required_size:
+                            if attempt + 1 < _DOWNLOAD_ATTEMPTS:
+                                continue
+                            raise IntegrityError(
+                                "Downloaded artifact has the wrong size",
+                                artifact_hash=sha256,
+                                remediation=f"expected {required_size} bytes but received {total}",
+                            )
+                        if expected_size is not None and total > expected_size:
+                            raise IntegrityError(
+                                "Downloaded artifact has the wrong size",
+                                artifact_hash=sha256,
+                                remediation=f"expected {expected_size} bytes but received {total}",
+                            )
+                        actual = digest.hexdigest()
+                        if actual == sha256:
+                            break
+                        if attempt + 1 < _DOWNLOAD_ATTEMPTS:
+                            output.seek(0)
+                            output.truncate()
+                            digest = hashlib.sha256()
+                            total = 0
+                            continue
+                        raise IntegrityError(
+                            "Downloaded artifact hash mismatch",
+                            artifact_hash=sha256,
+                            remediation=f"expected {sha256}, received {actual}",
+                        )
                     output.flush()
                     os.fsync(output.fileno())
-                if expected_size is not None and total != expected_size:
-                    raise IntegrityError(
-                        "Downloaded artifact has the wrong size",
-                        artifact_hash=sha256,
-                        remediation=f"expected {expected_size} bytes but received {total}",
-                    )
-                actual = digest.hexdigest()
-                if actual != sha256:
-                    raise IntegrityError(
-                        "Downloaded artifact hash mismatch",
-                        artifact_hash=sha256,
-                        remediation=f"expected {sha256}, received {actual}",
-                    )
                 try:
                     os.chmod(temporary, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
                 except OSError:
@@ -300,6 +359,38 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _header_integer(value: object) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _content_range_start(value: object) -> int | None:
+    parsed = _parse_content_range(value)
+    return parsed[0] if parsed is not None else None
+
+
+def _content_range_total(value: object) -> int | None:
+    parsed = _parse_content_range(value)
+    return parsed[1] if parsed is not None else None
+
+
+def _parse_content_range(value: object) -> tuple[int, int | None] | None:
+    if not isinstance(value, str) or not value.startswith("bytes "):
+        return None
+    byte_range, separator, total_text = value[6:].partition("/")
+    start_text, dash, _end_text = byte_range.partition("-")
+    if separator != "/" or dash != "-":
+        return None
+    start = _header_integer(start_text)
+    total = None if total_text == "*" else _header_integer(total_text)
+    if start is None or (total_text != "*" and total is None):
+        return None
+    return start, total
 
 
 class _LocalResponse:

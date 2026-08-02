@@ -1,6 +1,6 @@
 FROM python:3.13-slim AS runtime
 
-ARG DEPFIX_VERSION=0.2.0
+ARG DEPFIX_VERSION=0.3.0
 RUN python -m pip install --no-cache-dir "depfix==${DEPFIX_VERSION}"
 WORKDIR /app
 COPY .depfix/imports.lock /app/.depfix/imports.lock

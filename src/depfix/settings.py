@@ -20,6 +20,7 @@ class Settings:
     manifest: Path | None = None
     frozen: bool = False
     offline: bool = False
+    allow_unsafe: bool = False
     cache_dir: Path = user_cache_path("depfix")
     uv: Path | None = None
     index_url: str | None = None
@@ -37,6 +38,7 @@ def configure(
     manifest: str | os.PathLike[str] | None = None,
     frozen: bool | None = None,
     offline: bool | None = None,
+    allow_unsafe: bool | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     uv: str | os.PathLike[str] | None = None,
     index_url: str | None = None,
@@ -48,6 +50,7 @@ def configure(
         "manifest": Path(manifest).expanduser().resolve() if manifest is not None else None,
         "frozen": frozen,
         "offline": offline,
+        "allow_unsafe": allow_unsafe,
         "cache_dir": Path(cache_dir).expanduser().resolve() if cache_dir is not None else None,
         "uv": Path(uv).expanduser().resolve() if uv is not None else None,
         "index_url": index_url,
@@ -71,6 +74,7 @@ def resolve_settings(
     manifest: str | os.PathLike[str] | None = None,
     frozen: bool | None = None,
     offline: bool | None = None,
+    allow_unsafe: bool | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     uv: str | os.PathLike[str] | None = None,
     index_url: str | None = None,
@@ -86,6 +90,7 @@ def resolve_settings(
         "manifest": _env_path("DEPFIX_MANIFEST"),
         "frozen": _env_bool("DEPFIX_FROZEN"),
         "offline": _env_bool("DEPFIX_OFFLINE"),
+        "allow_unsafe": _env_bool("DEPFIX_ALLOW_UNSAFE"),
         "cache_dir": _env_path("DEPFIX_CACHE_DIR"),
         "uv": _env_path("DEPFIX_UV"),
         "index_url": os.environ.get("DEPFIX_INDEX_URL"),
@@ -96,6 +101,7 @@ def resolve_settings(
         "manifest": Path(manifest).expanduser().resolve() if manifest is not None else None,
         "frozen": frozen,
         "offline": offline,
+        "allow_unsafe": allow_unsafe,
         "cache_dir": Path(cache_dir).expanduser().resolve() if cache_dir is not None else None,
         "uv": Path(uv).expanduser().resolve() if uv is not None else None,
         "index_url": index_url,
@@ -120,6 +126,7 @@ def resolve_settings(
         manifest=selected_manifest,
         frozen=bool(choose("frozen")),
         offline=bool(choose("offline")),
+        allow_unsafe=bool(choose("allow_unsafe")),
         cache_dir=Path(choose("cache_dir")),
         uv=Path(choose("uv")) if choose("uv") is not None else None,
         index_url=choose("index_url"),
@@ -222,7 +229,7 @@ def _project_config_values(start: Path | None = None) -> dict[str, Any]:
     }
     values = {aliases.get(key, key.replace("-", "_")): value for key, value in selected.items()}
     result: dict[str, Any] = {}
-    for key in ("frozen", "offline"):
+    for key in ("frozen", "offline", "allow_unsafe"):
         if key in values:
             if not isinstance(values[key], bool):
                 raise SpecifierError(

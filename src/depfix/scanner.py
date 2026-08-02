@@ -56,6 +56,8 @@ class ScanSite:
     group_id: str = ""
     mode: str = "explicit"
     enclosing_function: str = ""
+    isolation: str = "auto"
+    allow_unsafe: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +229,8 @@ class _Visitor(ast.NodeVisitor):
             return
         value = self._constant(node.args[0])
         module = None
+        isolation = "auto"
+        allow_unsafe: bool | None = None
         for keyword_arg in node.keywords:
             if keyword_arg.arg == "module":
                 module = self._constant(keyword_arg.value)
@@ -234,6 +238,28 @@ class _Visitor(ast.NodeVisitor):
                     self.dynamic.append(
                         DynamicRequest(
                             self.relative, node.lineno, node.col_offset, expression, "dynamic module= override"
+                        )
+                    )
+                    return
+            if keyword_arg.arg == "isolation":
+                isolation = self._constant(keyword_arg.value) or ""
+                if not isolation:
+                    self.dynamic.append(
+                        DynamicRequest(
+                            self.relative, node.lineno, node.col_offset, expression, "dynamic isolation= override"
+                        )
+                    )
+                    return
+            if keyword_arg.arg == "allow_unsafe":
+                allow_unsafe = self._constant_bool(keyword_arg.value)
+                if allow_unsafe is None:
+                    self.dynamic.append(
+                        DynamicRequest(
+                            self.relative,
+                            node.lineno,
+                            node.col_offset,
+                            expression,
+                            "dynamic allow_unsafe= override",
                         )
                     )
                     return
@@ -262,6 +288,8 @@ class _Visitor(ast.NodeVisitor):
                 self._assignment,
                 self.source.parent,
                 suggested_alias=alias,
+                isolation=isolation,
+                allow_unsafe=allow_unsafe,
             )
         )
 
@@ -411,6 +439,20 @@ class _Visitor(ast.NodeVisitor):
         for value, normalized_value in zip(values, normalized, strict=True):
             parsed = parse_source(value, base_dir=self.source.parent)
             alias = _suggest_alias(None, parsed.distribution or "package")
+            rendered_isolation = dict(options).get("isolation", '"auto"')
+            try:
+                isolation = json.loads(rendered_isolation)
+            except json.JSONDecodeError:
+                isolation = "auto"
+            if not isinstance(isolation, str):
+                isolation = "auto"
+            rendered_allow_unsafe = dict(options).get("allow_unsafe", "null")
+            try:
+                allow_unsafe = json.loads(rendered_allow_unsafe)
+            except json.JSONDecodeError:
+                allow_unsafe = None
+            if not isinstance(allow_unsafe, bool):
+                allow_unsafe = None
             self.requests.append(
                 ScanSite(
                     value,
@@ -426,6 +468,8 @@ class _Visitor(ast.NodeVisitor):
                     group_id=group_id,
                     mode=mode,
                     enclosing_function=enclosing_function,
+                    isolation=isolation,
+                    allow_unsafe=allow_unsafe,
                 )
             )
 
@@ -445,6 +489,12 @@ class _Visitor(ast.NodeVisitor):
                 item.value for item in node.values if isinstance(item, ast.Constant) and isinstance(item.value, str)
             ]
             return "".join(values)
+        return None
+
+    @staticmethod
+    def _constant_bool(node: ast.expr) -> bool | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+            return node.value
         return None
 
 

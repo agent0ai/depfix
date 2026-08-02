@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -7,6 +9,7 @@ import sysconfig
 import warnings
 import zipfile
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from conftest import file_spec
@@ -16,11 +19,19 @@ import depfix
 from depfix.cache import Cache, _validate_network_url
 from depfix.cli import main as cli_main
 from depfix.config import ImportDeclaration, ProjectConfig
-from depfix.errors import CacheError, MultipleImportModulesError, NoImportModulesError, ResolutionError, SourceError
-from depfix.manager import reset_runtime_state
+from depfix.errors import (
+    CacheError,
+    MultipleImportModulesError,
+    NoImportModulesError,
+    ResolutionError,
+    SharedImportConflictError,
+    SourceError,
+    UnsafePackageError,
+)
+from depfix.manager import activate_manifest, load_generated_alias, reset_runtime_state
 from depfix.manifest import load_manifest, write_manifest
 from depfix.project import create_bundle, export_project, install_manifest, verify_manifest
-from depfix.resolver import Resolver, _extract_source_archive
+from depfix.resolver import Resolver, _extract_source_archive, _versions_equivalent
 from depfix.scanner import scan_project
 from depfix.settings import Settings, reset_configuration, resolve_settings
 from depfix.sources import parse_source
@@ -59,6 +70,9 @@ def test_source_forms_normalize_without_confusing_git_authentication(tmp_path: P
 
 
 def test_core_metadata_and_artifact_module_discovery(tmp_path: Path, wheel_factory) -> None:
+    assert _versions_equivalent("13.0.3", "13.0.3.0")
+    assert not _versions_equivalent("13.0.3", "13.0.4")
+
     renamed = wheel_factory(
         "PyYAML",
         "6.0.2",
@@ -136,6 +150,257 @@ def test_stable_module_and_lazy_package_handle_contracts(tmp_path: Path, wheel_f
     assert package.modules["second"].VALUE == "second"
     with pytest.raises(MultipleImportModulesError):
         package.only_module()
+
+
+def test_auto_uses_process_shared_imports_for_native_graphs_and_rejects_a_second_version(
+    tmp_path: Path, wheel_factory
+) -> None:
+    first = wheel_factory(
+        "shared-native-demo",
+        "1.0.0",
+        {"shared_native_demo.py": "VERSION = 'one'\n", "shared_native_accelerator.so": b"native marker"},
+    )
+    second = wheel_factory(
+        "shared-native-demo",
+        "2.0.0",
+        {"shared_native_demo.py": "VERSION = 'two'\n", "shared_native_accelerator.so": b"native marker"},
+    )
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+
+    loaded = depfix.import_module(file_spec(first), module="shared_native_demo")
+    assert loaded.VERSION == "one"
+    assert loaded.__name__ == "shared_native_demo"
+    assert sys.modules["shared_native_demo"] is loaded
+    assert depfix.import_module(file_spec(first), module="shared_native_demo") is loaded
+
+    with pytest.raises(SharedImportConflictError, match="cannot replace") as captured:
+        depfix.import_module(file_spec(second), module="shared_native_demo")
+    assert "shared-native-demo==1.0.0" in captured.value.candidates[0]
+    assert "shared-native-demo==2.0.0" in captured.value.candidates[0]
+
+
+def test_explicit_inprocess_mode_keeps_native_marked_python_roots_isolated(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "strict-native-demo",
+        "1.0.0",
+        {"strict_native_demo.py": "VALUE = 1\n", "strict_native_accelerator.so": b"native marker"},
+    )
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+
+    loaded = depfix.import_module(file_spec(wheel), module="strict_native_demo", isolation="inprocess")
+
+    assert loaded.VALUE == 1
+    assert loaded.__name__.startswith("_depfix.")
+    assert "strict_native_demo" not in sys.modules
+
+
+def test_allow_unsafe_enables_deliberate_inprocess_extension_loading(tmp_path: Path, wheel_factory) -> None:
+    extension = importlib.util.find_spec("_testcapi")
+    if extension is None or extension.origin is None or not Path(extension.origin).is_file():
+        pytest.skip("this interpreter does not provide the _testcapi extension")
+    source = Path(extension.origin)
+    wheel = wheel_factory(
+        "unsafe-native-probe",
+        "1.0.0",
+        {source.name: source.read_bytes()},
+        metadata_version="2.5",
+        import_names=("_testcapi",),
+    )
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+
+    with pytest.raises(depfix.NativeIsolationRequired) as captured:
+        depfix.import_module(file_spec(wheel), module="_testcapi", isolation="inprocess")
+    message = str(captured.value)
+    assert "allow_unsafe=True" in message
+    assert "depfix.configure(allow_unsafe=True)" in message
+
+    loaded = depfix.import_module(file_spec(wheel), module="_testcapi", isolation="inprocess", allow_unsafe=True)
+    assert loaded.__name__.startswith("_depfix.")
+    assert loaded.__depfix_logical_name__ == "_testcapi"
+    assert callable(loaded.parse_tuple_and_keywords)
+
+
+def test_known_unsafe_classification_requires_an_explicit_or_global_override(
+    tmp_path: Path,
+    wheel_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace
+
+    from depfix import resolver as resolver_module
+
+    wheel = wheel_factory("known-unsafe-demo", "1.0.0", {"known_unsafe_demo.py": "VALUE = 1\n"})
+    original_inspect = resolver_module.inspect_wheel
+
+    def classify_as_unsafe(path: Path, **kwargs):  # type: ignore[no-untyped-def]
+        return replace(original_inspect(path, **kwargs), native_classification="native-known-unsafe")
+
+    monkeypatch.setattr(resolver_module, "inspect_wheel", classify_as_unsafe)
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+
+    with pytest.raises(UnsafePackageError) as captured:
+        depfix.import_module(file_spec(wheel), module="known_unsafe_demo")
+    assert captured.value.candidates == ("known-unsafe-demo==1.0.0",)
+    message = str(captured.value)
+    assert "allow_unsafe=True" in message
+    assert "DEPFIX_ALLOW_UNSAFE=1" in message
+
+    assert depfix.import_module(file_spec(wheel), module="known_unsafe_demo", allow_unsafe=True).VALUE == 1
+
+    depfix.configure(allow_unsafe=True)
+    assert depfix.import_module(file_spec(wheel), module="known_unsafe_demo").VALUE == 1
+    with pytest.raises(UnsafePackageError):
+        depfix.import_module(file_spec(wheel), module="known_unsafe_demo", allow_unsafe=False)
+
+    reset_runtime_state()
+    prepared_cache = Cache(tmp_path / "prepared-cache")
+    prepared = Resolver(prepared_cache).resolve(
+        ProjectConfig(
+            tmp_path / ".depfix" / "config.toml",
+            (
+                ImportDeclaration("blocked_alias", file_spec(wheel), "known_unsafe_demo", allow_unsafe=False),
+                ImportDeclaration("permitted_alias", file_spec(wheel), "known_unsafe_demo", allow_unsafe=True),
+            ),
+            {},
+        )
+    )
+    sync_graph(prepared, prepared_cache, offline=True)
+    manifest = tmp_path / ".depfix" / "imports.lock"
+    write_manifest(prepared, manifest)
+    activate_manifest(manifest, Settings(cache_dir=tmp_path / "prepared-cache"))
+    blocked = prepared.alias_index["blocked_alias"]
+    with pytest.raises(UnsafePackageError):
+        load_generated_alias(
+            blocked.name,
+            (prepared.graph_id, blocked.node, blocked.module, blocked.specifier),
+        )
+    permitted = prepared.alias_index["permitted_alias"]
+    assert (
+        load_generated_alias(
+            permitted.name,
+            (prepared.graph_id, permitted.node, permitted.module, permitted.specifier),
+        ).VALUE
+        == 1
+    )
+
+
+def test_shared_mode_rejects_a_preloaded_module_without_a_trustworthy_location(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "preloaded-native-demo",
+        "1.0.0",
+        {"preloaded_native_demo.py": "VALUE = 'locked'\n", "preloaded_native_accelerator.so": b"native marker"},
+    )
+    ambient = ModuleType("preloaded_native_demo")
+    sys.modules[ambient.__name__] = ambient
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    try:
+        with pytest.raises(SharedImportConflictError, match="cannot replace") as captured:
+            depfix.import_module(file_spec(wheel), module=ambient.__name__)
+    finally:
+        sys.modules.pop(ambient.__name__, None)
+
+    assert "unknown location" in captured.value.candidates[0]
+
+
+def test_shared_mode_tolerates_preloaded_private_helpers_for_public_requests(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "private-helper-demo",
+        "1.0.0",
+        {
+            "public_native_demo.py": "VALUE = 'locked'\n",
+            "private_native_helper.py": "VALUE = 'private'\n",
+            "private_native_accelerator.so": b"native marker",
+        },
+        metadata_version="2.5",
+        import_names=("public_native_demo", "private_native_helper; private"),
+    )
+    ambient = ModuleType("private_native_helper")
+    sys.modules[ambient.__name__] = ambient
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    try:
+        loaded = depfix.import_module(file_spec(wheel), module="public_native_demo")
+        with pytest.raises(SharedImportConflictError, match="cannot replace"):
+            depfix.import_module(file_spec(wheel), module="private_native_helper")
+    finally:
+        sys.modules.pop(ambient.__name__, None)
+
+    assert loaded.VALUE == "locked"
+
+
+def test_shared_mode_restores_a_preexisting_verified_target_path(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "shared-path-demo",
+        "1.0.0",
+        {"shared_path_demo.py": "VALUE = 1\n", "shared_path_accelerator.so": b"native marker"},
+    )
+    cache = Cache(tmp_path / "cache")
+    graph = Resolver(cache).resolve(
+        ProjectConfig(
+            tmp_path / ".depfix" / "config.toml",
+            (ImportDeclaration("demo", file_spec(wheel), "shared_path_demo"),),
+            {},
+        )
+    )
+    sync_graph(graph, cache, offline=True)
+    target_path = str(cache.unpacked_path(graph.nodes[0].artifact) / "purelib")
+    sys.path.insert(2, target_path)
+    before = list(sys.path)
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    try:
+        assert depfix.import_module(file_spec(wheel), module="shared_path_demo").VALUE == 1
+        assert sys.path[0] == target_path
+        reset_runtime_state()
+        assert sys.path == before
+    finally:
+        while target_path in sys.path:
+            sys.path.remove(target_path)
+
+
+def test_auto_mode_is_scoped_to_each_request_in_a_mixed_prepared_manifest(tmp_path: Path, wheel_factory) -> None:
+    first = wheel_factory("prepared-old", "1.0.0", {"prepared_target.py": "VERSION = 'old'\n"})
+    second = wheel_factory("prepared-new", "2.0.0", {"prepared_target.py": "VERSION = 'new'\n"})
+    native = wheel_factory(
+        "prepared-native",
+        "1.0.0",
+        {"prepared_native.py": "VALUE = 'shared'\n", "prepared_native_accelerator.so": b"native marker"},
+    )
+    graph = Resolver(Cache(tmp_path / "cache")).resolve(
+        ProjectConfig(
+            tmp_path / ".depfix" / "config.toml",
+            (
+                ImportDeclaration("old", file_spec(first), "prepared_target"),
+                ImportDeclaration("new", file_spec(second), "prepared_target"),
+                ImportDeclaration("native", file_spec(native), "prepared_native"),
+            ),
+            {},
+        )
+    )
+    manifest = tmp_path / ".depfix" / "imports.lock"
+    cache = Cache(tmp_path / "cache")
+    write_manifest(graph, manifest)
+    sync_graph(graph, cache, offline=True)
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+
+    with pytest.warns(DeprecationWarning, match=r"depfix\.activate\(\) is deprecated"):
+        activated = depfix.activate(manifest, cache_dir=tmp_path / "cache")
+    activated_old = activated.load_alias("old")  # type: ignore[attr-defined]
+    activated_new = activated.load_alias("new")  # type: ignore[attr-defined]
+    activated_native = activated.load_alias("native")  # type: ignore[attr-defined]
+    assert activated_old.VERSION == "old" and activated_new.VERSION == "new"
+    assert activated_old is not activated_new
+    assert activated_native.VALUE == "shared" and activated_native.__name__ == "prepared_native"
+
+    old = depfix.import_module(file_spec(first), module="prepared_target", manifest=manifest, frozen=True, offline=True)
+    new = depfix.import_module(
+        file_spec(second), module="prepared_target", manifest=manifest, frozen=True, offline=True
+    )
+    shared = depfix.import_module(
+        file_spec(native), module="prepared_native", manifest=manifest, frozen=True, offline=True
+    )
+
+    assert old.VERSION == "old" and new.VERSION == "new" and old is not new
+    assert old.__name__.startswith("_depfix.") and new.__name__.startswith("_depfix.")
+    assert shared.VALUE == "shared" and shared.__name__ == "prepared_native"
 
 
 def test_setuptools_distutils_compatibility_alias_is_package_local(tmp_path: Path, wheel_factory) -> None:
@@ -279,25 +544,43 @@ def test_settings_precedence_and_optional_project_config(
     state = tmp_path / ".depfix"
     state.mkdir()
     (state / "config.toml").write_text(
-        '[resolver]\nindex-url = "https://config.example/simple"\noffline = true\n',
+        '[settings]\nallow-unsafe = true\n[resolver]\nindex-url = "https://config.example/simple"\noffline = true\n',
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
     configured = resolve_settings()
     assert configured.index_url == "https://config.example/simple"
     assert configured.offline is True
+    assert configured.allow_unsafe is True
 
     monkeypatch.setenv("DEPFIX_INDEX_URL", "https://env.example/simple")
     monkeypatch.setenv("DEPFIX_OFFLINE", "0")
+    monkeypatch.setenv("DEPFIX_ALLOW_UNSAFE", "0")
     environment = resolve_settings()
     assert environment.index_url == "https://env.example/simple"
     assert environment.offline is False
+    assert environment.allow_unsafe is False
 
-    depfix.configure(index_url="https://python.example/simple", offline=True)
+    depfix.configure(index_url="https://python.example/simple", offline=True, allow_unsafe=True)
     assert resolve_settings().index_url == "https://python.example/simple"
-    explicit = resolve_settings(index_url="https://call.example/simple", offline=False)
+    assert resolve_settings().allow_unsafe is True
+    explicit = resolve_settings(index_url="https://call.example/simple", offline=False, allow_unsafe=False)
     assert explicit.index_url == "https://call.example/simple"
     assert explicit.offline is False
+    assert explicit.allow_unsafe is False
+
+
+def test_every_loading_api_exposes_the_per_request_unsafe_override() -> None:
+    for api in (
+        depfix.import_module,
+        depfix.load_package,
+        depfix.import_module_async,
+        depfix.load_package_async,
+        depfix.default,
+        depfix.using,
+    ):
+        parameter = inspect.signature(api).parameters["allow_unsafe"]
+        assert parameter.default is None
 
 
 def test_scanner_is_static_and_reports_dynamic_calls(tmp_path: Path) -> None:
@@ -305,7 +588,7 @@ def test_scanner_is_static_and_reports_dynamic_calls(tmp_path: Path) -> None:
     source.write_text(
         "from depfix import import_module as versioned_import\n"
         'SPEC = "idna" + "==3.10"\n'
-        "safe = versioned_import(SPEC)\n"
+        "safe = versioned_import(SPEC, isolation='shared', allow_unsafe=True)\n"
         "unsafe = versioned_import(read_spec())\n",
         encoding="utf-8",
     )
@@ -313,6 +596,8 @@ def test_scanner_is_static_and_reports_dynamic_calls(tmp_path: Path) -> None:
     assert len(result.requests) == 1
     assert result.requests[0].normalized_specifier == "idna==3.10"
     assert result.requests[0].assignment == "safe"
+    assert result.requests[0].isolation == "shared"
+    assert result.requests[0].allow_unsafe is True
     assert len(result.dynamic_requests) == 1
     assert "safe static string" in result.dynamic_requests[0].reason
 

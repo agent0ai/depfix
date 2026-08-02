@@ -244,9 +244,15 @@ containers, and generated IDE aliases are also available.
 
 - Importing `depfix` alone does nothing expensive. Installation starts only when you call a loading function.
 - Package preparation is shown on stderr, so you can see what is happening. Set `DEPFIX_LOG_LEVEL=WARNING` for quiet mode.
-- Depfix currently focuses on pure-Python packages on CPython 3.11–3.13.
-- Packages that require native extensions may need a separate worker process.
-- Depfix isolates dependency versions; it is not a sandbox for untrusted code.
+- Depfix supports pure-Python and native wheel packages on CPython 3.11–3.13. Automatic mode isolates pure dependency
+  graphs and loads native graphs through guarded, conventional Python imports.
+- A native package can own one compatible public import version per process. Reusing it is idempotent; requesting an
+  incompatible second owner raises a clear error instead of silently returning the wrong version.
+- `using()` works as scoped syntax sugar for the first compatible native version. That version remains loaded as the
+  process owner after the scope exits; use a worker when you need to switch or overlap native versions.
+- Unsafe package classifications and strict in-process native loading are denied by default. Trusted callers can opt in
+  per request with `allow_unsafe=True` or process-wide with `depfix.configure(allow_unsafe=True)`.
+- Depfix isolates pure dependency versions; it is not a sandbox for untrusted code.
 
 ## Documentation
 

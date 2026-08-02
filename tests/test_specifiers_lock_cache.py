@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import stat
 import subprocess
 import sys
 import tomllib
+import urllib.request
 import zipfile
 from nturl2path import url2pathname as windows_url2pathname
 from pathlib import Path
@@ -60,8 +63,8 @@ def test_lockfile_is_deterministic_and_round_trips(tmp_path: Path) -> None:
         Environment("cpython", "3.11", "abi", "linux", "arm64"),
         (artifact,),
         (node,),
-        (Alias("demo", node.id, "demo", "pypi:demo==1.0"),),
-        {"strict": True},
+        (Alias("demo", node.id, "demo", "pypi:demo==1.0", allow_unsafe=True),),
+        {"strict": True, "allow-unsafe": True},
     )
     graph = LockedGraph(
         graph.format_version,
@@ -76,7 +79,10 @@ def test_lockfile_is_deterministic_and_round_trips(tmp_path: Path) -> None:
     assert dumps(graph) == dumps(graph)
     path = tmp_path / ".depfix" / "imports.lock"
     write(graph, path)
-    assert load(path) == graph
+    loaded = load(path)
+    assert loaded == graph
+    assert loaded.aliases[0].allow_unsafe is True
+    assert loaded.policy["allow-unsafe"] is True
     schema = tomllib.loads(path.read_text(encoding="utf-8"))
     definition = json.loads(
         (Path(__file__).parents[1] / "schemas" / "depfix-manifest-v1.schema.json").read_text(encoding="utf-8")
@@ -91,6 +97,50 @@ def test_hash_mismatch_never_populates_cache(tmp_path: Path) -> None:
     with pytest.raises(IntegrityError):
         cache.fetch_url(source.as_uri(), "0" * 64)
     assert cache.list_blobs() == []
+
+
+def test_truncated_download_resumes_before_cache_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"resumable artifact bytes"
+    split_at = 10
+    digest = hashlib.sha256(payload).hexdigest()
+    requests: list[str | urllib.request.Request] = []
+
+    class Response(io.BytesIO):
+        def __init__(self, body: bytes, headers: dict[str, str]) -> None:
+            super().__init__(body)
+            self.headers = headers
+
+        def geturl(self) -> str:
+            return "https://files.example.test/artifact.whl"
+
+    def open_url(request: str | urllib.request.Request, **_kwargs: object) -> Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return Response(payload[:split_at], {"Content-Length": str(len(payload))})
+        assert isinstance(request, urllib.request.Request)
+        assert request.get_header("Range") == f"bytes={split_at}-"
+        return Response(
+            payload[split_at:],
+            {
+                "Content-Length": str(len(payload) - split_at),
+                "Content-Range": f"bytes {split_at}-{len(payload) - 1}/{len(payload)}",
+            },
+        )
+
+    monkeypatch.setattr(cache_module, "_open_url", open_url)
+    cache = Cache(tmp_path / "cache")
+
+    result = cache.fetch_url(
+        "https://files.example.test/artifact.whl",
+        digest,
+        expected_size=len(payload),
+    )
+
+    assert result.read_bytes() == payload
+    assert len(requests) == 2
 
 
 def test_concurrent_cache_population_is_atomic(tmp_path: Path) -> None:
