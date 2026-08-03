@@ -248,6 +248,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -265,6 +268,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Remove unpublished draft
         env:
           GH_TOKEN: ${{ github.token }}

@@ -40,6 +40,18 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.5.0 — 2026-08-03
+
+- PyPI: `https://pypi.org/project/depfix/0.5.0/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.5.0`
+- Wheel SHA-256: `1e87bd728b90594471593ae856699ec29b763e92a0eea9ec1aebca10bea721a6`
+- Sdist SHA-256: `d8c4a6e015b40eb3e50d6060c9ac6e317ad4a67ca693e302e60178b9ff47f49c`
+- Published from commit `1b703a1c68e5ce9f6744f96e381728d647d262ac` after the complete hosted quality,
+  distribution, Linux, macOS, Windows, x64, arm64, Python 3.11–3.13, and uv compatibility gates passed.
+- Published through the protected `pypi` environment and verified by matching public artifact hashes and a clean CPython
+  3.13 public-index install. GitHub visibility was completed through the API after the final CLI job lacked repository
+  context; the follow-up workflow fix checks out source before future finalization and cleanup jobs.
+
 ### 0.4.1 — 2026-08-02
 
 - PyPI: `https://pypi.org/project/depfix/0.4.1/`
