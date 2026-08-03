@@ -56,6 +56,7 @@ def configure(
     frozen: bool | None = None,
     offline: bool | None = None,
     allow_unsafe: bool | None = None,
+    prefer_newest: bool | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     cache_retention_days: int | None = None,
     cache_auto_cleanup: bool | None = None,
@@ -72,6 +73,7 @@ def configure(
         frozen=frozen,
         offline=offline,
         allow_unsafe=allow_unsafe,
+        prefer_newest=prefer_newest,
         cache_dir=cache_dir,
         cache_retention_days=cache_retention_days,
         cache_auto_cleanup=cache_auto_cleanup,
@@ -92,6 +94,7 @@ def import_module(
     offline: bool | None = None,
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
+    prefer_newest: bool | None = None,
 ) -> ModuleType:
     """Return exactly one canonical module or raise a typed discovery error."""
     from .manager import prepare_request
@@ -102,6 +105,7 @@ def import_module(
         frozen=frozen,
         offline=offline,
         allow_unsafe=allow_unsafe,
+        prefer_newest=prefer_newest,
     )
     runtime, request = prepare_request(
         specifier,
@@ -125,6 +129,7 @@ def load_package(
     offline: bool | None = None,
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
+    prefer_newest: bool | None = None,
 ) -> PackageHandle:
     """Return one package handle without eagerly importing its root modules."""
     from .handles import PackageHandle
@@ -136,6 +141,7 @@ def load_package(
         frozen=frozen,
         offline=offline,
         allow_unsafe=allow_unsafe,
+        prefer_newest=prefer_newest,
     )
     runtime, request = prepare_request(
         specifier,
@@ -158,6 +164,7 @@ async def import_module_async(
     offline: bool | None = None,
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
+    prefer_newest: bool | None = None,
 ) -> ModuleType:
     """Async-friendly wrapper sharing canonical identity with `import_module`."""
     import asyncio
@@ -172,6 +179,7 @@ async def import_module_async(
         offline=offline,
         isolation=isolation,
         allow_unsafe=allow_unsafe,
+        prefer_newest=prefer_newest,
     )
 
 
@@ -184,6 +192,7 @@ async def load_package_async(
     offline: bool | None = None,
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
+    prefer_newest: bool | None = None,
 ) -> PackageHandle:
     import asyncio
 
@@ -196,6 +205,7 @@ async def load_package_async(
         offline=offline,
         isolation=isolation,
         allow_unsafe=allow_unsafe,
+        prefer_newest=prefer_newest,
     )
 
 

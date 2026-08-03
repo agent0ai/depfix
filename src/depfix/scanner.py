@@ -58,6 +58,7 @@ class ScanSite:
     enclosing_function: str = ""
     isolation: str = "auto"
     allow_unsafe: bool | None = None
+    prefer_newest: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +232,7 @@ class _Visitor(ast.NodeVisitor):
         module = None
         isolation = "auto"
         allow_unsafe: bool | None = None
+        prefer_newest: bool | None = None
         for keyword_arg in node.keywords:
             if keyword_arg.arg == "module":
                 module = self._constant(keyword_arg.value)
@@ -263,6 +265,19 @@ class _Visitor(ast.NodeVisitor):
                         )
                     )
                     return
+            if keyword_arg.arg == "prefer_newest":
+                prefer_newest = self._constant_bool(keyword_arg.value)
+                if prefer_newest is None:
+                    self.dynamic.append(
+                        DynamicRequest(
+                            self.relative,
+                            node.lineno,
+                            node.col_offset,
+                            expression,
+                            "dynamic prefer_newest= override",
+                        )
+                    )
+                    return
         if value is None:
             self.dynamic.append(
                 DynamicRequest(
@@ -290,6 +305,7 @@ class _Visitor(ast.NodeVisitor):
                 suggested_alias=alias,
                 isolation=isolation,
                 allow_unsafe=allow_unsafe,
+                prefer_newest=prefer_newest,
             )
         )
 
@@ -453,6 +469,13 @@ class _Visitor(ast.NodeVisitor):
                 allow_unsafe = None
             if not isinstance(allow_unsafe, bool):
                 allow_unsafe = None
+            rendered_prefer_newest = dict(options).get("prefer_newest", "null")
+            try:
+                prefer_newest = json.loads(rendered_prefer_newest)
+            except json.JSONDecodeError:
+                prefer_newest = None
+            if not isinstance(prefer_newest, bool):
+                prefer_newest = None
             self.requests.append(
                 ScanSite(
                     value,
@@ -470,6 +493,7 @@ class _Visitor(ast.NodeVisitor):
                     enclosing_function=enclosing_function,
                     isolation=isolation,
                     allow_unsafe=allow_unsafe,
+                    prefer_newest=prefer_newest,
                 )
             )
 

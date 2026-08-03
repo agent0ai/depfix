@@ -11,6 +11,7 @@ depfix.default(
     offline=None,
     isolation=None,
     allow_unsafe=None,
+    prefer_newest=None,
 ) -> None
 ```
 
@@ -27,6 +28,7 @@ depfix.using(
     offline=None,
     isolation=None,
     allow_unsafe=None,
+    prefer_newest=None,
 ) -> ContextDecorator
 ```
 
@@ -54,6 +56,7 @@ depfix.import_module(
     offline=None,
     isolation=None,
     allow_unsafe=None,
+    prefer_newest=None,
 ) -> ModuleType
 ```
 
@@ -70,6 +73,7 @@ depfix.load_package(
     offline=None,
     isolation=None,
     allow_unsafe=None,
+    prefer_newest=None,
 ) -> PackageHandle
 ```
 
@@ -78,6 +82,23 @@ The return value is always `PackageHandle`. `module_names`, `metadata`, and `dep
 
 The async wrappers run blocking preparation in a worker thread and share the synchronous canonical module identity:
 `import_module_async` and `load_package_async`.
+
+## Version selection policy
+
+Every loading API accepts `prefer_newest=`. Omitting it inherits configuration; the effective default is `False`.
+Depfix then ranks compatible artifacts already present in its shared content store ahead of uncached artifacts and selects
+the newest cached match. If no cached artifact satisfies the requirement, it selects the newest compatible version
+normally. Only artifacts still published by the configured index, valid for the interpreter, permitted by policy, and
+inside every declared version constraint are eligible.
+
+In a multi-package `default()` or `using()` call, roots are processed in a stable order. Artifacts fetched for an earlier
+root can therefore satisfy a later root, reducing duplicate versions when their ranges overlap. This is greedy compatible
+reuse, not a global minimum-package optimization pass; incompatible ranges still produce distinct nodes and artifacts.
+
+Pass `prefer_newest=True` to a loading call to ignore cache presence when ranking compatible candidates. Set it globally
+with `depfix.configure(prefer_newest=True)`, `DEPFIX_PREFER_NEWEST=1`, or `[resolver] prefer-newest = true`. A completed
+live resolution is an exact cached graph; use `refresh=True` to reconsider candidates for the same request after new
+releases appear. Prepared manifests are always exact and remain unchanged until exported again.
 
 ## Isolation modes
 
@@ -113,7 +134,7 @@ decision. Loaded package code still has the normal authority of the Python proce
 ## Configuration
 
 `depfix.configure(...)` is the single process-wide Python configuration entry point, including for future global
-parameters. It accepts `manifest`, `frozen`, `offline`, `allow_unsafe`, `cache_dir`, `cache_retention_days`,
+parameters. It accepts `manifest`, `frozen`, `offline`, `allow_unsafe`, `prefer_newest`, `cache_dir`, `cache_retention_days`,
 `cache_auto_cleanup`, `uv`, `index_url`, `extra_index_url`, and `log_level`. Precedence is per-call, `configure`,
 environment, optional project config/manifest discovery, defaults. An explicit per-call `False` therefore overrides a
 process-wide `True`.
@@ -126,6 +147,9 @@ allow-unsafe = false
 offline = false
 cache-retention-days = 30
 cache-auto-cleanup = true
+
+[resolver]
+prefer-newest = false
 ```
 
 Unsafe loading can be enabled process-wide with `depfix.configure(allow_unsafe=True)`, persistently with
@@ -135,8 +159,8 @@ accept the reduced isolation guarantee.
 `log_level` defaults to `INFO`. At `INFO` or `DEBUG`, cold preparation writes secret-redacted resolution, uv summary,
 download, materialization, and ready lines to stderr. `WARNING`, `ERROR`, `CRITICAL`, and `OFF` suppress progress.
 
-Supported variables are `DEPFIX_MANIFEST`, `DEPFIX_FROZEN`, `DEPFIX_OFFLINE`, `DEPFIX_ALLOW_UNSAFE`, `DEPFIX_CACHE_DIR`,
-`DEPFIX_CACHE_RETENTION_DAYS`, `DEPFIX_CACHE_AUTO_CLEANUP`, `DEPFIX_UV`, `DEPFIX_INDEX_URL`,
+Supported variables are `DEPFIX_MANIFEST`, `DEPFIX_FROZEN`, `DEPFIX_OFFLINE`, `DEPFIX_ALLOW_UNSAFE`,
+`DEPFIX_PREFER_NEWEST`, `DEPFIX_CACHE_DIR`, `DEPFIX_CACHE_RETENTION_DAYS`, `DEPFIX_CACHE_AUTO_CLEANUP`, `DEPFIX_UV`, `DEPFIX_INDEX_URL`,
 `DEPFIX_EXTRA_INDEX_URL`, and `DEPFIX_LOG_LEVEL`.
 
 `multiprocessing_initializer(manifest, cache_dir)` is a spawn-safe worker initializer for prepared graphs.
@@ -171,9 +195,33 @@ cleanup.
 
 ## Project API
 
-`depfix.project` exports `scan_project`, `export_project`, `install_manifest`, `create_bundle`, and `verify_manifest`.
+`depfix.project` exports `scan_project`, `export_project`, `install_packages`, `install_manifest`, `create_bundle`, and
+`verify_manifest`.
 These are the implementations called by the CLI; they return immutable result dataclasses. `install_manifest()` never
 resolves or builds. Passing `target=` requires `local=True` so verified package trees are actually copied to that location.
+`export_project(..., prefer_newest=None)` uses the same inherited cache-reuse policy and accepts an explicit override.
+
+```python
+install_packages(
+    requirements,
+    *,
+    constraints=(),
+    refresh=False,
+    offline=None,
+    index_url=None,
+    extra_index_url=(),
+    prefer_newest=None,
+    cache_dir=None,
+    base_dir=None,
+) -> PackageInstallResult
+```
+
+`install_packages()` performs the store-only grouped operation behind `depfix pip install`. Each root retains its own
+dependency graph, compatible cached dependencies may be reused across roots, and incompatible dependency ranges may
+select multiple versions. It writes a reusable exact manifest beneath the shared store, materializes verified targets,
+and does not activate a runtime or alter `site-packages`/`sys.path`. Constraints apply to matching root and transitive
+distributions in every selected graph. `PackageInstallResult` reports the manifest, identity, request/artifact counts,
+selected root package versions, store path, and whether the exact install graph was already warm.
 
 ## Exceptions
 

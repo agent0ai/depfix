@@ -78,6 +78,18 @@ Install Depfix once:
 python -m pip install depfix
 ```
 
+Existing dependency files can populate the same shared store without touching the active environment:
+
+```bash
+depfix pip install requests==2.32.3 PyYAML==6.0.2
+depfix pip install -r requirements.txt
+```
+
+This is Depfix installation, not an alias for `pip` or `uv pip`. The listed packages are resolved as one group, exact
+artifacts are materialized in the Depfix store, and incompatible transitive versions can coexist. Requirement files may
+include nested `-r` files, `-c` constraints, indexes, hashes, and local `-e` paths. Add `--prefer-newest` or `-U` when
+newest-first selection matters more than compatible cache reuse.
+
 Then choose whichever import style fits your code.
 
 ### Set a default version
@@ -101,7 +113,9 @@ workflow = yaml.safe_load(response.text)
 ```
 
 There is no separate install step. The first `default()` call prepares the requested packages, and later runs reuse the
-cache.
+cache. When dependency ranges overlap, Depfix prefers the newest compatible version already in that shared cache, so
+packages selected together can reuse one copy. Pass `prefer_newest=True` to `default()`, `using()`, `import_module()`, or
+`load_package()` when you explicitly want newest-first resolution instead.
 
 ### Use a version temporarily
 

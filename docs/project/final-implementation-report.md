@@ -91,14 +91,14 @@ python application.py
 ```
 
 Other supported surfaces include `prepare`, `scan`, `fetch`, `run`, `verify`, `check`, `tree`, `show`, `why`, `list`,
-`doctor`, `migrate`, per-realm requirements export, IDE generation/attachment, cache operations, and `depfix pip` uv
-passthrough.
+`doctor`, `migrate`, per-realm requirements export, IDE generation/attachment, cache operations, and grouped
+`depfix pip install` preparation in the shared store.
 
 ## Cache and manifest
 
 The default cache is `platformdirs.user_cache_path("depfix")/v1`; override its parent with `DEPFIX_CACHE_DIR` or
 `depfix.configure(cache_dir=...)`. Important subtrees are `artifacts/sha256`, `targets`, `resolutions`, `manifests`,
-`groups`, `metadata`, `ide`, `locks`, `tools/uv`, and `built-wheels`. Project state is `.depfix/imports.lock`; live loading
+`groups`, `installs`, `metadata`, `ide`, `locks`, `tools/uv`, and `built-wheels`. Project state is `.depfix/imports.lock`; live loading
 does not create project files.
 
 Representative manifest fields:

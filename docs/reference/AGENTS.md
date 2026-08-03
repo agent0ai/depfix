@@ -15,6 +15,10 @@
 - Document `default()` and `using()` as the standard-import APIs; deprecated prototype activation is not a preferred API.
 - Keep `depfix.configure()` documented as the canonical process-wide Python configuration entry point and distinguish
   effective defaults from inheriting per-call `None` values.
+- Keep compatible cache-first selection and the inherited `prefer_newest` override aligned across loading signatures,
+  project export, environment/project configuration, and CLI help.
+- Define `depfix pip install` as grouped shared-store preparation, not a pip/uv environment passthrough, and keep its
+  supported requirement-file grammar aligned with `project.install_packages()`.
 
 ## Work Guidance
 

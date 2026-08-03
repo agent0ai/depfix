@@ -15,6 +15,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
+from packaging.markers import Marker, default_environment
+
 from ._version import __version__
 from .aliases import generate_aliases
 from .cache import Cache
@@ -32,6 +34,7 @@ from .errors import (
 from .manifest import (
     assert_compatible_environment,
     computed_graph_id,
+    current_environment,
     dumps_manifest,
     load_manifest,
     write_manifest,
@@ -40,7 +43,8 @@ from .models import Alias, LockedGraph, RequestGroup, resolved_realm_id
 from .progress import ProgressReporter
 from .resolver import Resolver
 from .scanner import DynamicRequest, ScanGroup, scan_project
-from .settings import resolve_settings
+from .settings import Settings, resolve_settings
+from .sources import parse_source
 from .sync import sync_graph
 from .uv_backend import UvBackend
 
@@ -63,6 +67,17 @@ class InstallResult:
     manifest_id: str
     artifacts: int
     target: Path
+    warm: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PackageInstallResult:
+    manifest: Path
+    manifest_id: str
+    requests: int
+    artifacts: int
+    packages: tuple[str, ...]
+    store: Path
     warm: bool
 
 
@@ -91,6 +106,7 @@ def export_project(
     index_url: str | None = None,
     extra_index_url: Iterable[str] = (),
     refresh: bool = False,
+    prefer_newest: bool | None = None,
 ) -> ExportResult:
     project_root = Path(root).expanduser().resolve()
     result = scan_project(project_root, include=include, exclude=exclude)
@@ -108,6 +124,7 @@ def export_project(
         cache_dir=None,
         index_url=index_url,
         extra_index_url=tuple(extra_index_url),
+        prefer_newest=prefer_newest,
         discover=True,
         discovery_start=project_root,
     )
@@ -128,6 +145,7 @@ def export_project(
             enclosing_function=site.enclosing_function,
             isolation=site.isolation,
             allow_unsafe=settings.allow_unsafe if site.allow_unsafe is None else site.allow_unsafe,
+            prefer_newest=settings.prefer_newest if site.prefer_newest is None else site.prefer_newest,
         )
         for alias, site in zip(aliases, sites, strict=True)
     )
@@ -141,6 +159,7 @@ def export_project(
             "index": _sanitized_index(settings.index_url),
             "extra-indexes": tuple(_sanitized_index(item) for item in settings.extra_index_url),
             "allow-unsafe": settings.allow_unsafe,
+            "prefer-newest": settings.prefer_newest,
         }
     )
     graph = Resolver(cache, settings=settings, progress=progress).resolve(
@@ -244,6 +263,100 @@ def install_manifest(
     count = len(graph.artifacts)
     progress.emit("ready", f"{count} {'artifact' if count == 1 else 'artifacts'}")
     return InstallResult(source, graph.graph_id, len(graph.artifacts), destination, warm)
+
+
+def install_packages(
+    requirements: Iterable[str],
+    *,
+    constraints: Iterable[str] = (),
+    refresh: bool = False,
+    offline: bool | None = None,
+    index_url: str | None = None,
+    extra_index_url: Iterable[str] = (),
+    prefer_newest: bool | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    base_dir: str | os.PathLike[str] | None = None,
+) -> PackageInstallResult:
+    """Resolve package roots as one Depfix group and populate the shared store."""
+    root = Path(base_dir or Path.cwd()).expanduser().resolve()
+    selected: dict[str, str] = {}
+    marker_environment = {key: str(value) for key, value in default_environment().items()}
+    requested = (requirements,) if isinstance(requirements, str) else requirements
+    constrained = (constraints,) if isinstance(constraints, str) else constraints
+    for raw in requested:
+        specifier = _install_specifier(raw, root)
+        source = parse_source(specifier, base_dir=root)
+        if source.marker and not Marker(source.marker).evaluate(marker_environment):
+            continue
+        selected.setdefault(source.normalized, specifier)
+    if not selected:
+        raise ValueError("pip install requires at least one active package requirement")
+    normalized_constraints = tuple(sorted(dict.fromkeys(item.strip() for item in constrained if item.strip())))
+    config_path = root / ".depfix" / "config.toml"
+    settings = resolve_settings(
+        offline=offline,
+        index_url=index_url,
+        extra_index_url=tuple(extra_index_url),
+        prefer_newest=prefer_newest,
+        cache_dir=cache_dir,
+        discover=True,
+        discovery_start=root,
+    )
+    policy = _config_policy(config_path)
+    policy.update(
+        {
+            "mode": "package-install",
+            "index": _sanitized_index(settings.index_url),
+            "extra-indexes": tuple(_sanitized_index(item) for item in settings.extra_index_url),
+            "allow-unsafe": settings.allow_unsafe,
+            "prefer-newest": settings.prefer_newest,
+            "constraints": normalized_constraints,
+        }
+    )
+    ordered = tuple(selected[item] for item in sorted(selected))
+    declarations = tuple(
+        ImportDeclaration(
+            f"package_{index:04d}",
+            specifier,
+            api="load_package",
+            base_dir=root,
+            mode="package-install",
+            allow_unsafe=settings.allow_unsafe,
+            prefer_newest=settings.prefer_newest,
+        )
+        for index, specifier in enumerate(ordered)
+    )
+    cache = Cache(settings.cache_dir)
+    progress = ProgressReporter(settings.log_level)
+    identity = _package_install_identity(tuple(sorted(selected)), normalized_constraints, policy, settings)
+    manifest = cache.root / "installs" / identity / "imports.lock"
+    with cache.lock("package-install:" + identity):
+        warm = manifest.is_file() and not refresh
+        if warm:
+            graph = load_manifest(manifest)
+            assert_compatible_environment(graph, manifest)
+        else:
+            graph = Resolver(cache, settings=settings, progress=progress).resolve(
+                ProjectConfig(config_path, declarations, policy)
+            )
+        cache.reserve_artifacts({artifact.sha256 for artifact in graph.artifacts})
+        sync_graph(graph, cache, offline=settings.offline, progress=progress)
+        if not warm:
+            write_manifest(graph, manifest)
+    nodes = graph.node_index
+    packages = tuple(
+        sorted(f"{nodes[alias.node].distribution}=={nodes[alias.node].version}" for alias in graph.aliases)
+    )
+    progress.emit("ready", f"{len(packages)} package roots in the shared store")
+    return PackageInstallResult(
+        manifest,
+        graph.graph_id,
+        len(graph.aliases),
+        len(graph.artifacts),
+        packages,
+        cache.root,
+        warm,
+    )
 
 
 def verify_manifest(
@@ -661,6 +774,45 @@ def _format_dynamic(item: DynamicRequest) -> str:
     return f"{item.source_file}:{item.line}:{item.column}: {item.reason}: {item.expression}"
 
 
+def _install_specifier(raw: str, base_dir: Path) -> str:
+    value = raw.strip()
+    if not value:
+        raise ValueError("package requirements may not be empty")
+    if value.startswith(("pypi:", "git:", "url:", "py:", "file:")) or " @ " in value:
+        return value
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = base_dir / candidate
+    if value.startswith((".", "/", "~")) or candidate.exists():
+        return f"file:{candidate.resolve()}"
+    return value
+
+
+def _package_install_identity(
+    normalized_requirements: tuple[str, ...],
+    constraints: tuple[str, ...],
+    policy: dict[str, object],
+    settings: Settings,
+) -> str:
+    environment = current_environment()
+    payload = {
+        "requirements": normalized_requirements,
+        "constraints": constraints,
+        "policy": policy,
+        "indexes": (settings.index_url, settings.extra_index_url),
+        "prefer_newest": settings.prefer_newest,
+        "environment": {
+            "implementation": environment.python_implementation,
+            "python": environment.python_version,
+            "abi": environment.abi,
+            "platform": environment.platform,
+            "machine": environment.machine,
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _sanitized_index(value: str | None) -> str:
     if not value:
         return ""
@@ -725,6 +877,7 @@ def _dynamic_config_sites(path: Path, root: Path):  # type: ignore[no-untyped-de
                 "included",
                 item.get("alias") or _suggest_alias(None, parsed.distribution or module or "package"),
                 allow_unsafe=item.get("allow-unsafe"),
+                prefer_newest=item.get("prefer-newest"),
             )
         )
     return result

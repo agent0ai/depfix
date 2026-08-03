@@ -133,6 +133,7 @@ def prepare_request(
                     base_dir=Path.cwd(),
                     isolation=selected_isolation,
                     allow_unsafe=settings.allow_unsafe,
+                    prefer_newest=settings.prefer_newest,
                 )
                 graph = Resolver(cache, settings=settings, progress=progress).resolve(
                     ProjectConfig(
@@ -142,6 +143,7 @@ def prepare_request(
                             "mode": "live",
                             "isolation": selected_isolation,
                             "allow-unsafe": settings.allow_unsafe,
+                            "prefer-newest": settings.prefer_newest,
                         },
                     )
                 )
@@ -270,6 +272,7 @@ def prepare_import_selection(
                         base_dir=base_dir,
                         isolation=selected_isolation,
                         allow_unsafe=settings.allow_unsafe,
+                        prefer_newest=settings.prefer_newest,
                     )
                     for index, specifier in enumerate(originals)
                 )
@@ -281,6 +284,7 @@ def prepare_import_selection(
                             "mode": "standard-import",
                             "isolation": selected_isolation,
                             "allow-unsafe": settings.allow_unsafe,
+                            "prefer-newest": settings.prefer_newest,
                         },
                     )
                 )
@@ -606,6 +610,7 @@ def _request_identity(
             "api": api,
             "isolation": isolation,
             "allow_unsafe": settings.allow_unsafe,
+            "prefer_newest": settings.prefer_newest,
             "manifest": str(settings.manifest.resolve()) if settings.manifest else None,
             "cache": str(settings.cache_dir.resolve()),
             "index": settings.index_url,
@@ -632,6 +637,7 @@ def _group_identity(normalized: tuple[str, ...], mode: str, isolation: str, sett
             "mode": mode,
             "isolation": isolation,
             "allow_unsafe": settings.allow_unsafe,
+            "prefer_newest": settings.prefer_newest,
             "index": settings.index_url,
             "extra_indexes": settings.extra_index_url,
             "manifest": str(settings.manifest.resolve()) if settings.manifest else None,

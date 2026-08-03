@@ -14,6 +14,7 @@ import sys
 import sysconfig
 import tomllib
 import traceback
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from .aliases import generate_aliases
 from .cache import Cache
 from .errors import DepfixError
 from .manifest import load_manifest
-from .project import create_bundle, export_project, install_manifest, verify_manifest
+from .project import create_bundle, export_project, install_manifest, install_packages, verify_manifest
 from .scanner import scan_project
 from .settings import resolve_settings
 from .uv_backend import UvBackend
@@ -38,6 +39,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"depfix {__version__}")
     parser.add_argument("--cache-dir", type=Path, help="override the global Depfix cache")
+    parser.add_argument(
+        "--prefer-newest",
+        action="store_const",
+        const=True,
+        default=None,
+        help="select newest compatible versions instead of preferring cached ones",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--verbose", action="store_true")
@@ -124,9 +132,24 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--local", action="store_true")
     ide_commands.add_parser("detach")
 
-    pip = commands.add_parser("pip", help="delegate a conventional environment operation to uv pip")
+    pip = commands.add_parser("pip", help="install package requests into the shared Depfix store")
     pip.add_argument("--version", action="store_true", dest="pip_version")
-    pip.add_argument("arguments", nargs=argparse.REMAINDER)
+    pip_commands = pip.add_subparsers(dest="pip_command")
+    pip_install = pip_commands.add_parser("install", help="resolve a package group without modifying site-packages")
+    pip_install.add_argument("requirements", nargs="*")
+    pip_install.add_argument("-r", "--requirement", action="append", type=Path, default=[])
+    pip_install.add_argument("-c", "--constraint", action="append", type=Path, default=[])
+    pip_install.add_argument("-e", "--editable", action="append", default=[])
+    pip_install.add_argument("--index-url")
+    pip_install.add_argument("--extra-index-url", action="append", default=[])
+    pip_install.add_argument("--offline", action="store_true", default=None)
+    pip_install.add_argument("--refresh", action="store_true")
+    pip_install.add_argument(
+        "-U",
+        "--upgrade",
+        action="store_true",
+        help="select newest compatible versions (equivalent to --prefer-newest)",
+    )
 
     cache = commands.add_parser("cache", help="inspect or maintain the global cache")
     cache_commands = cache.add_subparsers(dest="cache_command", required=True)
@@ -142,11 +165,19 @@ def _parser() -> argparse.ArgumentParser:
     remove.add_argument("--dry-run", action="store_true")
     for command in commands.choices.values():
         _common_output_options(command)
+    _common_output_options(pip_install)
     return parser
 
 
 def _common_output_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cache-dir", type=Path, default=argparse.SUPPRESS)
+    parser.add_argument(
+        "--prefer-newest",
+        action="store_const",
+        const=True,
+        default=argparse.SUPPRESS,
+        help="select newest compatible versions instead of preferring cached ones",
+    )
     parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     parser.add_argument("--quiet", action="store_true", default=argparse.SUPPRESS)
     parser.add_argument("--verbose", action="store_true", default=argparse.SUPPRESS)
@@ -173,6 +204,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.cache_dir is not None:
         configure(cache_dir=args.cache_dir)
+    if args.prefer_newest is not None:
+        configure(prefer_newest=args.prefer_newest)
     if args.quiet or args.json:
         configure(log_level="WARNING")
     elif args.verbose:
@@ -208,6 +241,7 @@ def _dispatch(args: argparse.Namespace) -> object | None:
             index_url=args.index_url,
             extra_index_url=args.extra_index_url,
             refresh=args.refresh,
+            prefer_newest=args.prefer_newest,
         )
     if args.command == "install":
         _validate_target_options(args)
@@ -226,14 +260,14 @@ def _dispatch(args: argparse.Namespace) -> object | None:
             args.manifest, args.output, include_depfix_runtime=args.include_depfix_runtime, cache_dir=args.cache_dir
         )
     if args.command == "prepare":
-        exported = export_project(args.project, output=args.output)
+        exported = export_project(args.project, output=args.output, prefer_newest=args.prefer_newest)
         installed = install_manifest(exported.manifest, frozen=True)
         verified = verify_manifest(exported.manifest)
         return {"export": exported, "install": installed, "verify": verified, "ide_path": str(exported.ide_path)}
     if args.command == "scan":
         return scan_project(args.project, include=args.include, exclude=args.exclude)
     if args.command == "fetch":
-        package = load_package(args.specifier, refresh=args.refresh)
+        package = load_package(args.specifier, refresh=args.refresh, prefer_newest=args.prefer_newest)
         return {
             "name": package.name,
             "version": package.version,
@@ -274,7 +308,7 @@ def _dispatch(args: argparse.Namespace) -> object | None:
     if args.command == "tree":
         return _tree(load_manifest(args.manifest.resolve()))
     if args.command == "show":
-        package = load_package(args.specifier)
+        package = load_package(args.specifier, prefer_newest=args.prefer_newest)
         return _package_dict(package)
     if args.command == "why":
         return _why(load_manifest(args.manifest.resolve()), args.package)
@@ -295,7 +329,9 @@ def _dispatch(args: argparse.Namespace) -> object | None:
             executable = backend.ensure_available()
             print(f"uv {executable.version}")
             return 0
-        return backend.passthrough(args.arguments)
+        if args.pip_command == "install":
+            return _pip_install(args)
+        raise ValueError("pip requires the install command or --version")
     if args.command == "cache":
         return _cache(args)
     raise ValueError(f"unsupported command {args.command}")
@@ -421,6 +457,184 @@ def _migrate(source: Path, output: Path) -> dict[str, object]:
         rows.extend(["[[dynamic]]\n", f"specifier = {json.dumps(requirement)}\n\n"])
     destination.write_text("".join(rows), encoding="utf-8")
     return {"output": str(destination), "requirements": len(requirements)}
+
+
+@dataclass(slots=True)
+class _RequirementCollection:
+    requirements: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    index_url: str | None = None
+    extra_index_urls: list[str] = field(default_factory=list)
+
+    def merge(self, other: _RequirementCollection) -> None:
+        self.requirements.extend(other.requirements)
+        self.constraints.extend(other.constraints)
+        if other.index_url is not None:
+            if self.index_url is not None and self.index_url != other.index_url:
+                raise ValueError(
+                    f"requirements files declare conflicting primary indexes: {self.index_url!r} and "
+                    f"{other.index_url!r}"
+                )
+            self.index_url = other.index_url
+        self.extra_index_urls.extend(other.extra_index_urls)
+
+
+def _pip_install(args: argparse.Namespace) -> object:
+    collected = _RequirementCollection(requirements=list(args.requirements))
+    collected.requirements.extend(_editable_specifier(value, Path.cwd()) for value in args.editable)
+    for requirement_file in args.requirement:
+        collected.merge(_read_requirement_input(requirement_file))
+    for constraint_file in args.constraint:
+        collected.merge(_read_requirement_input(constraint_file, constraints_only=True))
+    if not collected.requirements:
+        raise ValueError("pip install requires package arguments or at least one -r/--requirement file")
+    index_url = args.index_url or collected.index_url
+    extra_indexes = tuple(dict.fromkeys((*collected.extra_index_urls, *args.extra_index_url)))
+    return install_packages(
+        collected.requirements,
+        constraints=collected.constraints,
+        refresh=args.refresh,
+        offline=args.offline,
+        index_url=index_url,
+        extra_index_url=extra_indexes,
+        prefer_newest=True if args.upgrade else args.prefer_newest,
+        cache_dir=args.cache_dir,
+        base_dir=Path.cwd(),
+    )
+
+
+def _read_requirement_input(
+    path: Path,
+    *,
+    constraints_only: bool = False,
+    _seen: set[tuple[Path, bool]] | None = None,
+) -> _RequirementCollection:
+    source = path.expanduser().resolve()
+    key = (source, constraints_only)
+    seen = _seen if _seen is not None else set()
+    if key in seen:
+        raise ValueError(f"recursive requirements include detected at {source}")
+    seen.add(key)
+    result = _RequirementCollection()
+    try:
+        for value in _logical_requirement_lines(source):
+            cleaned = re.sub(r"\s+#.*$", "", value).strip()
+            if not cleaned:
+                continue
+            cleaned = re.sub(r"\s+--hash(?:=|\s+)\S+", "", cleaned).strip()
+            tokens = shlex.split(cleaned, comments=False)
+            if not tokens:
+                continue
+            option, option_value = _requirement_file_option(tokens)
+            if option in {"requirement", "constraint"}:
+                assert option_value is not None
+                included = Path(option_value)
+                if not included.is_absolute():
+                    included = source.parent / included
+                result.merge(
+                    _read_requirement_input(
+                        included,
+                        constraints_only=constraints_only or option == "constraint",
+                        _seen=seen,
+                    )
+                )
+                continue
+            if option == "index-url":
+                assert option_value is not None
+                result.merge(_RequirementCollection(index_url=option_value))
+                continue
+            if option == "extra-index-url":
+                assert option_value is not None
+                result.extra_index_urls.append(option_value)
+                continue
+            if option == "editable":
+                if constraints_only:
+                    raise ValueError(f"editable entries are not valid constraints in {source}")
+                assert option_value is not None
+                result.requirements.append(_editable_specifier(option_value, source.parent))
+                continue
+            if option is not None or any(token.startswith("-") for token in tokens[1:]):
+                unsupported = (
+                    tokens[0] if option is not None else next(token for token in tokens[1:] if token.startswith("-"))
+                )
+                raise ValueError(f"unsupported requirements option {unsupported!r} in {source}")
+            if constraints_only:
+                result.constraints.append(cleaned)
+            else:
+                result.requirements.append(_requirement_specifier(cleaned, source.parent))
+    finally:
+        seen.remove(key)
+    return result
+
+
+def _logical_requirement_lines(source: Path) -> tuple[str, ...]:
+    pending = ""
+    result: list[str] = []
+    for physical in source.read_text(encoding="utf-8").splitlines():
+        value = physical.strip()
+        if not pending and (not value or value.startswith("#")):
+            continue
+        pending += value[:-1].rstrip() + " " if value.endswith("\\") else value
+        if not value.endswith("\\"):
+            result.append(pending.strip())
+            pending = ""
+    if pending:
+        result.append(pending.strip())
+    return tuple(result)
+
+
+def _requirement_file_option(tokens: list[str]) -> tuple[str | None, str | None]:
+    names = {
+        "-r": "requirement",
+        "--requirement": "requirement",
+        "-c": "constraint",
+        "--constraint": "constraint",
+        "-e": "editable",
+        "--editable": "editable",
+        "--index-url": "index-url",
+        "--extra-index-url": "extra-index-url",
+    }
+    head = tokens[0]
+    if head in names:
+        if len(tokens) != 2:
+            raise ValueError(f"requirements option {head!r} requires exactly one value")
+        return names[head], tokens[1]
+    for prefix, name in (
+        ("--requirement=", "requirement"),
+        ("--constraint=", "constraint"),
+        ("--editable=", "editable"),
+        ("--index-url=", "index-url"),
+        ("--extra-index-url=", "extra-index-url"),
+    ):
+        if head.startswith(prefix):
+            if len(tokens) != 1 or not head[len(prefix) :]:
+                raise ValueError(f"requirements option {prefix[:-1]!r} requires exactly one value")
+            return name, head[len(prefix) :]
+    if head.startswith("-r") and len(head) > 2 and len(tokens) == 1:
+        return "requirement", head[2:]
+    if head.startswith("-c") and len(head) > 2 and len(tokens) == 1:
+        return "constraint", head[2:]
+    return (head, None) if head.startswith("-") else (None, None)
+
+
+def _requirement_specifier(value: str, base_dir: Path) -> str:
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = base_dir / candidate
+    if value.startswith((".", "/", "~")) or candidate.exists():
+        return f"file:{candidate.resolve()}"
+    if value.startswith("file:"):
+        from .sources import parse_source
+
+        return parse_source(value, base_dir=base_dir).normalized
+    return value
+
+
+def _editable_specifier(value: str, base_dir: Path) -> str:
+    specifier = _requirement_specifier(value, base_dir)
+    if not specifier.startswith("file:"):
+        raise ValueError("Depfix accepts editable syntax only for a local file or project path")
+    return specifier
 
 
 def _requirements_lines(path: Path, _seen: set[Path] | None = None) -> list[str]:

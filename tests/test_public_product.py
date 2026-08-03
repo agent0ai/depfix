@@ -12,7 +12,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-from conftest import file_spec
+from conftest import build_index, file_spec
 from packaging.version import Version
 
 import depfix
@@ -30,7 +30,7 @@ from depfix.errors import (
 )
 from depfix.manager import activate_manifest, load_generated_alias, reset_runtime_state
 from depfix.manifest import load_manifest, write_manifest
-from depfix.project import create_bundle, export_project, install_manifest, verify_manifest
+from depfix.project import create_bundle, export_project, install_manifest, install_packages, verify_manifest
 from depfix.resolver import Resolver, _extract_source_archive, _versions_equivalent
 from depfix.scanner import scan_project
 from depfix.settings import Settings, reset_configuration, resolve_settings
@@ -526,6 +526,29 @@ def test_json_cli_suppresses_progress(tmp_path: Path, wheel_factory, capsys: pyt
     assert json.loads(captured.out)["name"] == "json-progress-demo"
 
 
+def test_cli_prefer_newest_option_is_available_after_the_command(
+    tmp_path: Path,
+    wheel_factory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    wheel = wheel_factory("newest-cli-demo", "1.0.0", {"newest_cli_demo.py": "VALUE = 1\n"})
+
+    result = cli_main(
+        [
+            "fetch",
+            file_spec(wheel),
+            "--prefer-newest",
+            "--json",
+            "--cache-dir",
+            str(tmp_path / "cache"),
+        ]
+    )
+
+    assert result == 0
+    assert json.loads(capsys.readouterr().out)["version"] == "1.0.0"
+    assert resolve_settings(discover=False).prefer_newest is True
+
+
 def test_install_cli_exposes_only_effective_artifact_options() -> None:
     result = subprocess.run(
         [sys.executable, "-m", "depfix", "install", "--help"],
@@ -563,7 +586,8 @@ def test_settings_precedence_and_optional_project_config(
     state = tmp_path / ".depfix"
     state.mkdir()
     (state / "config.toml").write_text(
-        '[settings]\nallow-unsafe = true\n[resolver]\nindex-url = "https://config.example/simple"\noffline = true\n',
+        '[settings]\nallow-unsafe = true\n[resolver]\nindex-url = "https://config.example/simple"\n'
+        "offline = true\nprefer-newest = true\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -571,22 +595,32 @@ def test_settings_precedence_and_optional_project_config(
     assert configured.index_url == "https://config.example/simple"
     assert configured.offline is True
     assert configured.allow_unsafe is True
+    assert configured.prefer_newest is True
 
     monkeypatch.setenv("DEPFIX_INDEX_URL", "https://env.example/simple")
     monkeypatch.setenv("DEPFIX_OFFLINE", "0")
     monkeypatch.setenv("DEPFIX_ALLOW_UNSAFE", "0")
+    monkeypatch.setenv("DEPFIX_PREFER_NEWEST", "0")
     environment = resolve_settings()
     assert environment.index_url == "https://env.example/simple"
     assert environment.offline is False
     assert environment.allow_unsafe is False
+    assert environment.prefer_newest is False
 
-    depfix.configure(index_url="https://python.example/simple", offline=True, allow_unsafe=True)
+    depfix.configure(index_url="https://python.example/simple", offline=True, allow_unsafe=True, prefer_newest=True)
     assert resolve_settings().index_url == "https://python.example/simple"
     assert resolve_settings().allow_unsafe is True
-    explicit = resolve_settings(index_url="https://call.example/simple", offline=False, allow_unsafe=False)
+    assert resolve_settings().prefer_newest is True
+    explicit = resolve_settings(
+        index_url="https://call.example/simple",
+        offline=False,
+        allow_unsafe=False,
+        prefer_newest=False,
+    )
     assert explicit.index_url == "https://call.example/simple"
     assert explicit.offline is False
     assert explicit.allow_unsafe is False
+    assert explicit.prefer_newest is False
 
 
 def test_every_loading_api_exposes_the_per_request_unsafe_override() -> None:
@@ -600,6 +634,8 @@ def test_every_loading_api_exposes_the_per_request_unsafe_override() -> None:
     ):
         parameter = inspect.signature(api).parameters["allow_unsafe"]
         assert parameter.default is None
+        newest_parameter = inspect.signature(api).parameters["prefer_newest"]
+        assert newest_parameter.default is None
 
 
 def test_scanner_is_static_and_reports_dynamic_calls(tmp_path: Path) -> None:
@@ -607,7 +643,7 @@ def test_scanner_is_static_and_reports_dynamic_calls(tmp_path: Path) -> None:
     source.write_text(
         "from depfix import import_module as versioned_import\n"
         'SPEC = "idna" + "==3.10"\n'
-        "safe = versioned_import(SPEC, isolation='shared', allow_unsafe=True)\n"
+        "safe = versioned_import(SPEC, isolation='shared', allow_unsafe=True, prefer_newest=True)\n"
         "unsafe = versioned_import(read_spec())\n",
         encoding="utf-8",
     )
@@ -617,6 +653,7 @@ def test_scanner_is_static_and_reports_dynamic_calls(tmp_path: Path) -> None:
     assert result.requests[0].assignment == "safe"
     assert result.requests[0].isolation == "shared"
     assert result.requests[0].allow_unsafe is True
+    assert result.requests[0].prefer_newest is True
     assert len(result.dynamic_requests) == 1
     assert "safe static string" in result.dynamic_requests[0].reason
 
@@ -684,6 +721,110 @@ def test_depfix_pip_version_reports_the_uv_backend() -> None:
     )
     assert result.returncode == 0
     assert result.stdout.startswith("uv ")
+
+
+def test_depfix_pip_install_populates_store_with_conflicting_dependency_realms(
+    tmp_path: Path,
+    wheel_factory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dependency_v1 = wheel_factory("pip-shared", "1.0.0", {"pip_shared.py": "VERSION = 1\n"})
+    dependency_v2 = wheel_factory("pip-shared", "2.0.0", {"pip_shared.py": "VERSION = 2\n"})
+    package_a = wheel_factory(
+        "pip-package-a",
+        "1.0.0",
+        {"pip_package_a.py": "VALUE = 'a'\n"},
+        requires=["pip-shared<2"],
+    )
+    package_b = wheel_factory(
+        "pip-package-b",
+        "1.0.0",
+        {"pip_package_b.py": "VALUE = 'b'\n"},
+        requires=["pip-shared>=2"],
+    )
+    index = build_index(tmp_path / "index", [dependency_v1, dependency_v2])
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text(f"{file_spec(package_a)}\n{file_spec(package_b)}\n", encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+    before_path = list(sys.path)
+    assert importlib.util.find_spec("pip_package_a") is None
+
+    result = cli_main(
+        [
+            "pip",
+            "install",
+            "-r",
+            str(requirements),
+            "--index-url",
+            index,
+            "--cache-dir",
+            str(cache_dir),
+            "--json",
+        ]
+    )
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    graph = load_manifest(Path(output["manifest"]))
+    shared_versions = {node.version for node in graph.nodes if node.distribution == "pip-shared"}
+    assert output["packages"] == ["pip-package-a==1.0.0", "pip-package-b==1.0.0"]
+    assert shared_versions == {"1.0.0", "2.0.0"}
+    assert {item.distribution for item in Cache(cache_dir).list_packages()} == {
+        "pip-package-a",
+        "pip-package-b",
+        "pip-shared",
+    }
+    assert sys.path == before_path
+    assert importlib.util.find_spec("pip_package_a") is None
+
+
+def test_depfix_pip_install_applies_nested_requirement_constraints(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    dependency_v1 = wheel_factory("constrained-shared", "1.0.0", {"constrained_shared.py": "VERSION = 1\n"})
+    dependency_v2 = wheel_factory("constrained-shared", "2.0.0", {"constrained_shared.py": "VERSION = 2\n"})
+    package = wheel_factory(
+        "constrained-root",
+        "1.0.0",
+        {"constrained_root.py": "VALUE = 1\n"},
+        requires=["constrained-shared>=1"],
+    )
+    index = build_index(tmp_path / "index", [dependency_v1, dependency_v2])
+    constraints = tmp_path / "constraints.txt"
+    constraints.write_text("constrained-shared<2\n", encoding="utf-8")
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text(f"-c {constraints.name}\n{file_spec(package)}\n", encoding="utf-8")
+
+    installed = install_packages(
+        [file_spec(package)],
+        constraints=["constrained-shared<2"],
+        index_url=index,
+        cache_dir=tmp_path / "api-cache",
+        base_dir=tmp_path,
+    )
+    api_graph = load_manifest(installed.manifest)
+    assert {node.version for node in api_graph.nodes if node.distribution == "constrained-shared"} == {"1.0.0"}
+
+    result = cli_main(
+        [
+            "pip",
+            "install",
+            "-r",
+            str(requirements),
+            "--index-url",
+            index,
+            "--cache-dir",
+            str(tmp_path / "cli-cache"),
+            "--quiet",
+        ]
+    )
+    assert result == 0
+    manifests = tuple((Cache(tmp_path / "cli-cache").root / "installs").glob("*/imports.lock"))
+    assert len(manifests) == 1
+    cli_graph = load_manifest(manifests[0])
+    assert cli_graph.policy["constraints"] == ["constrained-shared<2"]
+    assert {node.version for node in cli_graph.nodes if node.distribution == "constrained-shared"} == {"1.0.0"}
 
 
 @pytest.mark.parametrize("members", [("pkg/data.txt", "pkg/data.txt"), ("pkg/Data.txt", "pkg/data.txt")])

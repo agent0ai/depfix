@@ -165,7 +165,7 @@
         "index-identity": {"type": "string"},
         "source-policy": {"type": "string"},
         "group": {"type": "string"},
-        "mode": {"enum": ["explicit", "default", "using-context", "using-decorator"]},
+        "mode": {"enum": ["explicit", "default", "using-context", "using-decorator", "package-install"]},
         "enclosing-function": {"type": "string"}
       },
       "additionalProperties": false

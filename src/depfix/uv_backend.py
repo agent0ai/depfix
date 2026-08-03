@@ -199,14 +199,6 @@ class UvBackend:
             )
         return wheels[0]
 
-    def passthrough(self, arguments: Sequence[str]) -> int:
-        result = self.run(["pip", *arguments], check=False)
-        if result.stdout:
-            print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-        return result.returncode
-
     def _candidate_paths(self) -> Iterator[tuple[Path, str]]:
         seen: set[str] = set()
 

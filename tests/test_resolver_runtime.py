@@ -135,6 +135,168 @@ def _project(tmp_path: Path, wheel_factory):
     return graph, lock_path, cache
 
 
+def _compatible_reuse_project(tmp_path: Path, wheel_factory):
+    dependency_old = wheel_factory(
+        "compatible-dependency",
+        "1.0.0",
+        {"compatible_dependency.py": "VERSION = 'old'\n"},
+    )
+    dependency_new = wheel_factory(
+        "compatible-dependency",
+        "2.0.0",
+        {"compatible_dependency.py": "VERSION = 'new'\n"},
+    )
+    package_a = wheel_factory(
+        "compatible-package-a",
+        "1.0.0",
+        {"compatible_package_a.py": "VALUE = 'a'\n"},
+        requires=["compatible-dependency>=1,<2"],
+    )
+    package_b = wheel_factory(
+        "compatible-package-b",
+        "1.0.0",
+        {"compatible_package_b.py": "VALUE = 'b'\n"},
+        requires=["compatible-dependency>=1,<3"],
+    )
+    index = build_index(tmp_path / "reuse-index", [dependency_old, dependency_new])
+    return dependency_old, dependency_new, package_a, package_b, index
+
+
+def _dependency_versions(graph, distribution: str) -> set[str]:  # type: ignore[no-untyped-def]
+    return {node.version for node in graph.nodes if node.distribution == distribution}
+
+
+def test_group_resolution_reuses_cached_compatible_dependencies_unless_newest_is_forced(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    _old, _new, package_a, package_b, index = _compatible_reuse_project(tmp_path, wheel_factory)
+    declarations = (
+        ImportDeclaration("package_a", file_spec(package_a), "compatible_package_a"),
+        ImportDeclaration("package_b", file_spec(package_b), "compatible_package_b"),
+    )
+
+    reuse_graph = Resolver(Cache(tmp_path / "reuse-cache"), index_url=index).resolve(
+        ProjectConfig(tmp_path / "reuse.toml", declarations, {})
+    )
+    newest_graph = Resolver(Cache(tmp_path / "newest-cache"), index_url=index).resolve(
+        ProjectConfig(tmp_path / "newest.toml", declarations, {"prefer-newest": True})
+    )
+
+    assert _dependency_versions(reuse_graph, "compatible-dependency") == {"1.0.0"}
+    assert _dependency_versions(newest_graph, "compatible-dependency") == {"1.0.0", "2.0.0"}
+    assert reuse_graph.policy["prefer-newest"] is False
+    assert newest_graph.policy["prefer-newest"] is True
+
+
+def test_separate_resolution_reuses_cached_compatible_dependencies_and_supports_per_request_override(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    _old, _new, package_a, package_b, index = _compatible_reuse_project(tmp_path, wheel_factory)
+    cache = Cache(tmp_path / "cache")
+    Resolver(cache, index_url=index).resolve(
+        ProjectConfig(
+            tmp_path / "prime.toml",
+            (ImportDeclaration("package_a", file_spec(package_a), "compatible_package_a"),),
+            {},
+        )
+    )
+
+    reused = Resolver(cache, index_url=index).resolve(
+        ProjectConfig(
+            tmp_path / "reuse.toml",
+            (ImportDeclaration("package_b", file_spec(package_b), "compatible_package_b"),),
+            {},
+        )
+    )
+    newest = Resolver(cache, index_url=index).resolve(
+        ProjectConfig(
+            tmp_path / "newest.toml",
+            (
+                ImportDeclaration(
+                    "package_b",
+                    file_spec(package_b),
+                    "compatible_package_b",
+                    prefer_newest=True,
+                ),
+            ),
+            {},
+        )
+    )
+
+    assert _dependency_versions(reused, "compatible-dependency") == {"1.0.0"}
+    assert _dependency_versions(newest, "compatible-dependency") == {"2.0.0"}
+
+
+def test_compatible_cached_root_bypasses_new_resolution_but_force_newest_uses_backend(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    dependency_old, _new, package_a, _package_b, index = _compatible_reuse_project(tmp_path, wheel_factory)
+    cache = Cache(tmp_path / "cache")
+    Resolver(cache, index_url=index).resolve(
+        ProjectConfig(
+            tmp_path / "prime.toml",
+            (ImportDeclaration("package_a", file_spec(package_a), "compatible_package_a"),),
+            {},
+        )
+    )
+
+    class Backend:
+        calls = 0
+
+        def version(self) -> str:
+            return "test"
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            del requirement, distribution
+            self.calls += 1
+            return "2.0.0"
+
+    backend = Backend()
+    request = (ImportDeclaration("dependency", "compatible-dependency>=1,<3", "compatible_dependency"),)
+    reused = Resolver(cache, index_url=index, backend=backend).resolve(
+        ProjectConfig(tmp_path / "reuse-root.toml", request, {})
+    )
+    newest = Resolver(cache, index_url=index, backend=backend).resolve(
+        ProjectConfig(tmp_path / "newest-root.toml", request, {"prefer-newest": True})
+    )
+
+    assert dependency_old.name in {artifact.filename for artifact in reused.artifacts}
+    assert _dependency_versions(reused, "compatible-dependency") == {"1.0.0"}
+    assert _dependency_versions(newest, "compatible-dependency") == {"2.0.0"}
+    assert backend.calls == 1
+
+
+def test_install_constraints_apply_to_top_level_package_selection(tmp_path: Path, wheel_factory) -> None:
+    dependency_old, dependency_new, _package_a, _package_b, index = _compatible_reuse_project(tmp_path, wheel_factory)
+
+    class Backend:
+        requirement = ""
+
+        def version(self) -> str:
+            return "test"
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            assert distribution == "compatible-dependency"
+            self.requirement = requirement
+            return "1.0.0"
+
+    backend = Backend()
+    graph = Resolver(Cache(tmp_path / "cache"), index_url=index, backend=backend).resolve(
+        ProjectConfig(
+            tmp_path / "constraints.toml",
+            (ImportDeclaration("dependency", "compatible-dependency>=1", api="load_package"),),
+            {"constraints": ("compatible-dependency<2",)},
+        )
+    )
+
+    assert ">=1" in backend.requirement and "<2" in backend.requirement
+    assert {artifact.filename for artifact in graph.artifacts} == {dependency_old.name}
+    assert dependency_new.name not in {artifact.filename for artifact in graph.artifacts}
+
+
 def test_multiversion_realms_import_semantics_and_aliases(tmp_path: Path, wheel_factory) -> None:
     graph, lock_path, cache = _project(tmp_path, wheel_factory)
     runtime = DepfixRuntime(graph, cache, lockfile=lock_path).activate()

@@ -21,6 +21,8 @@
   state.
 - Unsafe-loading overrides may relax only known-unsafe classification and strict in-process extension guards; document
   integrity, network, process-backend, and incompatible-owner boundaries as non-overridable.
+- Store-only package installation prepares verified targets but does not activate an import realm or mutate an ambient
+  environment.
 
 ## Work Guidance
 

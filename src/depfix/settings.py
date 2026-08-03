@@ -21,6 +21,7 @@ class Settings:
     frozen: bool = False
     offline: bool = False
     allow_unsafe: bool = False
+    prefer_newest: bool = False
     cache_dir: Path = user_cache_path("depfix")
     cache_retention_days: int = 30
     cache_auto_cleanup: bool = True
@@ -41,6 +42,7 @@ def configure(
     frozen: bool | None = None,
     offline: bool | None = None,
     allow_unsafe: bool | None = None,
+    prefer_newest: bool | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     cache_retention_days: int | None = None,
     cache_auto_cleanup: bool | None = None,
@@ -55,6 +57,7 @@ def configure(
         "frozen": frozen,
         "offline": offline,
         "allow_unsafe": allow_unsafe,
+        "prefer_newest": prefer_newest,
         "cache_dir": Path(cache_dir).expanduser().resolve() if cache_dir is not None else None,
         "cache_retention_days": _validate_retention_days(cache_retention_days),
         "cache_auto_cleanup": cache_auto_cleanup,
@@ -81,6 +84,7 @@ def resolve_settings(
     frozen: bool | None = None,
     offline: bool | None = None,
     allow_unsafe: bool | None = None,
+    prefer_newest: bool | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     cache_retention_days: int | None = None,
     cache_auto_cleanup: bool | None = None,
@@ -99,6 +103,7 @@ def resolve_settings(
         "frozen": _env_bool("DEPFIX_FROZEN"),
         "offline": _env_bool("DEPFIX_OFFLINE"),
         "allow_unsafe": _env_bool("DEPFIX_ALLOW_UNSAFE"),
+        "prefer_newest": _env_bool("DEPFIX_PREFER_NEWEST"),
         "cache_dir": _env_path("DEPFIX_CACHE_DIR"),
         "cache_retention_days": _env_nonnegative_int("DEPFIX_CACHE_RETENTION_DAYS"),
         "cache_auto_cleanup": _env_bool("DEPFIX_CACHE_AUTO_CLEANUP"),
@@ -112,6 +117,7 @@ def resolve_settings(
         "frozen": frozen,
         "offline": offline,
         "allow_unsafe": allow_unsafe,
+        "prefer_newest": prefer_newest,
         "cache_dir": Path(cache_dir).expanduser().resolve() if cache_dir is not None else None,
         "cache_retention_days": _validate_retention_days(cache_retention_days),
         "cache_auto_cleanup": cache_auto_cleanup,
@@ -139,6 +145,7 @@ def resolve_settings(
         frozen=bool(choose("frozen")),
         offline=bool(choose("offline")),
         allow_unsafe=bool(choose("allow_unsafe")),
+        prefer_newest=bool(choose("prefer_newest")),
         cache_dir=Path(choose("cache_dir")),
         cache_retention_days=int(choose("cache_retention_days")),
         cache_auto_cleanup=bool(choose("cache_auto_cleanup")),
@@ -266,7 +273,7 @@ def _project_config_values(start: Path | None = None) -> dict[str, Any]:
     }
     values = {aliases.get(key, key.replace("-", "_")): value for key, value in selected.items()}
     result: dict[str, Any] = {}
-    for key in ("frozen", "offline", "allow_unsafe", "cache_auto_cleanup"):
+    for key in ("frozen", "offline", "allow_unsafe", "prefer_newest", "cache_auto_cleanup"):
         if key in values:
             if not isinstance(values[key], bool):
                 raise SpecifierError(

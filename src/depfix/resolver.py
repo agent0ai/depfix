@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import urldefrag, urljoin, urlsplit
 
 from packaging.markers import default_environment
-from packaging.requirements import Requirement
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.tags import sys_tags
 from packaging.utils import canonicalize_name, parse_sdist_filename, parse_wheel_filename
@@ -108,22 +108,43 @@ class Resolver:
         self.allow_yanked = allow_yanked
         self._artifacts: dict[str, Artifact] = {}
         self._nodes: dict[str, Node] = {}
-        self._candidate_cache: dict[tuple[str, str], _Candidate] = {}
+        self._candidate_cache: dict[tuple[str, str, bool], _Candidate] = {}
         self._uv_version = "not-required"
         self._policy: dict[str, object] = {}
         self._allowed_hosts: tuple[str, ...] = ()
         self._allow_insecure = False
+        self._prefer_newest = self.settings.prefer_newest
+        self._constraints: dict[str, SpecifierSet] = {}
 
     def resolve(self, config: ProjectConfig) -> LockedGraph:
         self._policy = dict(config.policy)
+        configured_preference = self._policy.get("prefer-newest", self.settings.prefer_newest)
+        if not isinstance(configured_preference, bool):
+            raise ResolutionError("Policy 'prefer-newest' must be boolean")
+        self._prefer_newest = configured_preference
+        self._policy["prefer-newest"] = configured_preference
+        self._constraints = self._parse_constraints(self._policy.get("constraints"))
+        if self._constraints:
+            self._policy["constraints"] = tuple(
+                f"{distribution}{constraint}" for distribution, constraint in sorted(self._constraints.items())
+            )
         self._allowed_hosts = _policy_strings(self._policy.get("allowed-hosts"))
         self._allow_insecure = bool(self._policy.get("allow-insecure-transport", False))
         self._validate_index_policy()
         aliases: list[Alias] = []
         for declaration in config.imports:
+            prefer_newest = self._prefer_newest if declaration.prefer_newest is None else declaration.prefer_newest
+            if not isinstance(prefer_newest, bool):
+                raise ResolutionError(f"prefer-newest for alias {declaration.name!r} must be boolean")
             source = parse_source(declaration.specifier, base_dir=declaration.base_dir or config.path.parent)
             self.progress.emit("resolve", source.normalized)
-            node = self._resolve_declaration(declaration, source, path=f"request:{declaration.name}", ancestors={})
+            node = self._resolve_declaration(
+                declaration,
+                source,
+                path=f"request:{declaration.name}",
+                ancestors={},
+                prefer_newest=prefer_newest,
+            )
             selected_module = self._select_module(declaration, source, node)
             aliases.append(
                 Alias(
@@ -160,7 +181,7 @@ class Resolver:
             artifacts=tuple(sorted(self._artifacts.values(), key=lambda value: value.id)),
             nodes=tuple(sorted(self._nodes.values(), key=lambda value: value.id)),
             aliases=tuple(sorted(aliases, key=lambda value: value.name)),
-            policy=config.policy,
+            policy=self._policy,
             resolver_backend="uv",
             resolver_version=self._uv_version,
         )
@@ -212,6 +233,7 @@ class Resolver:
         *,
         path: str,
         ancestors: dict[str, Node],
+        prefer_newest: bool,
     ) -> Node:
         self._validate_source_policy(source)
         if source.kind == "py":
@@ -219,17 +241,49 @@ class Resolver:
         if source.kind == "pypi":
             assert source.distribution is not None and source.requirement is not None
             self._uv_version = self.backend.version()
-            exact_version = self.backend.resolve_root_version(source.requirement, source.distribution)
+            requested = Requirement(source.requirement)
+            requested_constraint = self._constrained_specifier(source.distribution, requested.specifier)
+            extras = f"[{','.join(sorted(requested.extras))}]" if requested.extras else ""
+            constrained_requirement = f"{source.distribution}{extras}{requested_constraint}"
+            cached_candidate = None
+            if not prefer_newest:
+                preferred = self._select_pypi(
+                    source.distribution,
+                    requested_constraint,
+                    prefer_newest=False,
+                )
+                if self.cache.has_blob(preferred.sha256):
+                    cached_candidate = preferred
+            exact_version = (
+                cached_candidate.version
+                if cached_candidate is not None
+                else self.backend.resolve_root_version(constrained_requirement, source.distribution)
+            )
             self.progress.emit("fetch", f"{source.distribution}=={exact_version} dependency graph")
-            constraint = SpecifierSet(f"=={exact_version}")
-            candidate = self._select_pypi(source.distribution, constraint)
+            candidate = cached_candidate or self._select_pypi(
+                source.distribution,
+                SpecifierSet(f"=={exact_version}"),
+                prefer_newest=prefer_newest,
+            )
             candidate.source = source
             candidate = self._prepare_selected_candidate(candidate)
-            return self._resolve_candidate(candidate, extras=source.extras, path=path, ancestors=ancestors)
+            return self._resolve_candidate(
+                candidate,
+                extras=source.extras,
+                path=path,
+                ancestors=ancestors,
+                prefer_newest=prefer_newest,
+            )
         if source.kind == "git":
             wheel, exact_source = self._build_git(source)
             candidate = self._candidate_from_local_wheel(wheel, exact_source)
-            return self._resolve_candidate(candidate, extras=source.extras, path=path, ancestors=ancestors)
+            return self._resolve_candidate(
+                candidate,
+                extras=source.extras,
+                path=path,
+                ancestors=ancestors,
+                prefer_newest=prefer_newest,
+            )
         if source.path is not None:
             if not source.path.exists():
                 raise SourceError("Local source does not exist", request=source.original, source=str(source.path))
@@ -239,7 +293,13 @@ class Resolver:
                 candidate = self._candidate_from_local_wheel(source.path, source)
             else:
                 candidate = self._build_source_candidate(source.path, source)
-            return self._resolve_candidate(candidate, extras=source.extras, path=path, ancestors=ancestors)
+            return self._resolve_candidate(
+                candidate,
+                extras=source.extras,
+                path=path,
+                ancestors=ancestors,
+                prefer_newest=prefer_newest,
+            )
         if source.kind == "url":
             assert source.url is not None
             blob, observed_source = self._fetch_source(source)
@@ -247,7 +307,13 @@ class Resolver:
                 candidate = self._candidate_from_blob(blob, Path(urlsplit(source.url).path).name, observed_source)
             else:
                 candidate = self._build_source_candidate(blob, observed_source)
-            return self._resolve_candidate(candidate, extras=source.extras, path=path, ancestors=ancestors)
+            return self._resolve_candidate(
+                candidate,
+                extras=source.extras,
+                path=path,
+                ancestors=ancestors,
+                prefer_newest=prefer_newest,
+            )
         raise SourceError("Unsupported normalized source", request=source.original, source=source.kind)
 
     def _resolve_single_file(self, declaration: ImportDeclaration, source: SourceInfo, *, path: str) -> Node:
@@ -324,6 +390,7 @@ class Resolver:
         extras: tuple[str, ...],
         path: str,
         ancestors: dict[str, Node],
+        prefer_newest: bool,
     ) -> Node:
         blob, final_url = self.cache.fetch_url_with_final(
             candidate.url,
@@ -408,13 +475,16 @@ class Resolver:
             evaluated.append(raw)
         dependencies: dict[str, str] = {}
         for name, requirements in sorted(grouped.items()):
-            constraints = SpecifierSet(",".join(str(req.specifier) for req in requirements if str(req.specifier)))
+            constraints = self._constrained_specifier(
+                name,
+                SpecifierSet(",".join(str(req.specifier) for req in requirements if str(req.specifier))),
+            )
             ancestor = lineage.get(name)
             if ancestor is not None and Version(ancestor.version) in constraints:
                 dependencies[name] = ancestor.id
                 continue
             selected_extras = tuple(sorted({extra for req in requirements for extra in req.extras}))
-            child_candidate = self._select_pypi(name, constraints)
+            child_candidate = self._select_pypi(name, constraints, prefer_newest=prefer_newest)
             child_candidate.source = SourceInfo(
                 original=str(requirements[0]),
                 normalized=f"{name}{constraints}",
@@ -425,12 +495,43 @@ class Resolver:
             )
             child_candidate = self._prepare_selected_candidate(child_candidate)
             child = self._resolve_candidate(
-                child_candidate, extras=selected_extras, path=f"{path}/{name}", ancestors=lineage
+                child_candidate,
+                extras=selected_extras,
+                path=f"{path}/{name}",
+                ancestors=lineage,
+                prefer_newest=prefer_newest,
             )
             dependencies[name] = child.id
         node = replace(provisional, dependencies=dependencies, evaluated_markers=tuple(sorted(evaluated)))
         self._nodes[node.id] = node
         return node
+
+    def _parse_constraints(self, value: object) -> dict[str, SpecifierSet]:
+        raw_constraints = _policy_strings(value)
+        grouped: dict[str, list[str]] = {}
+        for raw in raw_constraints:
+            try:
+                requirement = Requirement(raw)
+            except InvalidRequirement as exc:
+                raise ResolutionError("Invalid package constraint", request=raw, remediation=str(exc)) from exc
+            if requirement.url or requirement.extras or requirement.marker:
+                raise ResolutionError(
+                    "Package constraints must contain only a distribution name and version specifier",
+                    request=raw,
+                )
+            distribution = str(canonicalize_name(requirement.name))
+            grouped.setdefault(distribution, []).append(str(requirement.specifier))
+        return {
+            distribution: SpecifierSet(",".join(item for item in specifiers if item))
+            for distribution, specifiers in grouped.items()
+        }
+
+    def _constrained_specifier(self, distribution: str, specifier: SpecifierSet) -> SpecifierSet:
+        constrained = self._constraints.get(str(canonicalize_name(distribution)))
+        if constrained is None:
+            return specifier
+        values = [value for value in (str(specifier), str(constrained)) if value]
+        return SpecifierSet(",".join(values))
 
     def _inspect_artifact(self, blob: Path, candidate: _Candidate) -> WheelInspection:
         metadata_path = self.cache.root / "metadata" / "imports" / f"{candidate.sha256}.json"
@@ -721,13 +822,19 @@ class Resolver:
                 source=redact(source.url),
             )
 
-    def _select_pypi(self, distribution: str, constraint: SpecifierSet) -> _Candidate:
-        key = (distribution, str(constraint))
+    def _select_pypi(
+        self,
+        distribution: str,
+        constraint: SpecifierSet,
+        *,
+        prefer_newest: bool,
+    ) -> _Candidate:
+        key = (distribution, str(constraint), prefer_newest)
         if key in self._candidate_cache:
             return self._candidate_cache[key]
         payload = self._project_artifact_payload(distribution, constraint)
         tag_rank = {tag: index for index, tag in enumerate(sys_tags())}
-        candidates: list[tuple[Version, int, int, int, _Candidate]] = []
+        candidates: list[tuple[int, Version, int, int, int, _Candidate]] = []
         rejections: list[str] = []
         for raw_version, files in payload.get("releases", {}).items():
             try:
@@ -761,6 +868,7 @@ class Resolver:
                     bool(item.get("yanked", False)),
                     item.get("yanked_reason") or "",
                 )
+                cached = int(self.cache.has_blob(digest))
                 if item.get("packagetype") == "bdist_wheel" and filename.endswith(".whl"):
                     try:
                         _name, _version, _build, wheel_tags = parse_wheel_filename(filename)
@@ -771,7 +879,7 @@ class Resolver:
                         rejections.append(f"{filename}: incompatible wheel tags")
                         continue
                     pure_python = int(all(tag.abi == "none" and tag.platform == "any" for tag in wheel_tags))
-                    candidates.append((version, 1, pure_python, -min(ranks), candidate))
+                    candidates.append((cached, version, 1, pure_python, -min(ranks), candidate))
                     continue
                 if item.get("packagetype") == "sdist" and bool(self._policy.get("allow-build", True)):
                     try:
@@ -779,7 +887,7 @@ class Resolver:
                     except Exception:
                         continue
                     if sdist_version == version:
-                        candidates.append((version, 0, 0, 0, candidate))
+                        candidates.append((cached, version, 0, 0, 0, candidate))
         if not candidates:
             raise ResolutionError(
                 "No compatible artifact satisfies the dependency edge",
@@ -787,11 +895,17 @@ class Resolver:
                 rejections=tuple(rejections[-20:]),
                 remediation="allow a controlled source build or select a compatible wheel target",
             )
-        candidates.sort(
-            key=lambda entry: (entry[0], entry[1], entry[2], entry[3], entry[4].filename),
-            reverse=True,
-        )
-        selected = candidates[0][4]
+        if prefer_newest:
+            candidates.sort(
+                key=lambda entry: (entry[1], entry[2], entry[3], entry[4], entry[5].filename),
+                reverse=True,
+            )
+        else:
+            candidates.sort(
+                key=lambda entry: (entry[0], entry[1], entry[2], entry[3], entry[4], entry[5].filename),
+                reverse=True,
+            )
+        selected = candidates[0][5]
         self._candidate_cache[key] = selected
         return selected
 
@@ -928,7 +1042,7 @@ def _policy_strings(value: object) -> tuple[str, ...]:
         return (value,)
     if isinstance(value, (tuple, list)) and all(isinstance(item, str) for item in value):
         return tuple(value)
-    raise ResolutionError("Network policy values must be strings or arrays of strings")
+    raise ResolutionError("Policy values must be strings or arrays of strings")
 
 
 def _extract_source_archive(path: Path, destination: Path) -> None:

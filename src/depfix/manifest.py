@@ -413,7 +413,7 @@ def _validate(graph: LockedGraph, path: Path) -> None:
     digest_pattern = re.compile(r"^[0-9a-f]{64}$")
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", graph.graph_id):
         raise ManifestError("Manifest identity is not a full SHA-256 value", manifest=path)
-    for policy_name in ("allowed-hosts", "allowed-indexes"):
+    for policy_name in ("allowed-hosts", "allowed-indexes", "constraints"):
         policy_value = graph.policy.get(policy_name, ())
         if not isinstance(policy_value, (str, tuple, list)) or (
             not isinstance(policy_value, str) and not all(isinstance(item, str) for item in policy_value)
@@ -426,6 +426,8 @@ def _validate(graph: LockedGraph, path: Path) -> None:
         raise ManifestError("Policy 'allow-insecure-transport' must be boolean", manifest=path)
     if not isinstance(graph.policy.get("allow-unsafe", False), bool):
         raise ManifestError("Policy 'allow-unsafe' must be boolean", manifest=path)
+    if not isinstance(graph.policy.get("prefer-newest", False), bool):
+        raise ManifestError("Policy 'prefer-newest' must be boolean", manifest=path)
     for artifact in graph.artifacts:
         if artifact.id != f"sha256:{artifact.sha256}" or not digest_pattern.fullmatch(artifact.sha256):
             raise ManifestError(f"Artifact {artifact.id!r} has an invalid content identity", manifest=path)
@@ -480,7 +482,7 @@ def _validate(graph: LockedGraph, path: Path) -> None:
             raise ManifestError(f"Request {request.name!r} has an unsupported isolation policy", manifest=path)
         if not isinstance(request.allow_unsafe, bool):
             raise ManifestError(f"Request {request.name!r} has an invalid allow-unsafe policy", manifest=path)
-        if request.mode not in {"explicit", "default", "using-context", "using-decorator"}:
+        if request.mode not in {"explicit", "default", "using-context", "using-decorator", "package-install"}:
             raise ManifestError(f"Request {request.name!r} has an unsupported declaration mode", manifest=path)
         if _contains_secret(request.specifier) or _contains_secret(request.index_identity):
             raise ManifestError(f"Request {request.name!r} contains serialized credentials", manifest=path)

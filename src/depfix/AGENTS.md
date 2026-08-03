@@ -45,6 +45,14 @@
 - `settings.py` owns the precedence and representation of all process-wide parameters exposed by `depfix.configure()`.
   Every loading API accepts a per-request `allow_unsafe` override; its effective default is false, and enabling it may
   relax only unsafe-classification and strict in-process native-loading guards.
+- Resolver candidate ranking defaults to the newest compatible artifact already present in the shared cache, including
+  artifacts selected earlier in a grouped resolution. Every loading API accepts `prefer_newest`; process, environment,
+  project, export, and CLI configuration inherit through `settings.py`, and resolution identities separate both modes.
+- `depfix pip install` and `project.install_packages()` resolve package/requirement-file roots as one store-only group,
+  persist an exact cache manifest, materialize verified targets, and never invoke environment installation or import
+  activation. Requirement constraints apply to matching roots and dependency edges across every selected graph.
+- Exact `install_manifest()` preparation never resolves or builds; live grouped package installation may do both before
+  writing its exact stored manifest.
 - Public failures use typed, credential-redacted `DepfixError` subclasses.
 
 ## Work Guidance

@@ -8,6 +8,7 @@ It records:
 - the CPython target, ABI, platform, and architecture;
 - Depfix and uv versions;
 - normalized requests, APIs, explicit module choice, isolation/index/source policy, source site, and alias;
+- store-only `package-install` requests created from grouped CLI or Python installation input;
 - grouped `default()`, `using()` context, and `using()` decorator declarations, including their complete specifier set,
   source/enclosing function, directly associated imports, generated aliases, provided roots, source base directory,
   isolation/options, and resolved realm identity;

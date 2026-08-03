@@ -11,7 +11,8 @@
 ## Local Contracts
 
 - Records may describe a point in time but must not contradict current public docs about shipped behavior.
-- Current implementation reports include the standard-import dispatcher, grouped manifests, and generated IDE overlays.
+- Current implementation reports include the standard-import dispatcher, grouped manifests, shared-store package
+  installation, and generated IDE overlays.
 
 ## Work Guidance
 

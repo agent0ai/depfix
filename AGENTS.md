@@ -99,6 +99,11 @@ Default section order:
 - Keep the cross-project package cache observable and bounded: record first installation and successful import use,
   protect returning graphs and active runtimes, run configurable retention work off the import path, and expose matching
   Python and CLI inventory/removal operations.
+- Prefer the newest compatible artifact already present in the shared cache during resolution. Keep newest-first selection
+  available through one inherited `prefer_newest` setting and per-loading-request overrides; exact prepared graphs remain
+  immutable until explicitly refreshed or exported again.
+- Keep `depfix pip install` Depfix-native: package arguments and requirement files populate the shared package store as a
+  grouped resolution, preserve incompatible transitive versions, and never mutate the active Python environment.
 - Publish production PyPI releases only through an explicit manual workflow dispatch from a version-matched annotated tag.
   The complete CI and distribution gate must pass before automation stages a hidden GitHub Release draft, then the
   protected `pypi` environment and OIDC Trusted Publishing may upload those exact artifacts. Make the release public only

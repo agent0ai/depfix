@@ -41,8 +41,8 @@ logical module-prefix checks. A versioned setuptools import therefore does not f
 
 Ambient third-party packages are intentionally invisible inside an in-process realm unless declared by artifact metadata.
 Standard library modules remain shared process modules. Shared mode instead follows conventional logical imports from
-verified targets, subject to the public-owner checks above. Conventional `depfix pip` environments are separate from both
-runtime modes.
+verified targets, subject to the public-owner checks above. `depfix pip install` only prepares those verified targets in
+the shared store; it does not activate either runtime mode or create a conventional environment installation.
 
 Editors do not execute Python's context-sensitive import dispatcher. Generated `depfix_imports` aliases provide exact
 versioned stubs for imports inside scopes and decorated functions. A generated search-path overlay covers one persistent

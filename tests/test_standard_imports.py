@@ -108,6 +108,52 @@ def test_persistent_default_and_multiple_roots(tmp_path: Path, wheel_factory) ->
     assert "default_first" not in sys.modules
 
 
+def test_using_reuses_one_compatible_dependency_by_default_and_can_force_newest(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    dependency_old = wheel_factory(
+        "scope-compatible-dependency",
+        "1.0.0",
+        {"scope_compatible_dependency.py": "VERSION = 'old'\n"},
+    )
+    dependency_new = wheel_factory(
+        "scope-compatible-dependency",
+        "2.0.0",
+        {"scope_compatible_dependency.py": "VERSION = 'new'\n"},
+    )
+    package_a = wheel_factory(
+        "scope-compatible-a",
+        "1.0.0",
+        {"scope_compatible_a.py": "VALUE = 'a'\n"},
+        requires=["scope-compatible-dependency>=1,<2"],
+    )
+    package_b = wheel_factory(
+        "scope-compatible-b",
+        "1.0.0",
+        {
+            "scope_compatible_b.py": (
+                "import scope_compatible_dependency\nDEPENDENCY_VERSION = scope_compatible_dependency.VERSION\n"
+            )
+        },
+        requires=["scope-compatible-dependency>=1,<3"],
+    )
+    index = build_index(tmp_path / "index", [dependency_old, dependency_new])
+
+    depfix.configure(cache_dir=tmp_path / "reuse-cache", index_url=index, log_level="WARNING")
+    with depfix.using(file_spec(package_a), file_spec(package_b)):
+        import scope_compatible_b as reused
+
+    reset_runtime_state()
+    reset_configuration()
+    depfix.configure(cache_dir=tmp_path / "newest-cache", index_url=index, log_level="WARNING")
+    with depfix.using(file_spec(package_a), file_spec(package_b), prefer_newest=True):
+        import scope_compatible_b as newest
+
+    assert reused.DEPENDENCY_VERSION == "old"
+    assert newest.DEPENDENCY_VERSION == "new"
+
+
 def test_native_auto_mode_supports_using_as_a_single_version_scope(tmp_path: Path, wheel_factory) -> None:
     first = wheel_factory(
         "shared-default-demo",
@@ -401,7 +447,7 @@ def test_scanner_groups_defaults_contexts_decorators_and_aliases(tmp_path: Path)
         "from depfix import using as selected\n"
         "BASE = 'requests=='\n"
         "VERSION = '2.31.0'\n"
-        "select_defaults(BASE + VERSION, 'PyYAML==6.0.2', allow_unsafe=True)\n"
+        "select_defaults(BASE + VERSION, 'PyYAML==6.0.2', allow_unsafe=True, prefer_newest=True)\n"
         "import requests\n"
         "import yaml as configuration\n"
         "with selected('requests==2.32.3', allow_unsafe=False):\n"
@@ -418,6 +464,7 @@ def test_scanner_groups_defaults_contexts_decorators_and_aliases(tmp_path: Path)
     assert all(site.isolation == "auto" for site in result.requests)
     default_group, context_group, decorator_group = result.groups
     assert dict(default_group.options)["allow_unsafe"] == "true"
+    assert dict(default_group.options)["prefer_newest"] == "true"
     assert dict(context_group.options)["allow_unsafe"] == "false"
     assert "allow_unsafe" not in dict(decorator_group.options)
     assert default_group.normalized_specifiers == ("requests==2.31.0", "pyyaml==6.0.2")

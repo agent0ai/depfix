@@ -4,6 +4,13 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.5.0 - 2026-08-03
+
+- Reworked `depfix pip install` from an environment-mutating uv passthrough into grouped Depfix installation: package
+  arguments and requirement/constraint files now populate the shared store, preserve incompatible transitive versions,
+  reuse compatible cached artifacts, and never modify `site-packages` or `sys.path`.
+- Added compatible cache-first dependency selection across separate and grouped requests, with per-loading-call,
+  process, environment, project, export, and CLI `prefer_newest` overrides for explicit newest-first resolution.
 - Hardened production release automation so a manual annotated-tag dispatch must pass version, changelog, current-main,
   PyPI-absence, complete cross-platform CI, and distribution checks before staging a hidden release draft or enabling
   OIDC publication of the exact checked artifacts; the GitHub Release becomes public only after PyPI verification.

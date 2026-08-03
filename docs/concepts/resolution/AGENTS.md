@@ -14,6 +14,10 @@
 - Source normalization preserves identity and removes credentials from durable output.
 - Exact artifact inspection, not distribution-name guessing, determines provided import modules.
 - uv is an executable backend; Depfix does not import uv internals.
+- Compatible selection prefers the newest artifact already present in the shared cache unless `prefer_newest` is enabled;
+  grouped reuse is stable and greedy rather than a global minimum-graph solver.
+- Grouped store installation preserves parent-specific dependency graphs and never requires incompatible roots to share
+  one environment-wide dependency version.
 
 ## Work Guidance
 

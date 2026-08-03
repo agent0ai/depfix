@@ -14,6 +14,7 @@
 - Package data declarations in `pyproject.toml` must continue to include this folder.
 - Preserve additive unsafe-loading request/group fields in lockfiles while accepting older format-v1 manifests that omit
   them.
+- Keep the additive `package-install` request mode synchronized for store-only grouped installation manifests.
 
 ## Work Guidance
 

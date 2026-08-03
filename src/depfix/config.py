@@ -27,6 +27,7 @@ class ImportDeclaration:
     enclosing_function: str = ""
     isolation: str = "auto"
     allow_unsafe: bool | None = None
+    prefer_newest: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,9 @@ def load_config(path: Path) -> ProjectConfig:
             allow_unsafe = declaration.get("allow-unsafe", policy.get("allow-unsafe", False))
             if not isinstance(allow_unsafe, bool):
                 raise ValueError(f"allow-unsafe for alias {name!r} must be boolean")
+            prefer_newest = declaration.get("prefer-newest", policy.get("prefer-newest"))
+            if prefer_newest is not None and not isinstance(prefer_newest, bool):
+                raise ValueError(f"prefer-newest for alias {name!r} must be boolean")
             declarations.append(
                 ImportDeclaration(
                     name,
@@ -69,6 +73,7 @@ def load_config(path: Path) -> ProjectConfig:
                     module,
                     isolation=isolation,
                     allow_unsafe=allow_unsafe,
+                    prefer_newest=prefer_newest,
                 )
             )
     except (KeyError, TypeError, ValueError) as exc:

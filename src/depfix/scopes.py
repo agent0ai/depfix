@@ -28,6 +28,7 @@ def default(
     offline: bool | None = None,
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
+    prefer_newest: bool | None = None,
 ) -> None:
     """Persist package selections for subsequent ordinary imports."""
     ensure_dispatcher()
@@ -37,6 +38,7 @@ def default(
         frozen=frozen,
         offline=offline,
         allow_unsafe=allow_unsafe,
+        prefer_newest=prefer_newest,
     )
     selection = prepare_import_selection(
         _validate_specifiers(specifiers, "default"),
@@ -59,6 +61,7 @@ def using(
     offline: bool | None = None,
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
+    prefer_newest: bool | None = None,
 ) -> _Using:
     """Create a context manager/decorator for temporary ordinary imports."""
     ensure_dispatcher()
@@ -72,6 +75,7 @@ def using(
         offline=offline,
         isolation=isolation,
         allow_unsafe=allow_unsafe,
+        prefer_newest=prefer_newest,
         source_file=source_file,
         source_line=source_line,
         base_dir=base_dir,
@@ -89,6 +93,7 @@ class _Using:
         offline: bool | None,
         isolation: str | None,
         allow_unsafe: bool | None,
+        prefer_newest: bool | None,
         source_file: str,
         source_line: int,
         base_dir: Path,
@@ -101,6 +106,7 @@ class _Using:
         self.offline = offline
         self.isolation = isolation
         self.allow_unsafe = allow_unsafe
+        self.prefer_newest = prefer_newest
         self.source_file = source_file
         self.source_line = source_line
         self.base_dir = base_dir
@@ -115,6 +121,7 @@ class _Using:
             frozen=self.frozen,
             offline=self.offline,
             allow_unsafe=self.allow_unsafe,
+            prefer_newest=self.prefer_newest,
         )
         selection = prepare_import_selection(
             self.specifiers,
@@ -191,6 +198,7 @@ class _Using:
             offline=self.offline,
             isolation=self.isolation,
             allow_unsafe=self.allow_unsafe,
+            prefer_newest=self.prefer_newest,
             source_file=self.source_file,
             source_line=self.source_line,
             base_dir=self.base_dir,
