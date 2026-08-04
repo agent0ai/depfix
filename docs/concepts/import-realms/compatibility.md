@@ -13,6 +13,55 @@ In-process realms support pure-Python wheels, modules, namespace packages, resou
 isolated across threads and asynchronous tasks through context-local state. Code that compares synthetic `__name__`
 values to hard-coded logical names should instead use `__depfix_logical_name__`.
 
+## Objects crossing version boundaries
+
+Import isolation does not make library-defined objects interoperable. A class loaded in one realm has a different Python
+identity from the same class loaded in another realm, even when the source and object layout did not change. A consumer
+may reject the object with `isinstance`, silently choose a fallback path, or read fields that its own release added.
+
+Live characterization tests use public APIs from immutable PyPI releases:
+
+| Package pair | Cross-version boundary | Observed result | Risk shape |
+| --- | --- | --- | --- |
+| `packaging` 21.3 / 24.2 | Compare equal `Version("1.0")` values | Equality is false; ordering raises `TypeError` | Silent wrong result or immediate failure |
+| `attrs` 21.4.0 / 24.2.0 | New `evolve()` consumes an old attrs instance | `Attribute.alias`, added after 21.4, is absent; the reverse direction succeeds | Directional representation change; immediate failure |
+| `PyJWT` 2.10.0 / 2.10.1 | New `encode()` consumes an old `PyJWK` | The nominal type check misses and key preparation raises | Patch-version identity failure in an authentication path |
+| `urllib3` 2.0.7 / 2.2.3 | New `Retry.from_int()` consumes an old `Retry` | The old object is stored as `total`; arithmetic fails later | Accepted malformed state; delayed failure |
+
+The package implementations explain these outcomes:
+[`packaging` comparisons require their own private base class](https://github.com/pypa/packaging/blob/24.2/src/packaging/version.py#L69-L110),
+[`attrs.evolve()` reads `Attribute.alias`](https://github.com/python-attrs/attrs/blob/24.2.0/src/attr/_funcs.py#L438-L448),
+PyJWT unwraps a key only after
+[`isinstance(key, PyJWK)`](https://github.com/jpadilla/pyjwt/blob/2.10.1/jwt/api_jws.py#L164-L171), and urllib3's
+[`Retry.from_int()` nominal check](https://github.com/urllib3/urllib3/blob/2.2.3/src/urllib3/util/retry.py#L270-L287)
+otherwise accepts the value as a retry count. The executable evidence is in
+[`tests/test_cross_version_objects.py`](../../../tests/test_cross_version_objects.py).
+
+These four packages were deliberately selected to find failure modes; four failures out of four is not an ecosystem
+failure-rate estimate. Severity is high when an unadapted boundary exists because the result can be silently wrong or
+fail far from the handoff. Conditional likelihood depends on application architecture:
+
+- no library object crosses between versioned graphs: not exposed;
+- graphs exchange only agreed strings, bytes, numbers, standard-library values, or validated dictionaries: low;
+- callbacks, plugin hooks, middleware, caches, or registries carry library-owned objects across graphs: medium to high;
+- a known producer and consumer use different versions of the same library-owned class without an adapter: high.
+
+Depfix provides opt-in diagnostics for the nominal cases it can observe. `realm_of(value)` reports the managed module that
+owns a value's class. `assert_same_realm(consumer, value)` raises `RealmBoundaryError` before a foreign value reaches the
+consumer. `enforce_same_realm()` applies that check to selected function parameters and optionally the return value,
+including for async functions and nested builtin containers. The
+[object-boundary guide](../../guides/object-boundaries.md) shows the adapter workflow.
+
+Detection is intentionally conservative. Depfix does not traverse arbitrary object internals or infer provenance for an
+application-owned class produced by a library decorator. A successful check proves only matching class provenance, not
+semantic compatibility or safe data. Automatic conversion would need package-specific knowledge and could hide the same
+invariant failures these checks are meant to expose.
+
+Keep creation and consumption of library-owned objects in the same realm. When communication is required, define an
+application-owned boundary and reconstruct the object in the receiving realm from a documented primitive form. Process
+separation strengthens runtime isolation but still needs the same serialization contract; arbitrary pickle data is not a
+safe compatibility or trust boundary.
+
 Explicit `inprocess` mode is strict by default. Mixed wheels may execute a pure-Python root, and optional accelerators may
 fall back when the package handles `ImportError`, but loading a required native extension raises
 `NativeIsolationRequired`. A trusted caller may explicitly accept reduced isolation with `allow_unsafe=True`; Depfix then

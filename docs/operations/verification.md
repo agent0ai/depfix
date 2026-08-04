@@ -14,8 +14,9 @@ The test suite covers source normalization, Core Metadata/artifact discovery, ze
 handles, module ambiguity/absence, conflicting transitive realms, namespace provider sets, relative/circular imports,
 resources/metadata facades, strict native rejection, automatic shared native loading, scoped native reuse and public-owner
 conflicts, scanner safety, settings precedence, hash/cache concurrency and resumable truncation, spawn workers,
-deterministic manifests/bundles, offline bundle install, ordinary prepared interpreter startup, generated stubs, and uv
-discovery outside `PATH`.
+deterministic manifests/bundles, offline bundle install, ordinary prepared interpreter startup, generated stubs, uv
+discovery outside `PATH`, deterministic provenance/boundary guards, and opt-in live cross-version object probes for
+published pure-Python packages.
 
 The full release check first rejects tracked credentials, `.env` files, and OS metadata. It then builds wheel and sdist,
 runs metadata checks, rejects forbidden archive contents and credential patterns, installs the exact wheel in a clean

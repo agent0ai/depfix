@@ -4,6 +4,15 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.6.0 - 2026-08-04
+
+- Added opt-in `realm_of()`, `assert_same_realm()`, and `enforce_same_realm()` APIs with immutable `RealmInfo` provenance,
+  nested builtin-container checks, named sync/async function boundaries, optional return enforcement, and structured
+  `RealmBoundaryError` producer, consumer, realm, value-path, and remediation diagnostics.
+- Added live object-interoperability probes for packaging, attrs, PyJWT, and urllib3, documenting silent, immediate,
+  directional, nominal, and delayed cross-version failures alongside application-owned primitive adapter patterns and
+  explicit detection limits.
+
 ## 0.5.0 - 2026-08-03
 
 - Reworked `depfix pip install` from an environment-mutating uv passthrough into grouped Depfix installation: package

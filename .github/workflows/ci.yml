@@ -90,11 +90,11 @@ jobs:
         run: >-
           python -c "from depfix import import_module;
           assert import_module('idna==3.10').__depfix_version__ == '3.10'"
-      - name: Live incompatible OpenAI imports
+      - name: Live package compatibility probes
         if: matrix.uv == 'latest'
         env:
           DEPFIX_RUN_LIVE_TESTS: "1"
-        run: python -m pytest -q -m live tests/test_end_to_end.py
+        run: python -m pytest -q -m live tests/test_end_to_end.py tests/test_cross_version_objects.py
 
   distributions:
     runs-on: ubuntu-latest

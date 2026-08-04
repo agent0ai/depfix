@@ -6,13 +6,15 @@
 
 ## Ownership
 
-- `getting-started.md`, `migration.md`, and `troubleshooting.md` own their named user workflows.
+- `getting-started.md`, `migration.md`, `object-boundaries.md`, and `troubleshooting.md` own their named user workflows.
 
 ## Local Contracts
 
 - Commands are copyable and use supported public interfaces.
 - Guides lead with the smallest successful path, then add operational constraints.
 - Unsafe-package remediation shows both scoped and global opt-ins and states which correctness controls remain mandatory.
+- Object-boundary guidance uses application-owned primitive contracts, states provenance-detection limits, and never
+  presents automatic conversion or pickle as safe interoperability.
 
 ## Work Guidance
 

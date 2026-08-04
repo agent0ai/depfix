@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import inspect
 import json
@@ -150,6 +151,90 @@ def test_stable_module_and_lazy_package_handle_contracts(tmp_path: Path, wheel_f
     assert package.modules["second"].VALUE == "second"
     with pytest.raises(MultipleImportModulesError):
         package.only_module()
+
+
+def test_realm_provenance_and_opt_in_boundary_guards(tmp_path: Path, wheel_factory) -> None:
+    legacy_wheel = wheel_factory(
+        "boundary-demo",
+        "1.0.0",
+        {
+            "boundary_demo.py": (
+                "class Token:\n def __init__(self, value): self.value = value\ndef make(value): return Token(value)\n"
+            )
+        },
+    )
+    current_wheel = wheel_factory(
+        "boundary-demo",
+        "2.0.0",
+        {
+            "boundary_demo.py": (
+                "class Token:\n def __init__(self, value): self.value = value\ndef make(value): return Token(value)\n"
+            )
+        },
+    )
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    legacy = depfix.import_module(file_spec(legacy_wheel), module="boundary_demo")
+    current = depfix.import_module(file_spec(current_wheel), module="boundary_demo")
+    legacy_token = legacy.Token("legacy")
+    current_token = current.Token("current")
+
+    legacy_info = depfix.realm_of(legacy_token)
+    current_info = depfix.realm_of(current)
+    assert legacy_info is not None and current_info is not None
+    assert legacy_info.package == "boundary-demo==1.0.0"
+    assert current_info.package == "boundary-demo==2.0.0"
+    assert legacy_info.realm_id != current_info.realm_id
+    assert depfix.realm_of(legacy.Token) == legacy_info
+    assert depfix.realm_of(legacy.make) == legacy_info
+    assert depfix.realm_of(1) is None
+
+    depfix.assert_same_realm(current, current_token, {"nested": [current_token]}, object())
+    depfix.assert_same_realm(current_info, current_token)
+    with pytest.raises(depfix.RealmBoundaryError) as captured:
+        depfix.assert_same_realm(current, {"nested": [legacy_token]})
+    error = captured.value
+    assert isinstance(error, TypeError)
+    assert error.consumer == "boundary-demo==2.0.0 (boundary_demo)"
+    assert error.producer == "boundary-demo==1.0.0 (boundary_demo)"
+    assert error.consumer_realm == current_info.realm_id
+    assert error.producer_realm == legacy_info.realm_id
+    assert error.value_path == "values[0].values[0][0]"
+    assert "application-owned primitive representation" in str(error)
+
+    @depfix.enforce_same_realm(current, parameters=("token",))
+    def consume(prefix: object, token: object) -> str:
+        return f"{prefix}:{token.value}"  # type: ignore[attr-defined]
+
+    assert consume("ok", current_token) == "ok:current"
+    with pytest.raises(depfix.RealmBoundaryError, match=r"parameter\['token'\]"):
+        consume("blocked", legacy_token)
+
+    @depfix.enforce_same_realm(current, check_return=True)
+    def leak() -> object:
+        return legacy_token
+
+    with pytest.raises(depfix.RealmBoundaryError, match="return"):
+        leak()
+
+    @depfix.enforce_same_realm(current, parameters="token")
+    async def consume_async(token: object) -> str:
+        return token.value  # type: ignore[attr-defined]
+
+    assert inspect.iscoroutinefunction(consume_async)
+    assert asyncio.run(consume_async(current_token)) == "current"
+    with pytest.raises(depfix.RealmBoundaryError):
+        asyncio.run(consume_async(legacy_token))
+
+    depfix.assert_same_realm(current, [legacy_token], recursive=False)
+    with pytest.raises(depfix.RealmBoundaryError):
+        depfix.assert_same_realm(current, [legacy_token])
+    with pytest.raises(depfix.RealmBoundaryError, match="no Depfix realm provenance"):
+        depfix.assert_same_realm(object(), current_token)
+    with pytest.raises(ValueError, match="missing"):
+
+        @depfix.enforce_same_realm(current, parameters=("missing",))
+        def invalid(value: object) -> object:
+            return value
 
 
 def test_auto_uses_process_shared_imports_for_native_graphs_and_rejects_a_second_version(

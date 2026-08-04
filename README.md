@@ -283,6 +283,10 @@ depfix.configure(cache_retention_days=60, cache_auto_cleanup=False)
 - Package preparation is shown on stderr, so you can see what is happening. Set `DEPFIX_LOG_LEVEL=WARNING` for quiet mode.
 - Depfix supports pure-Python and native wheel packages on CPython 3.11–3.13. Automatic mode isolates pure dependency
   graphs and loads native graphs through guarded, conventional Python imports.
+- Isolated versions keep [separate class identities](https://github.com/agent0ai/depfix/blob/main/docs/concepts/import-realms/compatibility.md#objects-crossing-version-boundaries).
+  Keep library-owned objects within their version, or translate them through an agreed primitive or serialized boundary
+  before another version consumes them. Use `realm_of()`, `assert_same_realm()`, or `enforce_same_realm()` to make known
+  crossings fail immediately with producer and consumer versions.
 - A native package can own one compatible public import version per process. Reusing it is idempotent; requesting an
   incompatible second owner raises a clear error instead of silently returning the wrong version.
 - `using()` works as scoped syntax sugar for the first compatible native version. That version remains loaded as the
@@ -294,6 +298,7 @@ depfix.configure(cache_retention_days=60, cache_auto_cleanup=False)
 ## Documentation
 
 - [Getting started](https://github.com/agent0ai/depfix/blob/main/docs/guides/getting-started.md)
+- [Guard objects between versions](https://github.com/agent0ai/depfix/blob/main/docs/guides/object-boundaries.md)
 - [Python API](https://github.com/agent0ai/depfix/blob/main/docs/reference/api.md)
 - [CLI reference](https://github.com/agent0ai/depfix/blob/main/docs/reference/cli.md)
 - [Deployment](https://github.com/agent0ai/depfix/tree/main/docs/concepts/deployment)

@@ -19,6 +19,9 @@
 - `SharedImportConflictError`: an incompatible public import root already belongs to this process. Reuse the loaded
   version, choose a compatible requirement, or start a fresh worker; this also applies after a native `using()` scope
   exits because native modules cannot be safely unloaded.
+- `RealmBoundaryError`: a guarded call received an object owned by another managed package version. Inspect `consumer`,
+  `producer`, and `value_path`; convert through a validated application-owned representation and reconstruct the object
+  with the receiving version.
 - editor cannot resolve `depfix_imports`: run `depfix ide sync` and apply the path from `depfix ide configure`.
 - generated alias mismatch: regenerate IDE data from the exact installed manifest and detach stale `.pth` files.
 - stale cache operation after an unclean process exit: inspect `depfix cache dir`; a lock timeout reports its exact path.

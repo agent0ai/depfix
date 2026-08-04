@@ -22,6 +22,8 @@
   draft.
 - Build and test distributions without OIDC permission, then pass only that exact two-file artifact set to the protected
   `pypi` environment for publication and verify the public-index installation.
+- The latest-uv connected gate runs published-package import and cross-version object-boundary probes; ordinary matrix
+  tests remain network-free.
 
 ## Work Guidance
 

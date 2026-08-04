@@ -5,6 +5,7 @@ Start with the [getting-started guide](guides/getting-started.md), then use this
 | I want to… | Start here |
 | --- | --- |
 | Load two versions in one process | [Import realms](concepts/import-realms/) |
+| Pass objects between package versions | [Object-boundary guide](guides/object-boundaries.md) |
 | Understand how a request becomes an exact graph | [Resolution](concepts/resolution/) |
 | Understand downloaded and extracted package state | [Artifacts and cache](concepts/artifacts-and-cache/) |
 | Prepare reproducible or offline execution | [Deployment](concepts/deployment/) |

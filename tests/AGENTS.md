@@ -7,7 +7,8 @@
 ## Ownership
 
 - `conftest.py` owns deterministic artifact fixtures.
-- Test modules group end-to-end, runtime/resolver, public-product, lock/cache, and standard-import scope behavior.
+- Test modules group end-to-end, runtime/resolver, public-product, lock/cache, standard-import scope, and live cross-version
+  object-boundary behavior.
 
 ## Local Contracts
 
@@ -28,6 +29,10 @@
 - `depfix pip install` tests must prove package arguments and nested requirement/constraint files use grouped Depfix
   resolution, preserve incompatible transitive versions, populate only the shared store, and leave the environment and
   `sys.path` unchanged.
+- Live cross-version object-boundary probes must use immutable published releases, distinguish immediate, silent, and
+  delayed failures, and avoid presenting a deliberately selected package set as an ecosystem frequency estimate.
+- Boundary API tests must cover module/class/instance provenance, unmanaged values, exact producer/consumer diagnostics,
+  selected parameters, builtin-container recursion, return checking, async preservation, and documented detection gaps.
 
 ## Work Guidance
 

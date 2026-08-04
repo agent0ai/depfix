@@ -234,5 +234,42 @@ class ImportDispatcherConflictError(DepfixError, ImportError):
     pass
 
 
+class RealmBoundaryError(DepfixError, TypeError):
+    """A managed object crossed an incompatible package-version boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        consumer: str,
+        producer: str | None = None,
+        consumer_realm: str | None = None,
+        producer_realm: str | None = None,
+        value_path: str | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        super().__init__(message, remediation=remediation)
+        self.consumer = consumer
+        self.producer = producer
+        self.consumer_realm = consumer_realm
+        self.producer_realm = producer_realm
+        self.value_path = value_path
+
+    def __str__(self) -> str:
+        rows = [self.message]
+        for label, value in (
+            ("consumer", self.consumer),
+            ("producer", self.producer),
+            ("consumer realm", self.consumer_realm),
+            ("producer realm", self.producer_realm),
+            ("value path", self.value_path),
+        ):
+            if value is not None:
+                rows.append(f"  {label}: {redact(value)}")
+        if self.remediation:
+            rows.append(f"  remediation: {redact(self.remediation)}")
+        return "\n".join(rows)
+
+
 class AmbiguousMetadataError(ModuleDiscoveryError):
     pass

@@ -6,7 +6,8 @@
 
 ## Ownership
 
-- `README.md` owns runtime architecture; `compatibility.md` owns supported and unsupported import behavior.
+- `README.md` owns runtime architecture; `compatibility.md` owns supported and unsupported import behavior, including
+  cross-version object boundaries.
 
 ## Local Contracts
 
@@ -19,6 +20,10 @@
   private helpers follow conventional best-effort import behavior.
 - Native isolation and compatibility claims must remain conservative, evidence-based, and explicit about process-global
   state.
+- Object-interoperability claims must distinguish conditional boundary likelihood from deliberately selected failure
+  examples and direct users toward application-owned primitive contracts.
+- Document provenance assertions and decorators as opt-in nominal diagnostics with explicit generated-class,
+  object-graph, conversion, and semantic-validation limits.
 - Unsafe-loading overrides may relax only known-unsafe classification and strict in-process extension guards; document
   integrity, network, process-backend, and incompatible-owner boundaries as non-overridable.
 - Store-only package installation prepares verified targets but does not activate an import realm or mutate an ambient

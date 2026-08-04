@@ -30,6 +30,7 @@ from .errors import (
     NativeIsolationRequired,
     NoImportModulesError,
     OfflineArtifactMissingError,
+    RealmBoundaryError,
     ResolutionError,
     ScopeModuleNotProvidedError,
     SharedImportConflictError,
@@ -44,6 +45,7 @@ from .errors import (
 )
 
 if TYPE_CHECKING:
+    from .boundaries import RealmInfo, assert_same_realm, enforce_same_realm, realm_of
     from .cache import CacheCleanupResult, CachedPackage
     from .handles import PackageHandle
     from .scopes import default, using
@@ -299,6 +301,17 @@ def multiprocessing_initializer(
 
 def __getattr__(name: str) -> Any:
     """Load public API objects only when code asks for them."""
+    if name in {"RealmInfo", "realm_of", "assert_same_realm", "enforce_same_realm"}:
+        from .boundaries import RealmInfo, assert_same_realm, enforce_same_realm, realm_of
+
+        boundary_api = {
+            "RealmInfo": RealmInfo,
+            "realm_of": realm_of,
+            "assert_same_realm": assert_same_realm,
+            "enforce_same_realm": enforce_same_realm,
+        }[name]
+        globals()[name] = boundary_api
+        return boundary_api
     if name in {"default", "using"}:
         from .scopes import default, using
 
@@ -345,6 +358,8 @@ __all__ = [
     "NoImportModulesError",
     "OfflineArtifactMissingError",
     "PackageHandle",
+    "RealmBoundaryError",
+    "RealmInfo",
     "ResolutionError",
     "ScopeModuleNotProvidedError",
     "SharedImportConflictError",
@@ -357,9 +372,11 @@ __all__ = [
     "UvBootstrapError",
     "UvNotFoundError",
     "UnsafePackageError",
+    "assert_same_realm",
     "cleanup_cache",
     "configure",
     "default",
+    "enforce_same_realm",
     "import_module",
     "import_module_async",
     "load_package",
@@ -367,6 +384,7 @@ __all__ = [
     "list_cached_packages",
     "multiprocessing_initializer",
     "remove_cached_package",
+    "realm_of",
     "using",
     "__version__",
 ]

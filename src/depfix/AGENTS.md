@@ -29,6 +29,9 @@
   repair owner write permissions before deleting read-only files or materialization trees.
 - Decode local `file:` URLs with platform-native rules, including Windows drive-letter and UNC path forms.
 - Realm imports preserve module identity and prevent undeclared cross-realm leakage.
+- `boundaries.py` owns opt-in provenance inspection, exact graph/node assertions, and sync/async boundary decorators.
+  Guards inspect direct managed types and nested builtin containers, report typed producer/consumer diagnostics, accept
+  unmanaged values, and never claim automatic conversion or arbitrary object-graph coverage.
 - Package compatibility fallbacks may use modules embedded in the same selected artifact; declared dependency providers
   always take precedence.
 - Cold package preparation reports secret-safe progress on stderr by default; warning and higher log levels remain quiet.

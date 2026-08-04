@@ -67,6 +67,9 @@ def _versioned_wheels(tmp_path: Path, wheel_factory):
 def test_importing_depfix_alone_does_not_install_dispatcher() -> None:
     assert not dispatcher_installed()
     assert "default" in depfix.__all__ and "using" in depfix.__all__
+    assert {"RealmBoundaryError", "RealmInfo", "assert_same_realm", "enforce_same_realm", "realm_of"} <= set(
+        depfix.__all__
+    )
     assert "activate" not in depfix.__all__
 
 

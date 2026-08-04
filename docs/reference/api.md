@@ -83,6 +83,48 @@ The return value is always `PackageHandle`. `module_names`, `metadata`, and `dep
 The async wrappers run blocking preparation in a worker thread and share the synchronous canonical module identity:
 `import_module_async` and `load_package_async`.
 
+## Object-boundary diagnostics
+
+```python
+depfix.realm_of(value: object) -> RealmInfo | None
+```
+
+`realm_of()` reports the managed module that owns a module, class, function, or instance type. `RealmInfo` contains
+`graph_id`, `node_id`, normalized `distribution`, `version`, logical `module`, and `artifact_id`. Its `package` property is
+the `distribution==version` display form; `realm_id` is the exact `graph_id:node_id` identity. Unmanaged values return
+`None`.
+
+```python
+depfix.assert_same_realm(
+    consumer: object | RealmInfo,
+    *values: object,
+    recursive: bool = True,
+) -> None
+```
+
+`assert_same_realm()` requires the consumer to have managed provenance and accepts unmanaged values. Every managed value
+must have the same graph and node identity as the consumer. Recursive checks inspect nested builtin `dict`, `list`,
+`tuple`, `set`, and `frozenset` values without traversing arbitrary application objects. A mismatch raises
+`RealmBoundaryError` with `consumer`, `producer`, `consumer_realm`, `producer_realm`, and `value_path` attributes.
+
+```python
+@depfix.enforce_same_realm(
+    consumer,
+    *,
+    parameters: Iterable[str] | None = None,
+    recursive: bool = True,
+    check_return: bool = False,
+)
+```
+
+`enforce_same_realm()` applies the same check to all supplied arguments or only the named `parameters`; one parameter may
+also be passed as a string. It preserves sync and async callables. `check_return=True` also checks the direct return value
+after a successful call. Unknown parameter names fail when the decorator is applied.
+
+These APIs are opt-in diagnostics, not translators. Provenance cannot be inferred when a managed library decorates or
+generates a class that remains owned by an application module. See the
+[object-boundary guide](../guides/object-boundaries.md) for adapters and limitations.
+
 ## Version selection policy
 
 Every loading API accepts `prefer_newest=`. Omitting it inherits configuration; the effective default is `False`.
@@ -226,7 +268,7 @@ selected root package versions, store path, and whether the exact install graph 
 ## Exceptions
 
 All expected failures derive from `DepfixError`. Public branches cover specifiers/sources, resolution, artifacts and hash
-mismatches, module discovery/provision, default conflicts, invalid scopes, dispatcher replacement, manifests, uv, bundles,
-offline misses, unsafe package policy, native isolation, and shared-owner conflicts. Exception attributes
-carry structured request, source, module, manifest, artifact, policy, candidate, and remediation context. String rendering
-redacts URL credentials, token-like query values, and credential-bearing CLI flags.
+mismatches, module discovery/provision, default conflicts, invalid scopes, dispatcher replacement, realm boundaries,
+manifests, uv, bundles, offline misses, unsafe package policy, native isolation, and shared-owner conflicts. Exception
+attributes carry structured request, source, module, manifest, artifact, policy, candidate, producer/consumer, and
+remediation context. String rendering redacts URL credentials, token-like query values, and credential-bearing CLI flags.
