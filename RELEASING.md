@@ -40,6 +40,19 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.6.0 — 2026-08-04
+
+- PyPI: `https://pypi.org/project/depfix/0.6.0/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.6.0`
+- Wheel SHA-256: `5df0c1a057786a397912952c98f2923c9f8bd0ff1d4419767584a75a1369837f`
+- Sdist SHA-256: `fd9e48012f326805fd1edd1dd7697d6c3735f61fd0bb9eb341fce8c51f1e0b9c`
+- Published from commit `75b82292656fbea1a74373b0f35a1d96d1d93420` after branch, annotated-tag, and production
+  gates passed the complete quality, distribution, Linux, macOS, Windows, x64, arm64, Python 3.11–3.13, uv, live
+  cross-version object-boundary, prepared/offline, and air-gap checks.
+- Published through the protected `pypi` environment with OIDC Trusted Publishing. The workflow and an independent clean
+  public-index install verified version `0.6.0`, the new boundary APIs, the exact two-file artifact set, matching public
+  hashes, and the public GitHub Release.
+
 ### 0.5.0 — 2026-08-03
 
 - PyPI: `https://pypi.org/project/depfix/0.5.0/`
