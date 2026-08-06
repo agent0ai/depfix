@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -250,7 +251,7 @@ def test_inventory_exposes_command_provenance_and_dependency_trees(
     cache_dir = tmp_path / "cache"
     requirements = tmp_path / "requirements.txt"
     requirements.write_text(file_spec(root) + "\n", encoding="utf-8")
-    command = f"depfix pip install -r {requirements.resolve()}"
+    command = shlex.join(("depfix", "pip", "install", "-r", str(requirements.resolve())))
 
     assert (
         cli_main(
