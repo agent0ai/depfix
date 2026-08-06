@@ -22,8 +22,8 @@
 - Unsafe-loading tests must cover per-request/global precedence, deny-by-default remediation, manifest persistence, and a
   real compiled-extension path when the interpreter provides a suitable test extension.
 - Cache lifecycle tests must cover installation/use timestamps, total reclaimed targets, returning-graph reservations,
-  active-runtime leases, read-only file/tree removal, retention configuration precedence, and equivalent Python/CLI list
-  and removal behavior.
+  active-runtime leases, read-only file/tree removal, retention configuration precedence, code/command provenance,
+  same-version artifact variants, dependency trees, and equivalent Python/CLI inspection and removal behavior.
 - Resolution tests must cover compatible cache reuse across separate and grouped roots, newest-first overrides, cached
   top-level requests, public loading signatures, scanner preservation, and configuration precedence.
 - `depfix pip install` tests must prove package arguments and nested requirement/constraint files use grouped Depfix

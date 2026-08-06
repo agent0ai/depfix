@@ -7,6 +7,7 @@ preparation begins only when a load API is called.
 from __future__ import annotations
 
 import os
+import sys
 import warnings
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
@@ -46,7 +47,15 @@ from .errors import (
 
 if TYPE_CHECKING:
     from .boundaries import RealmInfo, assert_same_realm, enforce_same_realm, realm_of
-    from .cache import CacheCleanupResult, CachedPackage
+    from .cache import (
+        CacheCleanupResult,
+        CachedDuplicate,
+        CachedInstallation,
+        CachedPackage,
+        CachedPackageNode,
+        CacheInventory,
+        PackageInstallReason,
+    )
     from .handles import PackageHandle
     from .scopes import default, using
     from .settings import Settings
@@ -99,6 +108,36 @@ def import_module(
     prefer_newest: bool | None = None,
 ) -> ModuleType:
     """Return exactly one canonical module or raise a typed discovery error."""
+    source_file, source_line = _caller_location()
+    return _import_module_from(
+        specifier,
+        module=module,
+        refresh=refresh,
+        manifest=manifest,
+        frozen=frozen,
+        offline=offline,
+        isolation=isolation,
+        allow_unsafe=allow_unsafe,
+        prefer_newest=prefer_newest,
+        source_file=source_file,
+        source_line=source_line,
+    )
+
+
+def _import_module_from(
+    specifier: str,
+    *,
+    module: str | None,
+    refresh: bool,
+    manifest: str | os.PathLike[str] | None,
+    frozen: bool | None,
+    offline: bool | None,
+    isolation: str | None,
+    allow_unsafe: bool | None,
+    prefer_newest: bool | None,
+    source_file: str,
+    source_line: int,
+) -> ModuleType:
     from .manager import prepare_request
     from .settings import resolve_settings
 
@@ -116,6 +155,8 @@ def import_module(
         refresh=refresh,
         isolation=isolation,
         settings=settings,
+        source_file=source_file,
+        source_line=source_line,
     )
     if not request.module:
         raise NoImportModulesError("The resolved request has no selected import module", request=specifier)
@@ -134,6 +175,34 @@ def load_package(
     prefer_newest: bool | None = None,
 ) -> PackageHandle:
     """Return one package handle without eagerly importing its root modules."""
+    source_file, source_line = _caller_location()
+    return _load_package_from(
+        specifier,
+        refresh=refresh,
+        manifest=manifest,
+        frozen=frozen,
+        offline=offline,
+        isolation=isolation,
+        allow_unsafe=allow_unsafe,
+        prefer_newest=prefer_newest,
+        source_file=source_file,
+        source_line=source_line,
+    )
+
+
+def _load_package_from(
+    specifier: str,
+    *,
+    refresh: bool,
+    manifest: str | os.PathLike[str] | None,
+    frozen: bool | None,
+    offline: bool | None,
+    isolation: str | None,
+    allow_unsafe: bool | None,
+    prefer_newest: bool | None,
+    source_file: str,
+    source_line: int,
+) -> PackageHandle:
     from .handles import PackageHandle
     from .manager import prepare_request
     from .settings import resolve_settings
@@ -152,6 +221,8 @@ def load_package(
         refresh=refresh,
         isolation=isolation,
         settings=settings,
+        source_file=source_file,
+        source_line=source_line,
     )
     return PackageHandle(runtime, request)
 
@@ -171,8 +242,9 @@ async def import_module_async(
     """Async-friendly wrapper sharing canonical identity with `import_module`."""
     import asyncio
 
+    source_file, source_line = _caller_location()
     return await asyncio.to_thread(
-        import_module,
+        _import_module_from,
         specifier,
         module=module,
         refresh=refresh,
@@ -182,6 +254,8 @@ async def import_module_async(
         isolation=isolation,
         allow_unsafe=allow_unsafe,
         prefer_newest=prefer_newest,
+        source_file=source_file,
+        source_line=source_line,
     )
 
 
@@ -198,8 +272,9 @@ async def load_package_async(
 ) -> PackageHandle:
     import asyncio
 
+    source_file, source_line = _caller_location()
     return await asyncio.to_thread(
-        load_package,
+        _load_package_from,
         specifier,
         refresh=refresh,
         manifest=manifest,
@@ -208,7 +283,17 @@ async def load_package_async(
         isolation=isolation,
         allow_unsafe=allow_unsafe,
         prefer_newest=prefer_newest,
+        source_file=source_file,
+        source_line=source_line,
     )
+
+
+def _caller_location() -> tuple[str, int]:
+    try:
+        frame = sys._getframe(2)
+    except (AttributeError, ValueError):
+        return "", 0
+    return frame.f_code.co_filename, frame.f_lineno
 
 
 def list_cached_packages(*, cache_dir: str | os.PathLike[str] | None = None) -> tuple[CachedPackage, ...]:
@@ -218,6 +303,15 @@ def list_cached_packages(*, cache_dir: str | os.PathLike[str] | None = None) -> 
 
     settings = resolve_settings(cache_dir=cache_dir, discover=True)
     return Cache(settings.cache_dir).list_packages()
+
+
+def inspect_cache(*, cache_dir: str | os.PathLike[str] | None = None) -> CacheInventory:
+    """Inspect flat, duplicate, and installation-tree views of the shared store."""
+    from .cache import Cache
+    from .settings import resolve_settings
+
+    settings = resolve_settings(cache_dir=cache_dir, discover=True)
+    return Cache(settings.cache_dir).inventory()
 
 
 def cleanup_cache(
@@ -323,10 +417,34 @@ def __getattr__(name: str) -> Any:
 
         globals()[name] = PackageHandle
         return PackageHandle
-    if name in {"CachedPackage", "CacheCleanupResult"}:
-        from .cache import CacheCleanupResult, CachedPackage
+    if name in {
+        "CacheCleanupResult",
+        "CachedDuplicate",
+        "CachedInstallation",
+        "CachedPackage",
+        "CachedPackageNode",
+        "CacheInventory",
+        "PackageInstallReason",
+    }:
+        from .cache import (
+            CacheCleanupResult,
+            CachedDuplicate,
+            CachedInstallation,
+            CachedPackage,
+            CachedPackageNode,
+            CacheInventory,
+            PackageInstallReason,
+        )
 
-        cache_type = CachedPackage if name == "CachedPackage" else CacheCleanupResult
+        cache_type = {
+            "CacheCleanupResult": CacheCleanupResult,
+            "CachedDuplicate": CachedDuplicate,
+            "CachedInstallation": CachedInstallation,
+            "CachedPackage": CachedPackage,
+            "CachedPackageNode": CachedPackageNode,
+            "CacheInventory": CacheInventory,
+            "PackageInstallReason": PackageInstallReason,
+        }[name]
         globals()[name] = cache_type
         return cache_type
     if name == "Settings":
@@ -341,7 +459,11 @@ __all__ = [
     "ArtifactError",
     "BundleError",
     "CacheCleanupResult",
+    "CacheInventory",
+    "CachedDuplicate",
+    "CachedInstallation",
     "CachedPackage",
+    "CachedPackageNode",
     "DefaultImportConflictError",
     "DepfixError",
     "FrozenManifestError",
@@ -358,6 +480,7 @@ __all__ = [
     "NoImportModulesError",
     "OfflineArtifactMissingError",
     "PackageHandle",
+    "PackageInstallReason",
     "RealmBoundaryError",
     "RealmInfo",
     "ResolutionError",
@@ -379,6 +502,7 @@ __all__ = [
     "enforce_same_realm",
     "import_module",
     "import_module_async",
+    "inspect_cache",
     "load_package",
     "load_package_async",
     "list_cached_packages",

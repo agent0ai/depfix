@@ -19,6 +19,8 @@
   project export, environment/project configuration, and CLI help.
 - Define `depfix pip install` as grouped shared-store preparation, not a pip/uv environment passthrough, and keep its
   supported requirement-file grammar aligned with `project.install_packages()`.
+- Keep cache inspection signatures, CLI views, provenance fields, duplicate semantics, sizes, and UTC timestamps aligned
+  across the flat package list, duplicate-footprint groups, and installation dependency trees.
 - Keep `RealmInfo`, provenance inspection, exact-realm assertions, boundary decorators, and `RealmBoundaryError`
   signatures aligned with the lazy public exports and documented detection limits.
 

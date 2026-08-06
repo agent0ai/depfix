@@ -21,11 +21,19 @@ The default root comes from `platformdirs.user_cache_path("depfix")`, with forma
 areas include `artifacts/sha256`, `targets`, `resolutions`, `manifests`, `metadata`, `ide`, `locks`, `tools/uv`, and
 `built-wheels`. `DEPFIX_CACHE_DIR` or `depfix.configure(cache_dir=...)` changes the parent location.
 
-Mutable lifecycle records are separate from immutable content. Depfix records an artifact's first installation time once,
-then updates a coalesced usage marker after successful package imports. `depfix cache list` combines those records with the
-blob, materialized targets, retained build output, and source-archive footprint. Legacy installed targets without
-lifecycle metadata remain visible as `unknown` artifacts and use their filesystem modification time as the conservative
-installation time.
+Mutable lifecycle and provenance records are separate from immutable content. Depfix records an artifact's first
+installation time once, then updates a coalesced usage marker after successful package imports. After a graph is
+successfully synchronized, it also records the retained roots, dependency edges, exact artifact hashes, and a
+secret-redacted reason: a canonical Depfix command or the calling script path and line. Equivalent graph/origin records
+share one identity, so repeated runs do not grow provenance indefinitely.
+
+`depfix cache list` combines those records with the blob, materialized targets, retained build output, and source-archive
+footprint. Its duplicate view groups physical artifacts by normalized distribution; exact SHA-256 content cannot be
+duplicated, while different versions and distinct artifacts for the same version can coexist. Its tree view reconstructs
+currently retained installation roots and dependency edges without requiring the original project or requirements file
+to remain present. `depfix.inspect_cache()` exposes the same flat, duplicate, and tree structures to Python. Legacy
+installed targets without lifecycle/provenance metadata remain visible as `unknown` artifacts, use their filesystem
+modification time as the conservative installation time, and simply have no recorded reason/tree.
 
 Automatic retention defaults to 30 unused days. A missing maintenance clock is initialized without scanning, and later
 daily checks run in a daemon thread so ordinary imports only pay a constant-time timestamp check. The current graph is

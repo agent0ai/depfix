@@ -23,7 +23,7 @@ from packaging.utils import canonicalize_name
 
 from . import __version__, configure, load_package
 from .aliases import generate_aliases
-from .cache import Cache
+from .cache import Cache, CachedInstallation, CachedPackage, CachedPackageNode, PackageInstallReason
 from .errors import DepfixError
 from .manifest import load_manifest
 from .project import create_bundle, export_project, install_manifest, install_packages, verify_manifest
@@ -153,8 +153,20 @@ def _parser() -> argparse.ArgumentParser:
 
     cache = commands.add_parser("cache", help="inspect or maintain the global cache")
     cache_commands = cache.add_subparsers(dest="cache_command", required=True)
-    for name in ("dir", "list", "prune", "clean", "verify"):
+    for name in ("dir", "prune", "clean", "verify"):
         cache_commands.add_parser(name)
+    cache_list = cache_commands.add_parser("list", help="inspect installed packages and their origins")
+    cache_list.add_argument(
+        "--view",
+        choices=("packages", "duplicates", "tree"),
+        default="packages",
+        help="flat package list, duplicate footprint, or installation dependency trees",
+    )
+    cache_list.add_argument(
+        "--sort",
+        choices=("name", "size", "installed", "used"),
+        help="sort the package view; defaults to name (duplicate groups default to additional size)",
+    )
     cleanup = cache_commands.add_parser("cleanup", help="remove packages unused beyond a retention window")
     cleanup.add_argument("--days", type=int, help="unused days; defaults to configured cache retention")
     cleanup.add_argument("--dry-run", action="store_true")
@@ -166,6 +178,7 @@ def _parser() -> argparse.ArgumentParser:
     for command in commands.choices.values():
         _common_output_options(command)
     _common_output_options(pip_install)
+    _common_output_options(cache_list)
     return parser
 
 
@@ -254,6 +267,7 @@ def _dispatch(args: argparse.Namespace) -> object | None:
             target=args.target,
             compile_bytecode=args.compile_bytecode,
             cache_dir=args.cache_dir,
+            reason=shlex.join(("depfix", "install", str(args.source.expanduser().resolve()))),
         )
     if args.command == "bundle":
         return create_bundle(
@@ -261,7 +275,11 @@ def _dispatch(args: argparse.Namespace) -> object | None:
         )
     if args.command == "prepare":
         exported = export_project(args.project, output=args.output, prefer_newest=args.prefer_newest)
-        installed = install_manifest(exported.manifest, frozen=True)
+        installed = install_manifest(
+            exported.manifest,
+            frozen=True,
+            reason=shlex.join(("depfix", "prepare", str(args.project.expanduser().resolve()))),
+        )
         verified = verify_manifest(exported.manifest)
         return {"export": exported, "install": installed, "verify": verified, "ide_path": str(exported.ide_path)}
     if args.command == "scan":
@@ -479,6 +497,13 @@ class _RequirementCollection:
         self.extra_index_urls.extend(other.extra_index_urls)
 
 
+@dataclass(frozen=True, slots=True)
+class _CacheListing:
+    view: str
+    value: object
+    total_size_bytes: int
+
+
 def _pip_install(args: argparse.Namespace) -> object:
     collected = _RequirementCollection(requirements=list(args.requirements))
     collected.requirements.extend(_editable_specifier(value, Path.cwd()) for value in args.editable)
@@ -500,7 +525,21 @@ def _pip_install(args: argparse.Namespace) -> object:
         prefer_newest=True if args.upgrade else args.prefer_newest,
         cache_dir=args.cache_dir,
         base_dir=Path.cwd(),
+        reason=_pip_install_reason(args),
     )
+
+
+def _pip_install_reason(args: argparse.Namespace) -> str:
+    command = ["depfix", "pip", "install", *args.requirements]
+    for path in args.requirement:
+        command.extend(("-r", str(path.expanduser().resolve())))
+    for path in args.constraint:
+        command.extend(("-c", str(path.expanduser().resolve())))
+    for editable in args.editable:
+        command.extend(("-e", editable))
+    if args.upgrade:
+        command.append("--upgrade")
+    return shlex.join(command)
 
 
 def _read_requirement_input(
@@ -773,7 +812,27 @@ def _cache(args: argparse.Namespace) -> object:
     if command == "dir":
         return {"path": str(cache.root)}
     if command == "list":
-        return list(cache.list_packages())
+        inventory = cache.inventory()
+        if args.view == "duplicates":
+            value: object = inventory.duplicates
+        elif args.view == "tree":
+            value = inventory.installations
+        else:
+            packages = inventory.packages
+            if args.sort == "size":
+                packages = tuple(sorted(packages, key=lambda item: (-item.size_bytes, item.distribution, item.version)))
+            elif args.sort == "installed":
+                packages = tuple(sorted(packages, key=lambda item: item.installed_at, reverse=True))
+            elif args.sort == "used":
+                packages = tuple(
+                    sorted(
+                        packages,
+                        key=lambda item: item.last_used_at or item.installed_at,
+                        reverse=True,
+                    )
+                )
+            value = packages
+        return _CacheListing(args.view, value, inventory.total_size_bytes)
     if command == "verify":
         for path in cache.list_blobs():
             cache.verify_blob(path.name)
@@ -824,6 +883,12 @@ def _package_dict(package: Any) -> dict[str, object]:
 
 
 def _print_result(value: object, *, as_json: bool) -> None:
+    if isinstance(value, _CacheListing):
+        if as_json:
+            print(json.dumps(_serialize(value.value), sort_keys=True))
+        else:
+            print(_render_cache_listing(value))
+        return
     serialized = _serialize(value)
     if as_json:
         print(json.dumps(serialized, sort_keys=True))
@@ -831,6 +896,109 @@ def _print_result(value: object, *, as_json: bool) -> None:
         print(json.dumps(serialized, indent=2, sort_keys=True))
     else:
         print(serialized)
+
+
+def _render_cache_listing(listing: _CacheListing) -> str:
+    if listing.view == "duplicates":
+        groups = listing.value
+        assert isinstance(groups, tuple)
+        if not groups:
+            return "No distributions have multiple cached artifacts."
+        lines = [f"Duplicate package footprint: {_format_size(listing.total_size_bytes)} total"]
+        for group in groups:
+            variants = (
+                f"; same-version variants: {', '.join(group.same_version_variants)}"
+                if group.same_version_variants
+                else ""
+            )
+            lines.append(
+                f"\n{group.distribution} — {group.occurrences} artifacts, "
+                f"{_format_size(group.total_size_bytes)} total, "
+                f"{_format_size(group.additional_size_bytes)} additional{variants}"
+            )
+            for package in group.packages:
+                lines.append(
+                    f"  {package.version:<14} {_format_size(package.size_bytes):>9}  "
+                    f"{package.artifact_hash[:12]}  installed {_format_date(package.installed_at)}"
+                )
+        return "\n".join(lines)
+    if listing.view == "tree":
+        installations = listing.value
+        assert isinstance(installations, tuple)
+        if not installations:
+            return "No installation provenance is recorded for the current store."
+        lines = [f"Installation trees: {_format_size(listing.total_size_bytes)} currently retained"]
+        for installation in installations:
+            assert isinstance(installation, CachedInstallation)
+            lines.append(
+                f"\n{_format_date(installation.reason.recorded_at)}  {_format_size(installation.total_size_bytes)}  "
+                f"{_reason_text(installation.reason)}"
+            )
+            for index, root in enumerate(installation.roots):
+                _render_package_node(root, "", index == len(installation.roots) - 1, lines)
+        return "\n".join(lines)
+    packages = listing.value
+    assert isinstance(packages, tuple)
+    if not packages:
+        return "No packages are installed in the Depfix store."
+    rows = [("PACKAGE", "VERSION", "SIZE", "INSTALLED", "LAST USED", "ARTIFACT", "REASON")]
+    for package in packages:
+        assert isinstance(package, CachedPackage)
+        reason = _reason_text(package.reasons[0]) if package.reasons else "unknown"
+        rows.append(
+            (
+                package.distribution,
+                package.version,
+                _format_size(package.size_bytes),
+                _format_date(package.installed_at),
+                _format_date(package.last_used_at),
+                package.artifact_hash[:12],
+                reason,
+            )
+        )
+    widths = [max(len(row[index]) for row in rows) for index in range(len(rows[0]) - 1)]
+    rendered = [f"Installed packages: {len(packages)} artifacts, {_format_size(listing.total_size_bytes)}"]
+    for row_index, row in enumerate(rows):
+        prefix = "  ".join(value.ljust(widths[index]) for index, value in enumerate(row[:-1]))
+        rendered.append(f"{prefix}  {row[-1]}")
+        if row_index == 0:
+            rendered.append("  ".join("-" * width for width in widths) + "  " + "-" * len(row[-1]))
+    return "\n".join(rendered)
+
+
+def _render_package_node(node: CachedPackageNode, prefix: str, last: bool, lines: list[str]) -> None:
+    branch = "└── " if last else "├── "
+    package = node.package
+    repeated = " (already shown)" if node.repeated else ""
+    lines.append(
+        f"{prefix}{branch}{package.distribution}=={package.version}  {_format_size(package.size_bytes)}  "
+        f"installed {_format_date(package.installed_at)}  used {_format_date(package.last_used_at)}{repeated}"
+    )
+    child_prefix = prefix + ("    " if last else "│   ")
+    for index, child in enumerate(node.dependencies):
+        _render_package_node(child, child_prefix, index == len(node.dependencies) - 1, lines)
+
+
+def _reason_text(reason: PackageInstallReason) -> str:
+    if reason.command:
+        return reason.command
+    if reason.source_file:
+        location = f"{reason.source_file}:{reason.source_line}" if reason.source_line else reason.source_file
+        return f"{reason.description} at {location}"
+    return reason.description
+
+
+def _format_date(value: datetime | None) -> str:
+    return value.strftime("%Y-%m-%d %H:%MZ") if value is not None else "never"
+
+
+def _format_size(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{value} B"
 
 
 def _serialize(value: object) -> object:

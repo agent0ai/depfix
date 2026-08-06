@@ -15,6 +15,9 @@
 - Staging roots remain owner-writable only through promotion for Darwin compatibility; completed roots are hardened.
 - Lifecycle metadata is mutable and separate from package content: preserve the first installation time, mark successful
   imports, include retained artifact/build/target size, and keep cleanup from removing reserved or live-leased packages.
+- Installation provenance is secret-redacted and graph-aware: deduplicate equivalent origins, retain command or source
+  path/line reasons, distinguish content identity from same-version artifact variants, and support flat, duplicate, and
+  top-down dependency-tree inspection without the originating project files.
 - Automatic retention defaults to 30 unused days, runs at most daily outside the foreground import path, and shares its
   selection/removal rules with the Python and CLI cache APIs.
 

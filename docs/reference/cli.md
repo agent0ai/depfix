@@ -31,8 +31,13 @@ Inspection and operation:
   files, `--index-url`, repeated `--extra-index-url`, hashes, local `-e` paths, `--offline`, and `--refresh` are supported.
   `-U/--upgrade` is equivalent to `--prefer-newest`. Unsupported pip environment options fail explicitly rather than
   being forwarded. `depfix pip --version` reports the uv backend version.
-- `cache dir` prints the shared cache path. `cache list` reports each installed distribution/version with its artifact
-  hash, UTC installation and last-use timestamps, and total bytes.
+- `cache dir` prints the shared cache path. `cache list [--view packages]` reports each installed distribution/version
+  with size, artifact hash, UTC installation/last-use timestamps, and installation reason. Add `--sort
+  name|size|installed|used` to order this flat view.
+- `cache list --view duplicates` groups distributions with multiple physical artifacts, including different versions and
+  distinct same-version artifact hashes, and ranks their additional footprint. `cache list --view tree` groups retained
+  roots by installation reason and renders their dependencies with indentation. Every view supports `--json` with the
+  equivalent structured data.
 - `cache cleanup [--days N] [--dry-run]` removes inactive artifacts older than the configured 30-day default.
 - `cache remove PACKAGE [--version VERSION] [--artifact SHA256] [--dry-run]` removes an exact package selection while
   preserving artifacts being prepared or leased by active runtimes.

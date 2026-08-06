@@ -211,6 +211,7 @@ Supported variables are `DEPFIX_MANIFEST`, `DEPFIX_FROZEN`, `DEPFIX_OFFLINE`, `D
 
 ```python
 depfix.list_cached_packages(*, cache_dir=None) -> tuple[CachedPackage, ...]
+depfix.inspect_cache(*, cache_dir=None) -> CacheInventory
 depfix.cleanup_cache(*, days=None, cache_dir=None, dry_run=False) -> CacheCleanupResult
 depfix.remove_cached_package(
     distribution,
@@ -223,10 +224,26 @@ depfix.remove_cached_package(
 ```
 
 `CachedPackage` reports normalized `distribution`, `version`, `artifact_hash`, `filename`, UTC `installed_at`, optional
-UTC `last_used_at`, and total `size_bytes`. Size includes the immutable blob, all materialized environment targets, and
-associated retained build/source data. `cleanup_cache()` uses the configured 30-day retention when `days` is omitted;
-zero selects every inactive installed artifact. `remove_cached_package()` matches one normalized distribution and can be
-narrowed by version or SHA-256.
+UTC `last_used_at`, total `size_bytes`, and zero or more `reasons`. Size includes the immutable blob, all materialized
+environment targets, and associated retained build/source data. Each `PackageInstallReason` includes a kind,
+secret-redacted description, UTC `recorded_at`, and, when available, the originating command or Python source path and
+line plus the exact manifest path.
+
+`inspect_cache()` returns one immutable `CacheInventory` with:
+
+- `packages`: the same flat artifact entries as `list_cached_packages()`;
+- `duplicates`: `CachedDuplicate` groups for distributions with more than one physical artifact, ranked by additional
+  footprint. `same_version_variants` identifies distinct artifact hashes carrying the same distribution version;
+- `installations`: `CachedInstallation` origins with top-down `CachedPackageNode` dependency trees;
+- `total_size_bytes`: the current physical package footprint.
+
+The cache is content-addressed, so the same SHA-256 appears physically once even when several graphs use it. A duplicate
+group can therefore mean different versions or distinct builds/artifacts of the same version. `additional_size_bytes` is
+the group's footprint beyond its largest member; it is an inspection metric, not a claim that the bytes are safe to
+remove.
+
+`cleanup_cache()` uses the configured 30-day retention when `days` is omitted; zero selects every inactive installed
+artifact. `remove_cached_package()` matches one normalized distribution and can be narrowed by version or SHA-256.
 
 `CacheCleanupResult.removed` contains the selected entries (the would-remove entries for `dry_run=True`),
 `skipped_active` contains matching artifacts protected by preparation reservations or live runtimes, and
@@ -255,6 +272,7 @@ install_packages(
     prefer_newest=None,
     cache_dir=None,
     base_dir=None,
+    reason=None,
 ) -> PackageInstallResult
 ```
 
@@ -263,7 +281,9 @@ dependency graph, compatible cached dependencies may be reused across roots, and
 select multiple versions. It writes a reusable exact manifest beneath the shared store, materializes verified targets,
 and does not activate a runtime or alter `site-packages`/`sys.path`. Constraints apply to matching root and transitive
 distributions in every selected graph. `PackageInstallResult` reports the manifest, identity, request/artifact counts,
-selected root package versions, store path, and whether the exact install graph was already warm.
+selected root package versions, store path, and whether the exact install graph was already warm. Python calls record the
+caller path and line automatically. `reason=` may provide an explicit command-style reason; the CLI uses it to retain the
+canonical `depfix pip install ...` invocation without index credentials.
 
 ## Exceptions
 

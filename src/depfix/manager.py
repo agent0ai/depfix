@@ -51,6 +51,8 @@ def prepare_request(
     refresh: bool,
     isolation: str | None,
     settings: Settings,
+    source_file: str = "",
+    source_line: int = 0,
 ) -> tuple[DepfixRuntime, Alias]:
     selected_isolation = _normalize_isolation(isolation)
     if selected_isolation == "process":
@@ -74,6 +76,7 @@ def prepare_request(
         request_lock = _request_locks.setdefault(identity, RLock())
     cache = Cache(settings.cache_dir)
     progress = ProgressReporter(settings.log_level)
+    record_manifest: Path | None = settings.manifest
     with request_lock, cache.lock("resolution:" + identity):
         with _guard:
             if not refresh and identity in _memory_requests:
@@ -100,6 +103,7 @@ def prepare_request(
             )
         else:
             resolution_path = cache.root / "resolutions" / identity / "imports.lock"
+            record_manifest = resolution_path
             if not refresh and resolution_path.is_file():
                 graph = load_manifest(resolution_path)
                 assert_compatible_environment(graph, resolution_path)
@@ -129,6 +133,8 @@ def prepare_request(
                     specifier=specifier,
                     module=module,
                     api=api,
+                    source_file=source_file,
+                    source_line=source_line,
                     assignment="",
                     base_dir=Path.cwd(),
                     isolation=selected_isolation,
@@ -159,6 +165,15 @@ def prepare_request(
                     allow_unsafe=settings.allow_unsafe,
                     root_nodes=(alias.node,),
                 )
+        cache.record_installation(
+            graph,
+            root_nodes=(alias.node,),
+            kind="python-code",
+            description=f"depfix.{api}({specifier!r})",
+            source_file=source_file,
+            source_line=source_line,
+            manifest=str(record_manifest or ""),
+        )
         _schedule_cache_cleanup(cache, settings, graph)
         with _guard:
             _memory_requests[identity] = (runtime, alias)
@@ -215,6 +230,7 @@ def prepare_import_selection(
         request_lock = _request_locks.setdefault("group:" + identity, RLock())
     cache = Cache(settings.cache_dir)
     progress = ProgressReporter(settings.log_level)
+    record_manifest: Path | None = settings.manifest
     with request_lock, cache.lock("group-resolution:" + identity):
         with _guard:
             prepared = _memory_groups.get(identity)
@@ -242,6 +258,7 @@ def prepare_import_selection(
             )
         else:
             resolution_path = cache.root / "groups" / identity / "imports.lock"
+            record_manifest = resolution_path
             if not refresh and resolution_path.is_file():
                 graph = load_manifest(resolution_path)
                 assert_compatible_environment(graph, resolution_path)
@@ -269,6 +286,8 @@ def prepare_import_selection(
                         specifier=specifier,
                         module=None,
                         api="load_package",
+                        source_file=source_file,
+                        source_line=source_line,
                         base_dir=base_dir,
                         isolation=selected_isolation,
                         allow_unsafe=settings.allow_unsafe,
@@ -300,6 +319,16 @@ def prepare_import_selection(
                     allow_unsafe=settings.allow_unsafe,
                     root_nodes=tuple(alias.node for alias in aliases),
                 )
+        public_api = "default" if mode == "default" else "using"
+        cache.record_installation(
+            graph,
+            root_nodes=tuple(alias.node for alias in aliases),
+            kind="python-code",
+            description=f"depfix.{public_api}({', '.join(repr(item) for item in originals)})",
+            source_file=source_file,
+            source_line=source_line,
+            manifest=str(record_manifest or ""),
+        )
         _schedule_cache_cleanup(cache, settings, graph)
         selection = _selection_from_aliases(
             graph,

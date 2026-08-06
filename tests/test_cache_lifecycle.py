@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import file_spec
+from conftest import build_index, build_wheel, file_spec
 
 import depfix
 from depfix import cache as cache_module
@@ -232,6 +232,110 @@ def test_python_and_cli_cache_inventory_cleanup_and_removal(
     assert exit_code == 0
     assert payload["removed"][0]["artifact_hash"] == artifact.sha256
     assert depfix.list_cached_packages(cache_dir=cache_dir) == ()
+
+
+def test_inventory_exposes_command_provenance_and_dependency_trees(
+    tmp_path: Path,
+    wheel_factory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dependency = wheel_factory("inventory-dependency", "2.0.0", {"inventory_dependency.py": "VALUE = 2\n"})
+    root = wheel_factory(
+        "inventory-root",
+        "1.0.0",
+        {"inventory_root.py": "VALUE = 1\n"},
+        requires=["inventory-dependency==2.0.0"],
+    )
+    index = build_index(tmp_path / "index", [dependency])
+    cache_dir = tmp_path / "cache"
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text(file_spec(root) + "\n", encoding="utf-8")
+    command = f"depfix pip install -r {requirements.resolve()}"
+
+    assert (
+        cli_main(
+            [
+                "pip",
+                "install",
+                "-r",
+                str(requirements),
+                "--index-url",
+                index,
+                "--cache-dir",
+                str(cache_dir),
+                "--quiet",
+            ]
+        )
+        == 0
+    )
+    assert capsys.readouterr().out == ""
+
+    inventory = depfix.inspect_cache(cache_dir=cache_dir)
+    assert {package.distribution for package in inventory.packages} == {
+        "inventory-dependency",
+        "inventory-root",
+    }
+    assert inventory.total_size_bytes == sum(package.size_bytes for package in inventory.packages)
+    assert len(inventory.installations) == 1
+    installation = inventory.installations[0]
+    assert installation.reason.command == command
+    assert installation.roots[0].package.distribution == "inventory-root"
+    assert installation.roots[0].dependencies[0].package.distribution == "inventory-dependency"
+    assert all(package.reasons[0].command == command for package in inventory.packages)
+
+    exit_code = cli_main(["--cache-dir", str(cache_dir), "cache", "list", "--view", "tree"])
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert command in output
+    assert "└── inventory-root==1.0.0" in output
+    assert "inventory-dependency==2.0.0" in output
+
+    exit_code = cli_main(["cache", "list", "--view", "tree", "--cache-dir", str(cache_dir), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload[0]["reason"]["command"] == command
+    assert payload[0]["roots"][0]["dependencies"][0]["package"]["distribution"] == "inventory-dependency"
+
+
+def test_inventory_reports_code_locations_and_same_version_artifact_variants(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = build_wheel(first_dir, "variant-demo", "1.0.0", {"variant_demo.py": "BUILD = 1\n"})
+    second = build_wheel(second_dir, "variant-demo", "1.0.0", {"variant_demo.py": "BUILD = 2\n"})
+    cache_dir = tmp_path / "cache"
+    depfix.configure(cache_dir=cache_dir, log_level="WARNING")
+
+    first_line = sys._getframe().f_lineno + 1
+    depfix.load_package(file_spec(first))
+    depfix.load_package(file_spec(second))
+
+    inventory = depfix.inspect_cache(cache_dir=cache_dir)
+    assert len(inventory.packages) == 2
+    assert len(inventory.duplicates) == 1
+    duplicate = inventory.duplicates[0]
+    assert duplicate.distribution == "variant-demo"
+    assert duplicate.versions == ("1.0.0",)
+    assert duplicate.same_version_variants == ("1.0.0",)
+    assert duplicate.occurrences == 2
+    assert duplicate.additional_size_bytes == duplicate.total_size_bytes - max(
+        package.size_bytes for package in duplicate.packages
+    )
+    first_reason = next(
+        package.reasons[0] for package in inventory.packages if "first" in package.reasons[0].description
+    )
+    assert Path(first_reason.source_file).resolve() == Path(__file__).resolve()
+    assert first_reason.source_line == first_line
+
+    exit_code = cli_main(["--cache-dir", str(cache_dir), "cache", "list", "--view", "duplicates"])
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "same-version variants: 1.0.0" in output
+    assert "variant-demo — 2 artifacts" in output
 
 
 def test_explicit_and_daily_cleanup_use_the_same_retention_contract(

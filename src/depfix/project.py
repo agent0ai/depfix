@@ -176,6 +176,7 @@ def export_project(
     destination = destination.resolve()
     write_manifest(graph, destination)
     sync_graph(graph, cache, offline=False, progress=progress)
+    _record_export_origins(cache, graph, destination)
     ide_path = cache.root / "ide" / graph.graph_id.removeprefix("sha256:")
     generate_aliases(graph, cache, ide_path)
     if destination.parent == project_root / ".depfix":
@@ -195,12 +196,22 @@ def install_manifest(
     target: str | os.PathLike[str] | None = None,
     compile_bytecode: bool = False,
     cache_dir: str | os.PathLike[str] | None = None,
+    reason: str | None = None,
 ) -> InstallResult:
+    source_file, source_line = _caller_location()
     if target is not None and not local:
         raise ValueError("target requires local=True so the selected artifacts are copied there")
     source = Path(manifest).expanduser().resolve()
     if source.suffix == ".depfixbundle":
-        return _install_bundle(source, frozen=frozen, offline=True, local=local, target=target, cache_dir=cache_dir)
+        return _install_bundle(
+            source,
+            frozen=frozen,
+            offline=True,
+            local=local,
+            target=target,
+            cache_dir=cache_dir,
+            reason=reason,
+        )
     graph = load_manifest(source)
     assert_compatible_environment(graph, source)
     settings = resolve_settings(
@@ -237,6 +248,16 @@ def install_manifest(
                 ) from exc
             raise
     sync_graph(graph, cache, offline=True, progress=progress)
+    cache.record_installation(
+        graph,
+        root_nodes=_graph_roots(graph),
+        kind="command" if reason else "python-code",
+        description=reason or "depfix.project.install_manifest(...)",
+        command=reason or "",
+        source_file="" if reason else source_file,
+        source_line=0 if reason else source_line,
+        manifest=str(source),
+    )
     ide_path = cache.root / "ide" / graph.graph_id.removeprefix("sha256:")
     generate_aliases(graph, cache, ide_path)
     if compile_bytecode:
@@ -276,8 +297,10 @@ def install_packages(
     prefer_newest: bool | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     base_dir: str | os.PathLike[str] | None = None,
+    reason: str | None = None,
 ) -> PackageInstallResult:
     """Resolve package roots as one Depfix group and populate the shared store."""
+    source_file, source_line = _caller_location()
     root = Path(base_dir or Path.cwd()).expanduser().resolve()
     selected: dict[str, str] = {}
     marker_environment = {key: str(value) for key, value in default_environment().items()}
@@ -343,6 +366,17 @@ def install_packages(
         sync_graph(graph, cache, offline=settings.offline, progress=progress)
         if not warm:
             write_manifest(graph, manifest)
+        command = reason or ""
+        cache.record_installation(
+            graph,
+            root_nodes=tuple(alias.node for alias in graph.aliases),
+            kind="command" if reason else "python-code",
+            description=reason or "depfix.project.install_packages(...)",
+            command=command,
+            source_file="" if reason else source_file,
+            source_line=0 if reason else source_line,
+            manifest=str(manifest),
+        )
     nodes = graph.node_index
     packages = tuple(
         sorted(f"{nodes[alias.node].distribution}=={nodes[alias.node].version}" for alias in graph.aliases)
@@ -357,6 +391,40 @@ def install_packages(
         cache.root,
         warm,
     )
+
+
+def _record_export_origins(cache: Cache, graph: LockedGraph, manifest: Path) -> None:
+    grouped: dict[tuple[str, int, str, str], list[str]] = {}
+    for alias in graph.aliases:
+        api = "default" if alias.mode == "default" else "using" if alias.mode.startswith("using") else alias.api
+        key = (alias.source_file, alias.source_line, api, alias.group)
+        grouped.setdefault(key, []).append(alias.node)
+    for (source_file, source_line, api, _group), roots in sorted(grouped.items()):
+        cache.record_installation(
+            graph,
+            root_nodes=tuple(dict.fromkeys(roots)),
+            kind="python-code",
+            description=f"depfix.{api}(...) exported from {source_file or manifest}",
+            source_file=source_file,
+            source_line=source_line,
+            manifest=str(manifest),
+        )
+
+
+def _graph_roots(graph: LockedGraph) -> tuple[str, ...]:
+    aliases = tuple(dict.fromkeys(alias.node for alias in graph.aliases))
+    if aliases:
+        return aliases
+    children = {child for node in graph.nodes for child in node.dependencies.values()}
+    return tuple(node.id for node in graph.nodes if node.id not in children)
+
+
+def _caller_location() -> tuple[str, int]:
+    try:
+        frame = sys._getframe(2)
+    except (AttributeError, ValueError):
+        return "", 0
+    return frame.f_code.co_filename, frame.f_lineno
 
 
 def verify_manifest(
@@ -451,6 +519,7 @@ def _install_bundle(
     local: bool,
     target: str | os.PathLike[str] | None,
     cache_dir: str | os.PathLike[str] | None,
+    reason: str | None,
 ) -> InstallResult:
     cache = Cache(Path(cache_dir) if cache_dir is not None else None)
     graph, _metadata = _read_bundle(bundle, promote_to=cache)
@@ -463,6 +532,7 @@ def _install_bundle(
         local=local,
         target=target,
         cache_dir=cache_dir,
+        reason=reason,
     )
 
 

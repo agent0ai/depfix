@@ -4,6 +4,17 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.7.0 - 2026-08-06
+
+- Added package-store inspection through `depfix cache list` and `depfix.inspect_cache()`, with package, duplicate, and
+  top-down installation-tree views that expose artifact sizes, installation and last-use timestamps, dependency
+  relationships, and repeated shared nodes without double-counting them.
+- Recorded durable installation provenance for grouped CLI installs and runtime loading APIs, including canonical
+  commands, requirement manifests, and application source paths and line numbers, while keeping legacy cache entries
+  inspectable when no historical reason is available.
+- Extended cache cleanup to prune provenance records whose artifacts have been removed, preserving an accurate shared
+  store inventory over time.
+
 ## 0.6.0 - 2026-08-04
 
 - Added opt-in `realm_of()`, `assert_same_realm()`, and `enforce_same_realm()` APIs with immutable `RealmInfo` provenance,

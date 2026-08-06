@@ -265,12 +265,17 @@ Inspect or clean the store explicitly from the CLI:
 
 ```bash
 depfix cache list
+depfix cache list --view duplicates
+depfix cache list --view tree
 depfix cache cleanup --days 30
 depfix cache remove requests --version 2.31.0
 ```
 
-The same operations are available as `depfix.list_cached_packages()`, `depfix.cleanup_cache()`, and
-`depfix.remove_cached_package()`. Change the retention window or disable automatic cleanup centrally:
+The package view includes size, installation/last-use dates, artifact identity, and why the package was installed. The
+duplicate view ranks distributions with multiple retained artifacts; the tree view starts at each installed root and
+indents its dependencies. Python exposes the same snapshot through `depfix.inspect_cache()`, alongside
+`depfix.list_cached_packages()`, `depfix.cleanup_cache()`, and `depfix.remove_cached_package()`. Change the retention
+window or disable automatic cleanup centrally:
 
 ```python
 depfix.configure(cache_retention_days=60, cache_auto_cleanup=False)

@@ -29,7 +29,7 @@ from platformdirs import user_cache_path
 
 from ._file_urls import file_url_to_path
 from .errors import CacheError, IntegrityError, redact
-from .models import Artifact
+from .models import Artifact, LockedGraph
 
 _IS_WINDOWS = os.name == "nt"
 _DEFAULT_MAX_ARTIFACT_SIZE = 1024 * 1024 * 1024
@@ -37,6 +37,19 @@ _DOWNLOAD_ATTEMPTS = 3
 _AUTOMATIC_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 _RESERVATION_GRACE_SECONDS = 60 * 60
 _USAGE_WRITE_INTERVAL_SECONDS = 60 * 60
+
+
+@dataclass(frozen=True, slots=True)
+class PackageInstallReason:
+    """One durable explanation for why a package entered the shared store."""
+
+    kind: str
+    description: str
+    recorded_at: datetime
+    command: str = ""
+    source_file: str = ""
+    source_line: int = 0
+    manifest: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +63,49 @@ class CachedPackage:
     installed_at: datetime
     last_used_at: datetime | None
     size_bytes: int
+    reasons: tuple[PackageInstallReason, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CachedDuplicate:
+    """Multiple physical artifacts retained for one normalized distribution."""
+
+    distribution: str
+    versions: tuple[str, ...]
+    same_version_variants: tuple[str, ...]
+    occurrences: int
+    total_size_bytes: int
+    additional_size_bytes: int
+    packages: tuple[CachedPackage, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CachedPackageNode:
+    """One package in an installation-root dependency tree."""
+
+    package: CachedPackage
+    dependencies: tuple[CachedPackageNode, ...] = ()
+    repeated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CachedInstallation:
+    """One successful installation origin and its currently retained roots."""
+
+    id: str
+    reason: PackageInstallReason
+    total_size_bytes: int
+    roots: tuple[CachedPackageNode, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CacheInventory:
+    """All supported views over the current shared package store."""
+
+    total_size_bytes: int
+    packages: tuple[CachedPackage, ...]
+    duplicates: tuple[CachedDuplicate, ...]
+    installations: tuple[CachedInstallation, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,6 +467,87 @@ class Cache:
                     temporary.unlink(missing_ok=True)
         self._initialize_cleanup_clock()
 
+    def record_installation(
+        self,
+        graph: LockedGraph,
+        *,
+        root_nodes: tuple[str, ...],
+        kind: str,
+        description: str,
+        command: str = "",
+        source_file: str = "",
+        source_line: int = 0,
+        manifest: str = "",
+    ) -> None:
+        """Record one successful graph preparation without duplicating equivalent origins."""
+        node_index = graph.node_index
+        artifact_index = graph.artifact_index
+        selected: set[str] = set()
+
+        def visit(node_id: str) -> None:
+            if node_id in selected or node_id not in node_index:
+                return
+            selected.add(node_id)
+            for child_id in node_index[node_id].dependencies.values():
+                visit(child_id)
+
+        for root in root_nodes:
+            visit(root)
+        if not selected:
+            return
+        nodes: list[dict[str, object]] = []
+        for node_id in sorted(selected):
+            node = node_index[node_id]
+            artifact = artifact_index[node.artifact]
+            nodes.append(
+                {
+                    "id": node.id,
+                    "artifact_hash": artifact.sha256,
+                    "distribution": node.distribution,
+                    "version": node.version,
+                    "dependencies": {
+                        name: child for name, child in sorted(node.dependencies.items()) if child in selected
+                    },
+                }
+            )
+        origin = {
+            "kind": kind,
+            "description": redact(description),
+            "command": redact(command),
+            "source_file": source_file,
+            "source_line": max(source_line, 0),
+            "manifest": manifest,
+        }
+        identity_payload = {
+            "graph_id": graph.graph_id,
+            "roots": sorted(root for root in root_nodes if root in selected),
+            "origin": origin,
+        }
+        encoded = json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode()
+        identity = hashlib.sha256(encoded).hexdigest()
+        path = self._installation_metadata_path(identity)
+        if path.is_file():
+            return
+        data = {
+            "format_version": 1,
+            "id": identity,
+            "graph_id": graph.graph_id,
+            "recorded_at": time.time(),
+            "roots": identity_payload["roots"],
+            "origin": origin,
+            "nodes": nodes,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._artifact_lock("installation-" + identity):
+            if path.is_file():
+                return
+            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+
     def mark_used(self, artifact: Artifact) -> None:
         """Record successful package use, coalescing writes within one process."""
         self.record_artifact(artifact)
@@ -450,8 +587,48 @@ class Cache:
         metadata = self.root / "metadata" / "packages"
         if metadata.is_dir():
             digests.update(path.stem for path in metadata.glob("*.json") if _is_sha256(path.stem))
-        entries = [entry for digest in digests if (entry := self._package_entry(digest)) is not None]
+        reasons = self._reasons_by_artifact()
+        entries = [
+            entry
+            for digest in digests
+            if (entry := self._package_entry(digest, reasons=reasons.get(digest, ()))) is not None
+        ]
         return tuple(sorted(entries, key=lambda item: (item.distribution, item.version, item.artifact_hash)))
+
+    def inventory(self) -> CacheInventory:
+        """Return flat, duplicate, and installation-tree views of the shared store."""
+        packages = self.list_packages()
+        package_index = {package.artifact_hash: package for package in packages}
+        grouped: dict[str, list[CachedPackage]] = {}
+        for package in packages:
+            grouped.setdefault(package.distribution, []).append(package)
+        duplicates: list[CachedDuplicate] = []
+        for distribution, entries in sorted(grouped.items()):
+            if len(entries) < 2:
+                continue
+            versions: dict[str, int] = {}
+            for entry in entries:
+                versions[entry.version] = versions.get(entry.version, 0) + 1
+            total = sum(entry.size_bytes for entry in entries)
+            duplicates.append(
+                CachedDuplicate(
+                    distribution=distribution,
+                    versions=tuple(sorted(versions)),
+                    same_version_variants=tuple(sorted(version for version, count in versions.items() if count > 1)),
+                    occurrences=len(entries),
+                    total_size_bytes=total,
+                    additional_size_bytes=total - max(entry.size_bytes for entry in entries),
+                    packages=tuple(entries),
+                )
+            )
+        duplicates.sort(key=lambda item: (-item.additional_size_bytes, item.distribution))
+        installations = self._installation_inventory(package_index)
+        return CacheInventory(
+            total_size_bytes=sum(package.size_bytes for package in packages),
+            packages=packages,
+            duplicates=tuple(duplicates),
+            installations=installations,
+        )
 
     def cleanup(
         self,
@@ -546,7 +723,12 @@ class Cache:
         )
         os.replace(temporary, path)
 
-    def _package_entry(self, digest: str) -> CachedPackage | None:
+    def _package_entry(
+        self,
+        digest: str,
+        *,
+        reasons: tuple[PackageInstallReason, ...] = (),
+    ) -> CachedPackage | None:
         blob = self.blob_path(digest)
         target = self.root / "targets" / digest
         built_wheel = self.root / "built-wheels" / digest
@@ -591,6 +773,143 @@ class Cache:
                 + _directory_size(built_wheel)
                 + (source_blob.stat().st_size if source_blob is not None and source_blob.is_file() else 0)
             ),
+            reasons=reasons,
+        )
+
+    def _reasons_by_artifact(self) -> dict[str, tuple[PackageInstallReason, ...]]:
+        reasons: dict[str, list[PackageInstallReason]] = {}
+        for record in self._installation_records():
+            reason = self._reason_from_record(record)
+            if reason is None:
+                continue
+            for node in _record_nodes(record).values():
+                digest = str(node.get("artifact_hash") or "")
+                if _is_sha256(digest) and reason not in reasons.setdefault(digest, []):
+                    reasons[digest].append(reason)
+        return {
+            digest: tuple(sorted(items, key=lambda item: item.recorded_at, reverse=True))
+            for digest, items in reasons.items()
+        }
+
+    def _installation_inventory(
+        self,
+        packages: dict[str, CachedPackage],
+    ) -> tuple[CachedInstallation, ...]:
+        installations: list[CachedInstallation] = []
+        for record in self._installation_records():
+            reason = self._reason_from_record(record)
+            if reason is None:
+                continue
+            nodes = _record_nodes(record)
+            seen: set[str] = set()
+
+            def build(
+                node_id: str,
+                active: frozenset[str],
+                record_nodes: dict[str, dict[str, object]] = nodes,
+                visited: set[str] = seen,
+            ) -> CachedPackageNode | None:
+                raw = record_nodes.get(node_id)
+                if raw is None:
+                    return None
+                digest = str(raw.get("artifact_hash") or "")
+                package = packages.get(digest)
+                if package is None:
+                    return None
+                repeated = node_id in visited or node_id in active
+                if repeated:
+                    return CachedPackageNode(package, repeated=True)
+                visited.add(node_id)
+                dependencies = raw.get("dependencies")
+                child_ids = (
+                    [str(value) for _name, value in sorted(dependencies.items())]
+                    if isinstance(dependencies, dict)
+                    else []
+                )
+                lineage = active | {node_id}
+                children = tuple(child for child_id in child_ids if (child := build(child_id, lineage)) is not None)
+                return CachedPackageNode(package, children)
+
+            raw_roots = record.get("roots")
+            roots = (
+                tuple(
+                    root
+                    for node_id in raw_roots
+                    if isinstance(node_id, str) and (root := build(node_id, frozenset())) is not None
+                )
+                if isinstance(raw_roots, list)
+                else ()
+            )
+            if not roots:
+                continue
+            retained = {
+                str(node.get("artifact_hash")) for node in nodes.values() if str(node.get("artifact_hash")) in packages
+            }
+            installations.append(
+                CachedInstallation(
+                    id=str(record.get("id") or ""),
+                    reason=reason,
+                    total_size_bytes=sum(packages[digest].size_bytes for digest in retained),
+                    roots=roots,
+                )
+            )
+        return tuple(
+            sorted(
+                installations,
+                key=lambda item: (item.reason.recorded_at, item.id),
+                reverse=True,
+            )
+        )
+
+    def _installation_records(self) -> tuple[dict[str, object], ...]:
+        root = self.root / "metadata" / "installations"
+        if not root.is_dir():
+            return ()
+        records: list[dict[str, object]] = []
+        for path in sorted(root.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(raw, dict) and raw.get("format_version") == 1:
+                records.append(raw)
+        return tuple(records)
+
+    def _prune_empty_installation_records(self) -> None:
+        root = self.root / "metadata" / "installations"
+        if not root.is_dir():
+            return
+        for path in root.glob("*.json"):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            retained = any(
+                self._package_entry(str(node.get("artifact_hash") or "")) is not None
+                for node in _record_nodes(raw).values()
+            )
+            if not retained:
+                path.unlink(missing_ok=True)
+
+    def _reason_from_record(self, record: dict[str, object]) -> PackageInstallReason | None:
+        origin = record.get("origin")
+        recorded_at = _positive_timestamp(record.get("recorded_at"))
+        if not isinstance(origin, dict) or recorded_at is None:
+            return None
+        try:
+            source_line = int(origin.get("source_line") or 0)
+        except (TypeError, ValueError):
+            source_line = 0
+        return PackageInstallReason(
+            kind=str(origin.get("kind") or "unknown"),
+            description=str(origin.get("description") or "unknown installation"),
+            recorded_at=datetime.fromtimestamp(recorded_at, UTC),
+            command=str(origin.get("command") or ""),
+            source_file=str(origin.get("source_file") or ""),
+            source_line=source_line,
+            manifest=str(origin.get("manifest") or ""),
         )
 
     def _last_relevant_time(self, entry: CachedPackage, now: float) -> float:
@@ -628,7 +947,7 @@ class Cache:
                 skipped.append(original)
                 continue
             with self.lock("target:sha256:" + digest), self._artifact_lock(digest):
-                current = self._package_entry(digest)
+                current = self._package_entry(digest, reasons=original.reasons)
                 if current is None:
                     continue
                 if eligible_before is not None and self._last_relevant_time(current, time.time()) > eligible_before:
@@ -640,6 +959,8 @@ class Cache:
                 reclaimed += current.size_bytes
                 if not dry_run:
                     self._delete_artifact(digest)
+        if removed and not dry_run:
+            self._prune_empty_installation_records()
         return CacheCleanupResult(tuple(removed), tuple(skipped), reclaimed, dry_run)
 
     def _delete_artifact(self, digest: str) -> None:
@@ -724,6 +1045,9 @@ class Cache:
     def _package_metadata_path(self, digest: str) -> Path:
         return self.root / "metadata" / "packages" / f"{digest}.json"
 
+    def _installation_metadata_path(self, identity: str) -> Path:
+        return self.root / "metadata" / "installations" / f"{identity}.json"
+
     def _usage_path(self, digest: str) -> Path:
         return self.root / "metadata" / "usage" / f"{digest}.touch"
 
@@ -754,6 +1078,17 @@ def _positive_timestamp(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return timestamp if timestamp > 0 else None
+
+
+def _record_nodes(record: dict[str, object]) -> dict[str, dict[str, object]]:
+    raw = record.get("nodes")
+    if not isinstance(raw, list):
+        return {}
+    result: dict[str, dict[str, object]] = {}
+    for node in raw:
+        if isinstance(node, dict) and isinstance(node.get("id"), str):
+            result[str(node["id"])] = node
+    return result
 
 
 def _is_sha256(value: str) -> bool:

@@ -110,6 +110,8 @@ Default section order:
   after PyPI verification; never store a PyPI token or publish from a push/tag alone.
 - Keep the local `.env` owner-readable only for explicitly authorized publication; never print, package, or commit it or
   persist its credentials elsewhere.
+- Keep the shared package store inspectable through equivalent Python and CLI flat, duplicate-footprint, and
+  installation-tree views. Retain secret-safe command or source-path/line provenance for successful installations.
 
 ## Child DOX Index
 

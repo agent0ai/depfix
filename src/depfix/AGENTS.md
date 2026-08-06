@@ -27,6 +27,9 @@
   retention uses a daily background sweep, protects the graph before synchronization, and skips cross-process leases held
   by active runtimes; explicit inventory, cleanup, dry-run, and removal APIs use the same artifact/target lock boundary and
   repair owner write permissions before deleting read-only files or materialization trees.
+- Successful graph synchronization records deduplicated, secret-redacted installation origins and enough root/node data
+  to inspect flat packages, distribution-level duplicate footprint, and top-down dependency trees without the original
+  project. Exact artifact hashes remain single physical entries; same-version variants require distinct hashes.
 - Decode local `file:` URLs with platform-native rules, including Windows drive-letter and UNC path forms.
 - Realm imports preserve module identity and prevent undeclared cross-realm leakage.
 - `boundaries.py` owns opt-in provenance inspection, exact graph/node assertions, and sync/async boundary decorators.
