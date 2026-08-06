@@ -4,7 +4,8 @@ Production releases start only when an owner manually dispatches `Publish to PyP
 tag. A push or tag alone never publishes. The workflow validates the tag at the current `main`, runs the complete reusable
 CI and distribution gate without write or OIDC permission, and stages a hidden draft with the checked artifacts only after
 every check passes. The protected `pypi` environment then authorizes a separate OIDC upload job. A clean public-index
-verification makes the GitHub Release public; failed publication removes the draft. The records below are the publication
+verification makes the GitHub Release public. A failed upload removes the draft; a verification failure after a successful
+upload preserves the exact checked draft so failed jobs can be retried safely. The records below are the publication
 authority for reviewed artifacts.
 
 ## Owner-controlled blockers
@@ -39,6 +40,20 @@ authority for reviewed artifacts.
 - [ ] Confirm ordinary tag CI is green; the production workflow will independently rerun every required job.
 
 ## Published releases
+
+### 0.7.0 — 2026-08-06
+
+- PyPI: `https://pypi.org/project/depfix/0.7.0/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.7.0`
+- Wheel SHA-256: `e1503fe28f744a1b98e2db1d479efcd725b0c22a9fa7f7e92fe5b92ca4e38e40`
+- Sdist SHA-256: `8c5cc54c38d5a09f14933a442975686daf02ba1283f9ef9a22d687ce46ee635e`
+- Published from commit `6b308be97dad6b899c40e90ee3cdf4aad7989ed0` after the complete quality, distribution,
+  Linux, macOS, Windows, x64, arm64, Python 3.11–3.13, and uv gates passed, including Windows 3.13 package-store
+  provenance and dependency-tree coverage.
+- Published through the protected `pypi` environment with OIDC Trusted Publishing. PyPI JSON exposed the exact files
+  before its simple index had propagated; an independent clean install then verified `0.7.0`, and the GitHub Release was
+  restored from the exact PyPI bytes after the workflow correctly withheld its draft. The follow-up workflow hardening
+  retries simple-index propagation and preserves checked drafts after successful uploads.
 
 ### 0.6.0 — 2026-08-04
 
@@ -142,5 +157,6 @@ authority for reviewed artifacts.
 - [ ] Confirm the workflow stages a hidden draft with only the checked wheel and sdist attached.
 - [ ] Approve the protected `pypi` deployment after reviewing the completed checks and draft assets.
 - [ ] Confirm OIDC publishing and the clean public-index installation job pass, then confirm the GitHub Release becomes
-  public. A failed deployment must remove its unpublished draft.
+  public. A failed upload must remove its unpublished draft; a post-upload verification failure must retain the checked
+  draft for a failed-job retry.
 - [ ] Record the PyPI/GitHub URLs, public artifact hashes, tagged commit, and verification result above.

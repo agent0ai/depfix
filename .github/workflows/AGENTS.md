@@ -18,10 +18,11 @@
 - A hidden draft is staged only after every reusable CI job and the authoritative distribution gate pass; it becomes a
   public GitHub Release only after PyPI publication and clean public-index verification succeed.
 - Publishing jobs receive only `id-token: write`; other jobs remain read-only.
-- Only draft staging, finalization, and cleanup receive `contents: write`; failed publication removes the unpublished
-  draft.
+- Only draft staging, finalization, and cleanup receive `contents: write`; a failed upload removes the unpublished draft,
+  while a post-upload verification failure preserves the exact draft assets so failed jobs can be retried safely.
 - Build and test distributions without OIDC permission, then pass only that exact two-file artifact set to the protected
-  `pypi` environment for publication and verify the public-index installation.
+  `pypi` environment for publication and verify the public-index installation with bounded retries for PyPI JSON/simple
+  index propagation.
 - The latest-uv connected gate runs published-package import and cross-version object-boundary probes; ordinary matrix
   tests remain network-free.
 

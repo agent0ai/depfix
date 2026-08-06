@@ -199,7 +199,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   verify-publication:
-    name: Verify public release
+    name: Verify PyPI publication
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -236,7 +236,17 @@ jobs:
           else:
               raise SystemExit("PyPI release did not become visible with the exact artifact set")
           PY
-          python -m pip install --no-cache-dir "depfix==${VERSION}"
+          for attempt in {1..60}; do
+            if python -m pip install --disable-pip-version-check --no-cache-dir "depfix==${VERSION}"; then
+              break
+            fi
+            if test "$attempt" -eq 60; then
+              echo "PyPI simple index did not expose depfix ${VERSION} in time" >&2
+              exit 1
+            fi
+            echo "PyPI JSON is current but the simple index is still propagating; retrying in 5 seconds"
+            sleep 5
+          done
           python -c "import depfix; assert depfix.__version__ == '${VERSION}'"
           depfix --version
 
@@ -261,7 +271,7 @@ jobs:
 
   cleanup-release-draft:
     name: Clean up failed release draft
-    if: ${{ always() && needs.stage-release.result == 'success' && needs.verify-publication.result != 'success' }}
+    if: ${{ always() && needs.stage-release.result == 'success' && needs.publish.result != 'success' }}
     needs: [stage-release, publish, verify-publication]
     runs-on: ubuntu-latest
     timeout-minutes: 10

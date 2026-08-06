@@ -4,6 +4,9 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+- Hardened production publication against PyPI CDN propagation by retrying the clean simple-index install after the exact
+  JSON artifact set appears, and preserving the checked GitHub draft when post-upload verification needs to be retried.
+
 ## 0.7.0 - 2026-08-06
 
 - Added package-store inspection through `depfix cache list` and `depfix.inspect_cache()`, with package, duplicate, and
