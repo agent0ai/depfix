@@ -5,12 +5,12 @@ import json
 import urllib.error
 import urllib.request
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
 
 import pytest
 from packaging.specifiers import SpecifierSet
 
 import depfix.resolver as resolver_module
+from depfix._file_urls import file_url_to_path
 from depfix.cache import Cache
 from depfix.config import ImportDeclaration, ProjectConfig
 from depfix.errors import ResolutionError
@@ -137,7 +137,7 @@ def test_grouped_pytorch_projects_remain_on_selected_index_without_json_fallback
     def open_url(request: urllib.request.Request, **_kwargs: object) -> _Response:
         requested.append(request.full_url)
         if request.get_method() == "HEAD":
-            path = Path(unquote(urlsplit(request.full_url).path))
+            path = file_url_to_path(request.full_url)
             return _Response("", "application/octet-stream", request.full_url, length=path.stat().st_size)
         project = request.full_url.rstrip("/").rsplit("/", 1)[-1]
         wheel = wheels[project]

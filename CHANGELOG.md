@@ -2,6 +2,11 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.9.3 - 2026-08-13
+
+- Corrected the Simple HTML custom-index regression fixture to decode local wheel URLs with platform-native file URL
+  rules on Windows; runtime behavior is unchanged from the fully gated 0.9.2 candidate.
+
 ## 0.9.2 - 2026-08-13
 
 - Made incomplete-target recovery restore write permissions across the complete hardened tree before removal, including

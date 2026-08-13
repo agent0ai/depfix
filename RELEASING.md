@@ -43,6 +43,14 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.9.2 — 2026-08-13 (superseded before PyPI publication)
+
+- Tag: `https://github.com/agent0ai/depfix/tree/v0.9.2`
+- Linux, macOS, uv, quality, and distribution gates passed, including the non-root Python 3.13 recovery. The Windows
+  matrix then exposed a test-fixture-only conversion of `file:///C:/...` into an invalid path. Validation failed before
+  draft staging, OIDC, or PyPI publication; the platform-native fixture correction is released as `0.9.3` without moving
+  the immutable tag.
+
 ### 0.9.1 — 2026-08-13 (superseded before PyPI publication)
 
 - Tag: `https://github.com/agent0ai/depfix/tree/v0.9.1`
