@@ -721,6 +721,8 @@ def test_every_loading_api_exposes_the_per_request_unsafe_override() -> None:
         assert parameter.default is None
         newest_parameter = inspect.signature(api).parameters["prefer_newest"]
         assert newest_parameter.default is None
+        assert inspect.signature(api).parameters["index_url"].default is None
+        assert inspect.signature(api).parameters["extra_index_url"].default is None
 
 
 def test_scanner_is_static_and_reports_dynamic_calls(tmp_path: Path) -> None:
@@ -728,7 +730,8 @@ def test_scanner_is_static_and_reports_dynamic_calls(tmp_path: Path) -> None:
     source.write_text(
         "from depfix import import_module as versioned_import\n"
         'SPEC = "idna" + "==3.10"\n'
-        "safe = versioned_import(SPEC, isolation='shared', allow_unsafe=True, prefer_newest=True)\n"
+        "safe = versioned_import(SPEC, isolation='shared', allow_unsafe=True, prefer_newest=True, "
+        "index_url='https://download.example/simple')\n"
         "unsafe = versioned_import(read_spec())\n",
         encoding="utf-8",
     )
@@ -739,6 +742,8 @@ def test_scanner_is_static_and_reports_dynamic_calls(tmp_path: Path) -> None:
     assert result.requests[0].isolation == "shared"
     assert result.requests[0].allow_unsafe is True
     assert result.requests[0].prefer_newest is True
+    assert result.requests[0].index_url == "https://download.example/simple"
+    assert result.requests[0].extra_index_url is None
     assert len(result.dynamic_requests) == 1
     assert "safe static string" in result.dynamic_requests[0].reason
 

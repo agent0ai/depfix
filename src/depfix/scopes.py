@@ -15,7 +15,7 @@ from typing import Any, TypeVar, cast
 from .dispatcher import ImportSelection, ensure_dispatcher, enter_scope, exit_scope, register_default
 from .errors import InvalidUsingScopeError
 from .manager import prepare_import_selection
-from .settings import resolve_settings
+from .settings import resolve_loading_settings
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -29,16 +29,20 @@ def default(
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
     prefer_newest: bool | None = None,
+    index_url: str | None = None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None = None,
 ) -> None:
     """Persist package selections for subsequent ordinary imports."""
     ensure_dispatcher()
     source_file, source_line, base_dir = _caller_location(1)
-    settings = resolve_settings(
+    settings = resolve_loading_settings(
         manifest=manifest,
         frozen=frozen,
         offline=offline,
         allow_unsafe=allow_unsafe,
         prefer_newest=prefer_newest,
+        index_url=index_url,
+        extra_index_url=extra_index_url,
     )
     selection = prepare_import_selection(
         _validate_specifiers(specifiers, "default"),
@@ -62,6 +66,8 @@ def using(
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
     prefer_newest: bool | None = None,
+    index_url: str | None = None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None = None,
 ) -> _Using:
     """Create a context manager/decorator for temporary ordinary imports."""
     ensure_dispatcher()
@@ -76,6 +82,8 @@ def using(
         isolation=isolation,
         allow_unsafe=allow_unsafe,
         prefer_newest=prefer_newest,
+        index_url=index_url,
+        extra_index_url=extra_index_url,
         source_file=source_file,
         source_line=source_line,
         base_dir=base_dir,
@@ -94,6 +102,8 @@ class _Using:
         isolation: str | None,
         allow_unsafe: bool | None,
         prefer_newest: bool | None,
+        index_url: str | None,
+        extra_index_url: str | tuple[str, ...] | list[str] | None,
         source_file: str,
         source_line: int,
         base_dir: Path,
@@ -107,6 +117,8 @@ class _Using:
         self.isolation = isolation
         self.allow_unsafe = allow_unsafe
         self.prefer_newest = prefer_newest
+        self.index_url = index_url
+        self.extra_index_url = extra_index_url
         self.source_file = source_file
         self.source_line = source_line
         self.base_dir = base_dir
@@ -116,12 +128,14 @@ class _Using:
     def __enter__(self) -> _Using:
         if self._token is not None:
             raise InvalidUsingScopeError("The same depfix.using() context manager is already active")
-        settings = resolve_settings(
+        settings = resolve_loading_settings(
             manifest=self.manifest,
             frozen=self.frozen,
             offline=self.offline,
             allow_unsafe=self.allow_unsafe,
             prefer_newest=self.prefer_newest,
+            index_url=self.index_url,
+            extra_index_url=self.extra_index_url,
         )
         selection = prepare_import_selection(
             self.specifiers,
@@ -199,6 +213,8 @@ class _Using:
             isolation=self.isolation,
             allow_unsafe=self.allow_unsafe,
             prefer_newest=self.prefer_newest,
+            index_url=self.index_url,
+            extra_index_url=self.extra_index_url,
             source_file=self.source_file,
             source_line=self.source_line,
             base_dir=self.base_dir,

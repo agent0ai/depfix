@@ -54,6 +54,9 @@
 - Resolver candidate ranking defaults to the newest compatible artifact already present in the shared cache, including
   artifacts selected earlier in a grouped resolution. Every loading API accepts `prefer_newest`; process, environment,
   project, export, and CLI configuration inherit through `settings.py`, and resolution identities separate both modes.
+- Every loading API accepts request-scoped primary and extra index overrides. A scoped primary suppresses inherited extra
+  indexes unless the same call explicitly supplies them; index policy is part of request and graph identity, never mutates
+  process configuration, and is rejected when an exact prepared manifest is active.
 - `depfix pip install` and `project.install_packages()` resolve package/requirement-file roots as one store-only group,
   persist an exact cache manifest, materialize verified targets, and never invoke environment installation or import
   activation. Requirement constraints apply to matching roots and dependency edges across every selected graph.

@@ -28,6 +28,8 @@ class ImportDeclaration:
     isolation: str = "auto"
     allow_unsafe: bool | None = None
     prefer_newest: bool | None = None
+    index_url: str | None = None
+    extra_index_url: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

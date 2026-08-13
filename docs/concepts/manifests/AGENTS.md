@@ -14,6 +14,8 @@
   artifact, node, module, source, isolation, and policy state.
 - Store-only grouped installations use the additive `package-install` request mode and remain reloadable exact graphs.
 - Unknown format versions and non-canonical graph identities are rejected.
+- Prepared manifests remain exact and reject live index arguments rather than implying that already-locked artifacts will
+  be re-resolved.
 
 ## Work Guidance
 

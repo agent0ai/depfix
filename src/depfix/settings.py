@@ -5,14 +5,14 @@ from __future__ import annotations
 import os
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 from typing import Any
 
 from platformdirs import user_cache_path
 
-from .errors import SpecifierError
+from .errors import FrozenManifestError, SpecifierError
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +154,31 @@ def resolve_settings(
         extra_index_url=tuple(choose("extra_index_url")),
         log_level=str(choose("log_level")),
     )
+
+
+def resolve_loading_settings(
+    *,
+    index_url: str | None = None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None = None,
+    **overrides: Any,
+) -> Settings:
+    """Resolve a loading call's settings without mutating process configuration."""
+    settings = resolve_settings(index_url=index_url, extra_index_url=extra_index_url, **overrides)
+    if settings.manifest is not None and (index_url is not None or extra_index_url is not None):
+        raise FrozenManifestError(
+            "A prepared manifest is exact and does not accept live package-index overrides",
+            manifest=settings.manifest,
+            frozen=settings.frozen,
+            remediation="omit index_url/extra_index_url or omit the prepared manifest for live resolution",
+        )
+    if extra_index_url is not None:
+        settings = replace(settings, extra_index_url=_split_indexes(extra_index_url))
+    elif index_url is not None:
+        # A scoped primary index is complete by default. Inheriting unrelated
+        # extra indexes here would make first-index selection surprising and
+        # could reintroduce dependency-confusion exposure.
+        settings = replace(settings, extra_index_url=())
+    return settings
 
 
 def discover_manifest(start: Path | None = None) -> Path | None:

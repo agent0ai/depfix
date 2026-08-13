@@ -29,6 +29,7 @@ from depfix.errors import (
 from depfix.manager import reset_runtime_state
 from depfix.manifest import load_manifest
 from depfix.project import create_bundle, export_project, install_manifest
+from depfix.resolver import _index_policy_identity
 from depfix.scanner import scan_project
 from depfix.settings import reset_configuration
 from depfix.uv_backend import UvBackend
@@ -71,6 +72,118 @@ def test_importing_depfix_alone_does_not_install_dispatcher() -> None:
         depfix.__all__
     )
     assert "activate" not in depfix.__all__
+
+
+def test_scoped_primary_index_does_not_leak_or_inherit_global_extras(
+    tmp_path: Path, wheel_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scoped_wheel = wheel_factory(
+        "scoped-index-demo",
+        "1.0.0",
+        {"scoped_index_demo/__init__.py": "VALUE = 'scoped'\n"},
+    )
+    global_wheel = wheel_factory(
+        "scoped-index-demo",
+        "2.0.0",
+        {"scoped_index_demo/__init__.py": "VALUE = 'global'\n"},
+    )
+    scoped_index = build_index(tmp_path / "scoped-index", [scoped_wheel])
+    global_index = build_index(tmp_path / "global-index", [global_wheel])
+    depfix.configure(
+        cache_dir=tmp_path / "cache",
+        index_url=global_index,
+        extra_index_url="https://unrelated.invalid/simple",
+        log_level="WARNING",
+    )
+    monkeypatch.setattr(
+        UvBackend,
+        "resolve_root_version",
+        lambda self, requirement, distribution: "1.0.0" if self.settings.index_url == scoped_index else "2.0.0",
+    )
+
+    scoped = depfix.import_module("scoped-index-demo", index_url=scoped_index)
+    later = depfix.import_module("scoped-index-demo")
+
+    assert scoped.VALUE == "scoped"
+    assert later.VALUE == "global"
+    assert scoped.__depfix_graph_id__ != later.__depfix_graph_id__
+
+
+def test_scoped_indexes_are_isolated_across_async_tasks(
+    tmp_path: Path, wheel_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_wheel = wheel_factory(
+        "async-index-demo",
+        "1.0.0",
+        {"async_index_demo/__init__.py": "VALUE = 'first'\n"},
+    )
+    second_wheel = wheel_factory(
+        "async-index-demo",
+        "2.0.0",
+        {"async_index_demo/__init__.py": "VALUE = 'second'\n"},
+    )
+    first_index = build_index(tmp_path / "first-index", [first_wheel])
+    second_index = build_index(tmp_path / "second-index", [second_wheel])
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    monkeypatch.setattr(
+        UvBackend,
+        "resolve_root_version",
+        lambda self, requirement, distribution: "1.0.0" if self.settings.index_url == first_index else "2.0.0",
+    )
+
+    async def load(index: str) -> str:
+        module = await depfix.import_module_async("async-index-demo", index_url=index)
+        return module.VALUE
+
+    async def run() -> tuple[str, str]:
+        first, second = await asyncio.gather(load(first_index), load(second_index))
+        return first, second
+
+    assert asyncio.run(run()) == ("first", "second")
+
+
+def test_scoped_index_is_rejected_with_an_exact_manifest(tmp_path: Path) -> None:
+    manifest = tmp_path / "imports.lock"
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+
+    with pytest.raises(FrozenManifestError, match="does not accept live package-index overrides"):
+        depfix.load_package("demo", manifest=manifest, index_url="https://example.invalid/simple")
+
+
+def test_scoped_index_supports_grouped_using_and_native_packages(
+    tmp_path: Path, wheel_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dependency = wheel_factory(
+        "scoped-group-dependency",
+        "1.0.0",
+        {"scoped_group_dependency.py": "VALUE = 'dependency'\n"},
+    )
+    root = wheel_factory(
+        "scoped-group-root",
+        "1.0.0",
+        {
+            "scoped_group_root.py": "import scoped_group_dependency\nVALUE = scoped_group_dependency.VALUE\n",
+            "scoped_group_accelerator.so": b"native marker",
+        },
+        requires=("scoped-group-dependency==1.0.0",),
+    )
+    index = build_index(tmp_path / "native-index", [root, dependency])
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    monkeypatch.setattr(UvBackend, "resolve_root_version", lambda self, requirement, distribution: "1.0.0")
+
+    with depfix.using("scoped-group-root", index_url=index):
+        import scoped_group_root
+
+    assert scoped_group_root.VALUE == "dependency"
+
+
+def test_index_policy_identity_redacts_credentials() -> None:
+    identity = _index_policy_identity(
+        ("https://user:password@example.test/simple?token=secret",)  # pragma: allowlist secret
+    )
+
+    assert identity == "first-index:https://example.test/simple"
+    assert "password" not in identity and "secret" not in identity
 
 
 def test_fresh_import_has_no_import_hook_or_subprocess_activity() -> None:
@@ -450,7 +563,8 @@ def test_scanner_groups_defaults_contexts_decorators_and_aliases(tmp_path: Path)
         "from depfix import using as selected\n"
         "BASE = 'requests=='\n"
         "VERSION = '2.31.0'\n"
-        "select_defaults(BASE + VERSION, 'PyYAML==6.0.2', allow_unsafe=True, prefer_newest=True)\n"
+        "select_defaults(BASE + VERSION, 'PyYAML==6.0.2', allow_unsafe=True, prefer_newest=True, "
+        "index_url='https://primary.example/simple', extra_index_url=['https://fallback.example/simple'])\n"
         "import requests\n"
         "import yaml as configuration\n"
         "with selected('requests==2.32.3', allow_unsafe=False):\n"
@@ -468,6 +582,11 @@ def test_scanner_groups_defaults_contexts_decorators_and_aliases(tmp_path: Path)
     default_group, context_group, decorator_group = result.groups
     assert dict(default_group.options)["allow_unsafe"] == "true"
     assert dict(default_group.options)["prefer_newest"] == "true"
+    assert dict(default_group.options)["index_url"] == '"https://primary.example/simple"'
+    assert dict(default_group.options)["extra_index_url"] == '["https://fallback.example/simple"]'
+    default_sites = [site for site in result.requests if site.group_id == default_group.id]
+    assert all(site.index_url == "https://primary.example/simple" for site in default_sites)
+    assert all(site.extra_index_url == ("https://fallback.example/simple",) for site in default_sites)
     assert dict(context_group.options)["allow_unsafe"] == "false"
     assert "allow_unsafe" not in dict(decorator_group.options)
     assert default_group.normalized_specifiers == ("requests==2.31.0", "pyyaml==6.0.2")

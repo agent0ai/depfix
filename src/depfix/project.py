@@ -146,6 +146,8 @@ def export_project(
             isolation=site.isolation,
             allow_unsafe=settings.allow_unsafe if site.allow_unsafe is None else site.allow_unsafe,
             prefer_newest=settings.prefer_newest if site.prefer_newest is None else site.prefer_newest,
+            index_url=site.index_url,
+            extra_index_url=site.extra_index_url,
         )
         for alias, site in zip(aliases, sites, strict=True)
     )

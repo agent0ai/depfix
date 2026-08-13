@@ -2,10 +2,17 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
-## Unreleased
+## 0.8.0 - 2026-08-13
 
 - Hardened production publication against PyPI CDN propagation by retrying the clean simple-index install after the exact
   JSON artifact set appears, and preserving the checked GitHub draft when post-upload verification needs to be retried.
+- Added a fail-closed release launcher that verifies the clean local/remote main commit, annotated tag, version,
+  changelog, and unused publication destinations before dispatching the production workflow from the tag; CI now
+  validates workflow syntax and security contracts, and a no-OIDC recovery workflow can publish a retained draft only
+  after its assets match the verified PyPI files byte for byte.
+- Added request-scoped primary and extra package-index selection to every synchronous, asynchronous, and standard-import
+  loading API. Scoped primary indexes suppress inherited extras, remain isolated across concurrent calls, participate in
+  graph/cache identity, and are rejected when an exact prepared manifest makes live resolution inapplicable.
 
 ## 0.7.0 - 2026-08-06
 

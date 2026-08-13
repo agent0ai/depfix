@@ -71,6 +71,7 @@ def run(command: list[str], *, cwd: Path = ROOT, env: dict[str, str] | None = No
 
 
 def quality_gates() -> None:
+    run([sys.executable, "scripts/validate_workflows.py"])
     run([sys.executable, "-m", "ruff", "format", "--check", "."])
     run([sys.executable, "-m", "ruff", "check", "."])
     run([sys.executable, "-m", "mypy", "src/depfix"])

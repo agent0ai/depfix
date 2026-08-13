@@ -140,6 +140,18 @@ with depfix.using("requests==2.31.0"):
 response = legacy_requests.get("https://example.com")
 ```
 
+For packages hosted on a dedicated index, select that primary index only for the request. For example, CPU-only PyTorch
+can be prepared without changing the index used by later or concurrent Depfix calls:
+
+```python
+with depfix.using("torch", index_url="https://download.pytorch.org/whl/cpu"):
+    import torch
+```
+
+`index_url=` is request-scoped and does not inherit process-wide extra indexes. `extra_index_url=` is also available for
+repositories that intentionally need multiple sources, but all configured indexes can provide any requested project;
+use a dedicated primary index when possible to avoid dependency-confusion ambiguity.
+
 `using()` also works as a function decorator:
 
 ```python

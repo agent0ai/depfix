@@ -12,6 +12,8 @@ depfix.default(
     isolation=None,
     allow_unsafe=None,
     prefer_newest=None,
+    index_url=None,
+    extra_index_url=None,
 ) -> None
 ```
 
@@ -29,6 +31,8 @@ depfix.using(
     isolation=None,
     allow_unsafe=None,
     prefer_newest=None,
+    index_url=None,
+    extra_index_url=None,
 ) -> ContextDecorator
 ```
 
@@ -57,6 +61,8 @@ depfix.import_module(
     isolation=None,
     allow_unsafe=None,
     prefer_newest=None,
+    index_url=None,
+    extra_index_url=None,
 ) -> ModuleType
 ```
 
@@ -74,6 +80,8 @@ depfix.load_package(
     isolation=None,
     allow_unsafe=None,
     prefer_newest=None,
+    index_url=None,
+    extra_index_url=None,
 ) -> PackageHandle
 ```
 
@@ -82,6 +90,17 @@ The return value is always `PackageHandle`. `module_names`, `metadata`, and `dep
 
 The async wrappers run blocking preparation in a worker thread and share the synchronous canonical module identity:
 `import_module_async` and `load_package_async`.
+
+Every loading API accepts request-scoped `index_url=` and `extra_index_url=`. A supplied primary index overrides inherited
+process, environment, and project primary-index configuration only for that request or grouped `default()`/`using()`
+selection. Unless `extra_index_url=` is supplied on the same call, a scoped primary index uses no inherited extra indexes.
+This makes `index_url="https://download.pytorch.org/whl/cpu"` the safe, unambiguous CPU Torch pattern. Extra indexes use
+uv's `first-index` strategy, but every listed repository can still claim a project name; only opt into them when repository
+trust and package ownership are understood. Index policy participates in request, resolution, graph, and cache identity.
+It never mutates `depfix.configure()` state or context-local scope state.
+
+Prepared manifests are exact: passing either live index argument together with an explicit or discovered manifest raises
+`FrozenManifestError`. Install the prepared artifacts or omit the manifest to perform a new live resolution.
 
 ## Object-boundary diagnostics
 

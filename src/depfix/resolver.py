@@ -95,15 +95,19 @@ class Resolver:
     ) -> None:
         self.cache = cache
         self.settings = settings or resolve_settings(cache_dir=cache.root.parent, discover=False)
+        if index_url is not None:
+            self.settings = replace(self.settings, index_url=index_url, extra_index_url=())
         self.progress = progress or ProgressReporter(self.settings.log_level)
         self.backend = backend or UvBackend(self.settings, cache, progress=self.progress)
+        self._backend_supplied = backend is not None
+        self._base_settings = self.settings
         # The JSON endpoint is used only to turn uv-selected versions into exact
         # compatible wheel records. A custom endpoint remains injectable for
         # deterministic local-index tests.
-        configured_index = index_url or self.settings.index_url
+        configured_index = self.settings.index_url
         self.index_url = (configured_index or "https://pypi.org/pypi").rstrip("/")
         self._custom_index = configured_index is not None or bool(self.settings.extra_index_url)
-        configured_indexes = () if index_url is not None else self.settings.extra_index_url
+        configured_indexes = self.settings.extra_index_url
         self._project_indexes = tuple(dict.fromkeys((*configured_indexes, self.index_url)))
         self.allow_yanked = allow_yanked
         self._artifacts: dict[str, Artifact] = {}
@@ -133,6 +137,7 @@ class Resolver:
         self._validate_index_policy()
         aliases: list[Alias] = []
         for declaration in config.imports:
+            self._apply_declaration_indexes(declaration)
             prefer_newest = self._prefer_newest if declaration.prefer_newest is None else declaration.prefer_newest
             if not isinstance(prefer_newest, bool):
                 raise ResolutionError(f"prefer-newest for alias {declaration.name!r} must be boolean")
@@ -186,6 +191,31 @@ class Resolver:
             resolver_version=self._uv_version,
         )
         return replace(graph, graph_id=computed_graph_id(graph))
+
+    def _apply_declaration_indexes(self, declaration: ImportDeclaration) -> None:
+        if declaration.index_url is None and declaration.extra_index_url is None:
+            selected = self._base_settings
+        else:
+            primary = declaration.index_url or self._base_settings.index_url
+            if declaration.extra_index_url is not None:
+                extras = declaration.extra_index_url
+            elif declaration.index_url is not None:
+                extras = ()
+            else:
+                extras = self._base_settings.extra_index_url
+            selected = replace(self._base_settings, index_url=primary, extra_index_url=extras)
+        policy_key = (selected.index_url, selected.extra_index_url)
+        current_key = (self.settings.index_url, self.settings.extra_index_url)
+        self.settings = selected
+        if policy_key != current_key:
+            self._candidate_cache.clear()
+        if not self._backend_supplied:
+            self.backend = UvBackend(selected, self.cache, progress=self.progress)
+        configured_index = selected.index_url
+        self.index_url = (configured_index or "https://pypi.org/pypi").rstrip("/")
+        self._custom_index = configured_index is not None or bool(selected.extra_index_url)
+        self._project_indexes = tuple(dict.fromkeys((*selected.extra_index_url, self.index_url)))
+        self._validate_index_policy()
 
     def _select_module(self, declaration: ImportDeclaration, source: SourceInfo, node: Node) -> str | None:
         if declaration.module is not None:

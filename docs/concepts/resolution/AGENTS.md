@@ -18,6 +18,8 @@
   grouped reuse is stable and greedy rather than a global minimum-graph solver.
 - Grouped store installation preserves parent-specific dependency graphs and never requires incompatible roots to share
   one environment-wide dependency version.
+- Per-loading-request index policies use first-index selection, participate in resolution identity, and remain isolated
+  from process configuration and concurrent requests. Prefer one scoped primary index over extra indexes when possible.
 
 ## Work Guidance
 

@@ -106,6 +106,8 @@ def import_module(
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
     prefer_newest: bool | None = None,
+    index_url: str | None = None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None = None,
 ) -> ModuleType:
     """Return exactly one canonical module or raise a typed discovery error."""
     source_file, source_line = _caller_location()
@@ -119,6 +121,8 @@ def import_module(
         isolation=isolation,
         allow_unsafe=allow_unsafe,
         prefer_newest=prefer_newest,
+        index_url=index_url,
+        extra_index_url=extra_index_url,
         source_file=source_file,
         source_line=source_line,
     )
@@ -135,18 +139,22 @@ def _import_module_from(
     isolation: str | None,
     allow_unsafe: bool | None,
     prefer_newest: bool | None,
+    index_url: str | None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None,
     source_file: str,
     source_line: int,
 ) -> ModuleType:
     from .manager import prepare_request
-    from .settings import resolve_settings
+    from .settings import resolve_loading_settings
 
-    settings = resolve_settings(
+    settings = resolve_loading_settings(
         manifest=manifest,
         frozen=frozen,
         offline=offline,
         allow_unsafe=allow_unsafe,
         prefer_newest=prefer_newest,
+        index_url=index_url,
+        extra_index_url=extra_index_url,
     )
     runtime, request = prepare_request(
         specifier,
@@ -173,6 +181,8 @@ def load_package(
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
     prefer_newest: bool | None = None,
+    index_url: str | None = None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None = None,
 ) -> PackageHandle:
     """Return one package handle without eagerly importing its root modules."""
     source_file, source_line = _caller_location()
@@ -185,6 +195,8 @@ def load_package(
         isolation=isolation,
         allow_unsafe=allow_unsafe,
         prefer_newest=prefer_newest,
+        index_url=index_url,
+        extra_index_url=extra_index_url,
         source_file=source_file,
         source_line=source_line,
     )
@@ -200,19 +212,23 @@ def _load_package_from(
     isolation: str | None,
     allow_unsafe: bool | None,
     prefer_newest: bool | None,
+    index_url: str | None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None,
     source_file: str,
     source_line: int,
 ) -> PackageHandle:
     from .handles import PackageHandle
     from .manager import prepare_request
-    from .settings import resolve_settings
+    from .settings import resolve_loading_settings
 
-    settings = resolve_settings(
+    settings = resolve_loading_settings(
         manifest=manifest,
         frozen=frozen,
         offline=offline,
         allow_unsafe=allow_unsafe,
         prefer_newest=prefer_newest,
+        index_url=index_url,
+        extra_index_url=extra_index_url,
     )
     runtime, request = prepare_request(
         specifier,
@@ -238,6 +254,8 @@ async def import_module_async(
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
     prefer_newest: bool | None = None,
+    index_url: str | None = None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None = None,
 ) -> ModuleType:
     """Async-friendly wrapper sharing canonical identity with `import_module`."""
     import asyncio
@@ -254,6 +272,8 @@ async def import_module_async(
         isolation=isolation,
         allow_unsafe=allow_unsafe,
         prefer_newest=prefer_newest,
+        index_url=index_url,
+        extra_index_url=extra_index_url,
         source_file=source_file,
         source_line=source_line,
     )
@@ -269,6 +289,8 @@ async def load_package_async(
     isolation: str | None = None,
     allow_unsafe: bool | None = None,
     prefer_newest: bool | None = None,
+    index_url: str | None = None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None = None,
 ) -> PackageHandle:
     import asyncio
 
@@ -283,6 +305,8 @@ async def load_package_async(
         isolation=isolation,
         allow_unsafe=allow_unsafe,
         prefer_newest=prefer_newest,
+        index_url=index_url,
+        extra_index_url=extra_index_url,
         source_file=source_file,
         source_line=source_line,
     )

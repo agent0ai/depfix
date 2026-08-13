@@ -38,6 +38,8 @@ authority for reviewed artifacts.
   import, and one export/install/offline run.
 - [ ] Commit and push the reviewed source to `main`, then create and push an annotated `vX.Y.Z` tag at that exact commit.
 - [ ] Confirm ordinary tag CI is green; the production workflow will independently rerun every required job.
+- [ ] Run `python scripts/release.py X.Y.Z`. This read-only preflight verifies the clean checkout, local and remote
+  `main`, local and remote annotated tag, source version, changelog, and unused GitHub/PyPI destinations.
 
 ## Published releases
 
@@ -149,8 +151,11 @@ authority for reviewed artifacts.
 
 ## PyPI (checked manual workflow)
 
-- [ ] Dispatch the workflow against the reviewed tag explicitly:
-  `gh workflow run publish-pypi.yml --ref vX.Y.Z -f version=X.Y.Z -f confirmation=release-depfix-X.Y.Z`.
+- [ ] Expose a workflow-capable `GH_TOKEN` or `GITHUB_TOKEN` to the release process from the owner's secret manager. The
+  helper does not read `.env`, write credentials, or print the token.
+- [ ] Dispatch through the checked launcher:
+  `python scripts/release.py X.Y.Z --dispatch --confirmation release-depfix-X.Y.Z`. The launcher can only submit the
+  validated `vX.Y.Z` tag as the workflow ref.
 - [ ] Open the resulting `Publish to PyPI` run and confirm its ref is `vX.Y.Z`, never `main`.
 - [ ] Confirm request validation and the complete reusable CI matrix pass; any failure must leave GitHub Releases and PyPI
   unchanged.
@@ -160,3 +165,20 @@ authority for reviewed artifacts.
   public. A failed upload must remove its unpublished draft; a post-upload verification failure must retain the checked
   draft for a failed-job retry.
 - [ ] Record the PyPI/GitHub URLs, public artifact hashes, tagged commit, and verification result above.
+
+## Recovery after a successful PyPI upload
+
+Use recovery only when `Publish checked distributions to PyPI` succeeded but public-index verification or GitHub Release
+finalization did not. The production workflow retains its checked draft in this state. Retry the failed jobs first; if the
+original run cannot be resumed, dispatch the recovery workflow from the same annotated tag:
+
+```bash
+gh workflow run recover-pypi-release.yml --ref vX.Y.Z \
+  -f version=X.Y.Z -f confirmation=recover-depfix-X.Y.Z
+```
+
+`Recover PyPI release` has no OIDC permission and cannot upload to PyPI or create replacement artifacts. It requires the
+exact two expected files on PyPI, waits for a clean simple-index install, downloads the retained GitHub draft, compares
+both filenames and SHA-256 digests byte for byte, and only then makes the draft public. It fails closed when the draft is
+missing, already public, or different from PyPI. Do not use it after a pre-upload or upload failure; fix the candidate and
+make a new version instead.

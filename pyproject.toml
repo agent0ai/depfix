@@ -34,7 +34,7 @@ classifiers = [
 
 [project.optional-dependencies]
 test = ["pytest>=8", "mypy>=1.10", "pyright>=1.1.400", "jsonschema>=4.23"]
-release = ["build>=1.2", "ruff>=0.12", "twine>=6"]
+release = ["build>=1.2", "PyYAML>=6.0", "ruff>=0.12", "twine>=6"]
 
 [project.scripts]
 depfix = "depfix.cli:main"

@@ -1,0 +1,155 @@
+name: Recover PyPI release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact published package version without the leading v
+        required: true
+        type: string
+      confirmation:
+        description: Type recover-depfix-X.Y.Z for this version
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-pypi-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  recover-release:
+    name: Verify PyPI and publish the retained draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Verify immutable recovery identity
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SHA: ${{ github.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          tag = f"v{version}"
+          if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+              raise SystemExit("version must be a stable X.Y.Z release")
+          if os.environ["CONFIRMATION"] != f"recover-depfix-{version}":
+              raise SystemExit(f"confirmation must be recover-depfix-{version}")
+          if os.environ["RELEASE_REF"] != f"refs/tags/{tag}":
+              raise SystemExit(f"run this workflow from the existing {tag} tag")
+
+          source = Path("src/depfix/_version.py").read_text(encoding="utf-8")
+          match = re.fullmatch(r'__version__ = "([^"]+)"\n?', source)
+          if match is None or match.group(1) != version:
+              raise SystemExit("tag and package version do not match")
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          if re.search(rf"^## {re.escape(version)} - [0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$", changelog, re.MULTILINE) is None:
+              raise SystemExit(f"CHANGELOG.md has no dated {version} release section")
+          tag_type = subprocess.check_output(["git", "cat-file", "-t", f"refs/tags/{tag}"], text=True).strip()
+          if tag_type != "tag":
+              raise SystemExit(f"{tag} must be an annotated tag")
+          commit = subprocess.check_output(["git", "rev-parse", f"refs/tags/{tag}^{{commit}}"], text=True).strip()
+          if commit != os.environ["RELEASE_SHA"]:
+              raise SystemExit("workflow SHA does not match the annotated tag commit")
+          PY
+      - name: Download and verify the exact PyPI artifacts
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          metadata_url = f"https://pypi.org/pypi/depfix/{version}/json"
+          expected = {f"depfix-{version}-py3-none-any.whl", f"depfix-{version}.tar.gz"}
+          for _ in range(60):
+              try:
+                  with urllib.request.urlopen(metadata_url, timeout=30) as response:
+                      metadata = json.load(response)
+              except urllib.error.HTTPError as error:
+                  if error.code != 404:
+                      raise
+              else:
+                  files = {item["filename"] for item in metadata["urls"]}
+                  if files == expected:
+                      break
+              time.sleep(5)
+          else:
+              raise SystemExit("PyPI does not expose the exact expected artifact set")
+
+          destination = Path("pypi-assets")
+          destination.mkdir()
+          manifest = {}
+          for item in metadata["urls"]:
+              filename = item["filename"]
+              with urllib.request.urlopen(item["url"], timeout=60) as response:
+                  data = response.read()
+              digest = hashlib.sha256(data).hexdigest()
+              if digest != item["digests"]["sha256"]:
+                  raise SystemExit(f"PyPI digest mismatch for {filename}")
+              (destination / filename).write_bytes(data)
+              manifest[filename] = digest
+          Path("pypi-assets.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+          PY
+          for attempt in {1..60}; do
+            if python -m pip install --disable-pip-version-check --no-cache-dir "depfix==${VERSION}"; then
+              break
+            fi
+            if test "$attempt" -eq 60; then
+              echo "PyPI simple index did not expose depfix ${VERSION} in time" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          python -c "import depfix; assert depfix.__version__ == '${VERSION}'"
+          depfix --version
+      - name: Verify the retained draft matches PyPI byte for byte
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          test "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft)" = true || {
+            echo "v${VERSION} must exist as a retained draft" >&2
+            exit 1
+          }
+          gh release download "v${VERSION}" --dir github-assets
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          expected = json.loads(Path("pypi-assets.json").read_text(encoding="utf-8"))
+          paths = [path for path in Path("github-assets").iterdir() if path.is_file()]
+          actual = {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+          if actual != expected:
+              raise SystemExit(f"retained draft assets differ from PyPI: expected {expected}, found {actual}")
+          PY
+      - name: Publish the recovered GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh release edit "v${VERSION}" --draft=false

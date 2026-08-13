@@ -108,6 +108,9 @@ Default section order:
   The complete CI and distribution gate must pass before automation stages a hidden GitHub Release draft, then the
   protected `pypi` environment and OIDC Trusted Publishing may upload those exact artifacts. Make the release public only
   after PyPI verification; never store a PyPI token or publish from a push/tag alone.
+- Initiate production releases through the repository release helper so local/remote identity and destination checks
+  precede tag-bound dispatch. Recovery after a successful upload must have no OIDC authority and may expose only retained
+  draft assets that match the verified PyPI files byte for byte.
 - Keep the local `.env` owner-readable only for explicitly authorized publication; never print, package, or commit it or
   persist its credentials elsewhere.
 - Keep the shared package store inspectable through equivalent Python and CLI flat, duplicate-footprint, and

@@ -59,6 +59,8 @@ class ScanSite:
     isolation: str = "auto"
     allow_unsafe: bool | None = None
     prefer_newest: bool | None = None
+    index_url: str | None = None
+    extra_index_url: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +235,8 @@ class _Visitor(ast.NodeVisitor):
         isolation = "auto"
         allow_unsafe: bool | None = None
         prefer_newest: bool | None = None
+        index_url: str | None = None
+        extra_index_url: tuple[str, ...] | None = None
         for keyword_arg in node.keywords:
             if keyword_arg.arg == "module":
                 module = self._constant(keyword_arg.value)
@@ -278,6 +282,28 @@ class _Visitor(ast.NodeVisitor):
                         )
                     )
                     return
+            if keyword_arg.arg == "index_url":
+                index_url = self._constant(keyword_arg.value)
+                if index_url is None:
+                    self.dynamic.append(
+                        DynamicRequest(
+                            self.relative, node.lineno, node.col_offset, expression, "dynamic index_url= override"
+                        )
+                    )
+                    return
+            if keyword_arg.arg == "extra_index_url":
+                extra_index_url = self._constant_strings(keyword_arg.value)
+                if extra_index_url is None:
+                    self.dynamic.append(
+                        DynamicRequest(
+                            self.relative,
+                            node.lineno,
+                            node.col_offset,
+                            expression,
+                            "dynamic extra_index_url= override",
+                        )
+                    )
+                    return
         if value is None:
             self.dynamic.append(
                 DynamicRequest(
@@ -306,6 +332,8 @@ class _Visitor(ast.NodeVisitor):
                 isolation=isolation,
                 allow_unsafe=allow_unsafe,
                 prefer_newest=prefer_newest,
+                index_url=index_url,
+                extra_index_url=extra_index_url,
             )
         )
 
@@ -476,6 +504,8 @@ class _Visitor(ast.NodeVisitor):
                 prefer_newest = None
             if not isinstance(prefer_newest, bool):
                 prefer_newest = None
+            index_url = self._literal_string_option(node, "index_url")
+            extra_index_url = self._literal_string_sequence_option(node, "extra_index_url")
             self.requests.append(
                 ScanSite(
                     value,
@@ -494,6 +524,8 @@ class _Visitor(ast.NodeVisitor):
                     isolation=isolation,
                     allow_unsafe=allow_unsafe,
                     prefer_newest=prefer_newest,
+                    index_url=index_url,
+                    extra_index_url=extra_index_url,
                 )
             )
 
@@ -520,6 +552,26 @@ class _Visitor(ast.NodeVisitor):
         if isinstance(node, ast.Constant) and isinstance(node.value, bool):
             return node.value
         return None
+
+    @staticmethod
+    def _constant_strings(node: ast.expr) -> tuple[str, ...] | None:
+        try:
+            value = ast.literal_eval(node)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(value, str):
+            return (value,)
+        if isinstance(value, (tuple, list)) and all(isinstance(item, str) for item in value):
+            return tuple(value)
+        return None
+
+    def _literal_string_option(self, call: ast.Call, name: str) -> str | None:
+        option = next((item for item in call.keywords if item.arg == name), None)
+        return self._constant(option.value) if option is not None else None
+
+    def _literal_string_sequence_option(self, call: ast.Call, name: str) -> tuple[str, ...] | None:
+        option = next((item for item in call.keywords if item.arg == name), None)
+        return self._constant_strings(option.value) if option is not None else None
 
 
 def _source_files(root: Path, matcher: pathspec.PathSpec[Pattern] | None, excludes: tuple[str, ...]) -> Iterator[Path]:
@@ -562,6 +614,8 @@ def _literal_option(node: ast.expr) -> str | None:
     except (ValueError, TypeError):
         return None
     if value is None or isinstance(value, (str, bool, int, float)):
+        return json.dumps(value, sort_keys=True)
+    if isinstance(value, (tuple, list)) and all(isinstance(item, str) for item in value):
         return json.dumps(value, sort_keys=True)
     return None
 

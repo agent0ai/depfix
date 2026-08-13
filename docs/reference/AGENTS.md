@@ -17,6 +17,8 @@
   effective defaults from inheriting per-call `None` values.
 - Keep compatible cache-first selection and the inherited `prefer_newest` override aligned across loading signatures,
   project export, environment/project configuration, and CLI help.
+- Keep request-scoped index signatures aligned across sync, async, and standard-import APIs; document that a scoped
+  primary suppresses inherited extras and that prepared manifests reject inapplicable live index arguments.
 - Define `depfix pip install` as grouped shared-store preparation, not a pip/uv environment passthrough, and keep its
   supported requirement-file grammar aligned with `project.install_packages()`.
 - Keep cache inspection signatures, CLI views, provenance fields, duplicate semantics, sizes, and UTC timestamps aligned

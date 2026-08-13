@@ -9,6 +9,7 @@
 - `ci.yml` owns reusable quality, test-matrix, uv-boundary, and distribution checks.
 - `publish-testpypi.yml` owns manual TestPyPI publishing; `publish-pypi.yml` owns the manually dispatched, checked
   GitHub Release and PyPI pipeline.
+- `recover-pypi-release.yml` owns manual completion of a retained GitHub draft after a successful PyPI upload.
 
 ## Local Contracts
 
@@ -23,6 +24,10 @@
 - Build and test distributions without OIDC permission, then pass only that exact two-file artifact set to the protected
   `pypi` environment for publication and verify the public-index installation with bounded retries for PyPI JSON/simple
   index propagation.
+- Recovery shares production concurrency, receives no OIDC token, and cannot upload or replace artifacts. It may publish
+  only an existing draft whose exact filenames and SHA-256 digests match a clean-installable PyPI release.
+- Ordinary CI and the authoritative release gate must run `scripts/validate_workflows.py` so trigger, permission, job-graph,
+  draft-retention, and recovery contracts cannot drift silently.
 - The latest-uv connected gate runs published-package import and cross-version object-boundary probes; ordinary matrix
   tests remain network-free.
 
@@ -32,7 +37,7 @@
 
 ## Verification
 
-- Run `python scripts/release_check.py`, validate workflow YAML, and inspect the workflow diff for permission or trigger
-  expansion.
+- Run `python scripts/validate_workflows.py` and `python scripts/release_check.py`, then inspect the workflow diff for
+  permission or trigger expansion.
 
 ## Child DOX Index

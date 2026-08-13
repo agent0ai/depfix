@@ -9,6 +9,7 @@
 - `conftest.py` owns deterministic artifact fixtures.
 - Test modules group end-to-end, runtime/resolver, public-product, lock/cache, standard-import scope, and live cross-version
   object-boundary behavior.
+- `test_release_tooling.py` owns network-free immutable-tag and tag-safe dispatch regressions for the owner release helper.
 
 ## Local Contracts
 
@@ -26,6 +27,8 @@
   same-version artifact variants, dependency trees, and equivalent Python/CLI inspection and removal behavior.
 - Resolution tests must cover compatible cache reuse across separate and grouped roots, newest-first overrides, cached
   top-level requests, public loading signatures, scanner preservation, and configuration precedence.
+- Scoped-index tests must cover primary-only precedence, grouped and async loading, concurrent isolation, graph identity,
+  exact-manifest rejection, scanner preservation, native-package handling, refresh, and credential redaction.
 - `depfix pip install` tests must prove package arguments and nested requirement/constraint files use grouped Depfix
   resolution, preserve incompatible transitive versions, populate only the shared store, and leave the environment and
   `sys.path` unchanged.
@@ -33,6 +36,8 @@
   delayed failures, and avoid presenting a deliberately selected package set as an ecosystem frequency estimate.
 - Boundary API tests must cover module/class/instance provenance, unmanaged values, exact producer/consumer diagnostics,
   selected parameters, builtin-container recursion, return checking, async preservation, and documented detection gaps.
+- Release-tooling tests must use local temporary Git repositories and must not read credentials, call GitHub, or query
+  package indexes.
 
 ## Work Guidance
 
