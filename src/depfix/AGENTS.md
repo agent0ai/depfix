@@ -70,7 +70,9 @@
   process configuration, and is rejected when an exact prepared manifest is active.
 - Custom indexes prefer PEP 691 JSON but also accept standards-compatible Simple HTML media types. Dispatch by the
   response Content-Type, resolve HTML links against the final project URL, and preserve SHA-256, Requires-Python, yanked,
-  size, index-isolation, and transport policy checks without falling back after valid Simple discovery.
+  size, index-isolation, and transport policy checks without falling back after valid Simple discovery. A selected live
+  artifact without an advertised SHA-256 is downloaded once and bound to its observed SHA-256 and size before inspection;
+  malformed or conflicting advertised hashes remain hard failures, and prepared/offline graphs remain exact.
 - `depfix pip install` and `project.install_packages()` resolve package/requirement-file roots as one store-only group,
   persist an exact cache manifest, materialize verified targets, and never invoke environment installation or import
   activation. Requirement constraints apply to matching roots and dependency edges across every selected graph. The CLI

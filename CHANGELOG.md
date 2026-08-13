@@ -2,6 +2,14 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.9.4 - 2026-08-13
+
+- Fixed grouped custom-index resolution when an otherwise compatible dependency has no advertised artifact SHA-256:
+  live resolution now downloads that selected artifact once, binds its observed SHA-256 and size into the exact graph,
+  and retains strict hash verification for materialization, prepared/offline reuse, and later downloads.
+- Kept malformed and conflicting advertised hashes as hard integrity failures, with regression coverage for the public
+  PyTorch CPU `torch`, `torchvision`, and `setuptools>=77.0.3` dependency edge and ephemeral archive cleanup.
+
 ## 0.9.3 - 2026-08-13
 
 - Corrected the Simple HTML custom-index regression fixture to decode local wheel URLs with platform-native file URL

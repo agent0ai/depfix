@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import urllib.error
@@ -9,17 +10,19 @@ from pathlib import Path
 import pytest
 from packaging.specifiers import SpecifierSet
 
+import depfix.cache as cache_module
 import depfix.resolver as resolver_module
 from depfix._file_urls import file_url_to_path
 from depfix.cache import Cache
 from depfix.config import ImportDeclaration, ProjectConfig
-from depfix.errors import ResolutionError
+from depfix.errors import IntegrityError, ResolutionError
 from depfix.resolver import Resolver
+from depfix.sync import sync_graph
 
 
 class _Response(io.BytesIO):
-    def __init__(self, body: str, content_type: str, url: str, *, length: int | None = None) -> None:
-        super().__init__(body.encode())
+    def __init__(self, body: str | bytes, content_type: str, url: str, *, length: int | None = None) -> None:
+        super().__init__(body.encode() if isinstance(body, str) else body)
         self.headers = {"Content-Type": content_type}
         if length is not None:
             self.headers["Content-Length"] = str(length)
@@ -84,7 +87,7 @@ def test_simple_html_media_types_redirects_metadata_and_hash_filtering(
     assert second["yanked"] is True and second["yanked_reason"] == "bad build"
     assert third["yanked"] is False and third["digests"] == {"sha256": digest_c}
     assert "3.0.0" in releases and releases["3.0.0"][0]["digests"] == {}
-    candidate = resolver._select_pypi("torch", SpecifierSet(), prefer_newest=True)
+    candidate = resolver._select_pypi("torch", SpecifierSet("<3"), prefer_newest=True)
     assert candidate.version == "2.9.0+cpu" and candidate.size == 1234
     assert set(item[1] for item in requests) == {"GET", "HEAD"}
     assert sum(item[1] == "HEAD" for item in requests) == 1
@@ -174,6 +177,156 @@ def test_grouped_pytorch_projects_remain_on_selected_index_without_json_fallback
     assert any(url.endswith("/cpu/torch/") for url in requested)
     assert any(url.endswith("/cpu/torchvision/") for url in requested)
     assert all("pypi.org" not in url and "/json" not in url for url in requested)
+
+
+def test_grouped_pytorch_hashless_setuptools_is_downloaded_once_hashed_and_cleaned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wheel_factory,
+) -> None:
+    setuptools = wheel_factory("setuptools", "78.1.0", {"setuptools.py": "VALUE = 'observed'\n"})
+    torch = wheel_factory(
+        "torch",
+        "2.13.0+cpu",
+        {"torch.py": "VERSION = 'test'\n"},
+        requires=["setuptools>=77.0.3"],
+    )
+    torchvision = wheel_factory(
+        "torchvision",
+        "0.24.0+cpu",
+        {"torchvision.py": "VERSION = 'test'\n"},
+        requires=["torch==2.13.0+cpu"],
+    )
+    wheels = {wheel.name: wheel for wheel in (setuptools, torch, torchvision)}
+    project_wheels = {"setuptools": setuptools, "torch": torch, "torchvision": torchvision}
+    artifact_downloads: list[str] = []
+
+    def open_url(request: str | urllib.request.Request, **_kwargs: object) -> _Response:
+        url = request if isinstance(request, str) else request.full_url
+        method = "GET" if isinstance(request, str) else request.get_method()
+        filename = url.rsplit("/", 1)[-1]
+        if filename in wheels:
+            wheel = wheels[filename]
+            if method == "HEAD":
+                return _Response(b"", "application/octet-stream", url, length=wheel.stat().st_size)
+            artifact_downloads.append(filename)
+            return _Response(wheel.read_bytes(), "application/octet-stream", url)
+        project = url.rstrip("/").rsplit("/", 1)[-1]
+        wheel = project_wheels[project]
+        fragment = "" if project == "setuptools" else f"#sha256={hashlib.sha256(wheel.read_bytes()).hexdigest()}"
+        return _Response(
+            f'<a href="https://download.pytorch.org/whl/{wheel.name}{fragment}">{wheel.name}</a>',
+            "text/html",
+            url,
+        )
+
+    monkeypatch.setattr(resolver_module, "_open_url", open_url)
+    monkeypatch.setattr(cache_module, "_open_url", open_url)
+
+    class Backend:
+        def version(self) -> str:
+            return "test"
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            assert requirement == distribution
+            return {"torch": "2.13.0+cpu", "torchvision": "0.24.0+cpu"}[distribution]
+
+    cache = Cache(tmp_path / "cache")
+    graph = Resolver(
+        cache,
+        index_url="https://download.pytorch.org/whl/cpu",
+        backend=Backend(),
+    ).resolve(
+        ProjectConfig(
+            tmp_path / "grouped.toml",
+            (
+                ImportDeclaration("torch", "torch", api="load_package"),
+                ImportDeclaration("torchvision", "torchvision", api="load_package"),
+            ),
+            {"prefer-newest": True},
+        )
+    )
+
+    observed = hashlib.sha256(setuptools.read_bytes()).hexdigest()
+    setuptools_artifact = next(item for item in graph.artifacts if item.distribution == "setuptools")
+    assert setuptools_artifact.sha256 == observed
+    assert artifact_downloads.count(setuptools.name) == 1
+    sync_graph(graph, cache, offline=True)
+    assert all(cache.has_package(item.sha256) for item in graph.artifacts)
+    assert cache.list_blobs() == []
+    assert not tuple((cache.root / "tmp").glob("live-download-*"))
+
+
+def test_malformed_advertised_sha256_is_not_treated_as_hashless(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = _resolver(tmp_path)
+    monkeypatch.setattr(
+        resolver,
+        "_project_artifact_payload",
+        lambda *_args: {
+            "releases": {
+                "78.1.0": [
+                    {
+                        "filename": "setuptools-78.1.0-py3-none-any.whl",
+                        "packagetype": "bdist_wheel",
+                        "url": "https://packages.example/setuptools.whl",
+                        "size": 10,
+                        "digests": {"sha256": "not-a-digest"},
+                        "requires_python": "",
+                        "yanked": False,
+                    }
+                ]
+            }
+        },
+    )
+
+    with pytest.raises(ResolutionError, match="No compatible artifact") as error:
+        resolver._select_pypi("setuptools", SpecifierSet(">=77.0.3"), prefer_newest=True)
+
+    assert "malformed SHA-256" in str(error.value)
+
+
+def test_conflicting_advertised_sha256_remains_a_hard_integrity_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wheel_factory,
+) -> None:
+    wheel = wheel_factory("setuptools", "78.1.0", {"setuptools.py": "VALUE = 1\n"})
+    resolver = _resolver(tmp_path)
+    monkeypatch.setattr(
+        resolver,
+        "_project_artifact_payload",
+        lambda *_args: {
+            "releases": {
+                "78.1.0": [
+                    {
+                        "filename": wheel.name,
+                        "packagetype": "bdist_wheel",
+                        "url": "https://packages.example/setuptools.whl",
+                        "size": wheel.stat().st_size,
+                        "digests": {"sha256": "0" * 64},
+                        "requires_python": "",
+                        "yanked": False,
+                    }
+                ]
+            }
+        },
+    )
+
+    def open_url(request: str | urllib.request.Request, **_kwargs: object) -> _Response:
+        url = request if isinstance(request, str) else request.full_url
+        return _Response(wheel.read_bytes(), "application/octet-stream", url)
+
+    monkeypatch.setattr(cache_module, "_open_url", open_url)
+    candidate = resolver._select_pypi("setuptools", SpecifierSet("==78.1.0"), prefer_newest=True)
+
+    with pytest.raises(IntegrityError, match="hash mismatch"):
+        resolver._resolve_candidate(candidate, extras=(), path="request:setuptools", ancestors={}, prefer_newest=True)
+
+    assert candidate.sha256 == "0" * 64
+    assert resolver.cache.list_blobs() == []
 
 
 def test_unknown_simple_media_type_is_reported_without_parsing_as_json(

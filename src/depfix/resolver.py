@@ -804,6 +804,23 @@ class Resolver:
                 shutil.rmtree(extracted, ignore_errors=True)
 
     def _prepare_selected_candidate(self, candidate: _Candidate) -> _Candidate:
+        if not candidate.sha256:
+            blob, digest, final_url = self.cache.fetch_unpinned(
+                candidate.url,
+                allowed_hosts=self._allowed_hosts,
+                allow_insecure=self._allow_insecure,
+            )
+            candidate.sha256 = digest
+            candidate.size = blob.stat().st_size
+            source = candidate.source
+            if source is not None:
+                candidate.source = replace(
+                    source,
+                    url=candidate.url,
+                    final_url=final_url,
+                    sha256=digest,
+                    mutable=False,
+                )
         if candidate.filename.endswith(".whl"):
             return candidate
         if not bool(self._policy.get("allow-build", True)):
@@ -994,8 +1011,8 @@ class Resolver:
                     rejections.append(f"{filename}: Requires-Python {requires_python}")
                     continue
                 digest = item.get("digests", {}).get("sha256")
-                if not digest:
-                    rejections.append(f"{filename}: missing SHA-256")
+                if digest is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", str(digest)):
+                    rejections.append(f"{filename}: malformed SHA-256")
                     continue
                 candidate = _Candidate(
                     str(canonicalize_name(distribution)),
@@ -1003,12 +1020,15 @@ class Resolver:
                     item["url"],
                     filename,
                     int(item["size"]),
-                    digest,
+                    str(digest).lower() if digest is not None else "",
                     requires_python,
                     bool(item.get("yanked", False)),
                     item.get("yanked_reason") or "",
                 )
-                cached = int(self.cache.has_package(digest) or f"sha256:{digest}" in self._artifacts)
+                cached = int(
+                    bool(candidate.sha256)
+                    and (self.cache.has_package(candidate.sha256) or f"sha256:{candidate.sha256}" in self._artifacts)
+                )
                 if item.get("packagetype") == "bdist_wheel" and filename.endswith(".whl"):
                     try:
                         _name, _version, _build, wheel_tags = parse_wheel_filename(filename)
@@ -1046,7 +1066,7 @@ class Resolver:
                 reverse=True,
             )
         selected = candidates[0][5]
-        if selected.size <= 0:
+        if selected.size <= 0 and selected.sha256:
             selected.size = self._remote_size(selected.url)
         self._candidate_cache[key] = selected
         return selected
