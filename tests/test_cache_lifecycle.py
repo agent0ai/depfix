@@ -75,11 +75,13 @@ def test_inventory_records_installation_size_and_successful_import_use(tmp_path:
     runtime = DepfixRuntime(graph, cache).activate()
     assert runtime.import_for_node(graph.nodes[0].id, "cache_demo").VALUE == 7
     used = cache.list_packages()[0]
+    assert used.active is True
     runtime.deactivate()
 
     assert used.installed_at == installed[0].installed_at
     assert used.last_used_at is not None
     assert used.last_used_at >= used.installed_at
+    assert cache.list_packages()[0].active is False
 
 
 def test_cleanup_reclaims_stale_artifact_and_all_targets(tmp_path: Path, wheel_factory) -> None:
@@ -213,11 +215,18 @@ def test_python_and_cli_cache_inventory_cleanup_and_removal(
     artifact = graph.artifacts[0]
 
     assert depfix.list_cached_packages(cache_dir=cache_dir) == cache.list_packages()
-    exit_code = cli_main(["--json", "--cache-dir", str(cache_dir), "cache", "list"])
+    exit_code = cli_main(["--json", "--cache-dir", str(cache_dir), "list"])
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 0
     assert payload[0]["distribution"] == "cache-demo"
     assert payload[0]["size_bytes"] > 0
+    assert payload[0]["active"] is False
+
+    exit_code = cli_main(["--cache-dir", str(cache_dir), "cache", "list"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "cache-demo" in captured.out
+    assert "'cache list' is deprecated; use 'depfix list'" in captured.err
 
     preview = depfix.remove_cached_package("cache-demo", version="1.2.3", cache_dir=cache_dir, dry_run=True)
     assert preview.dry_run is True and len(preview.removed) == 1
@@ -291,14 +300,23 @@ def test_inventory_exposes_command_provenance_and_dependency_trees(
     assert installation.roots[0].dependencies[0].package.distribution == "inventory-dependency"
     assert all(package.reasons[0].command == command for package in inventory.packages)
 
-    exit_code = cli_main(["--cache-dir", str(cache_dir), "cache", "list", "--view", "tree"])
+    exit_code = cli_main(["--cache-dir", str(cache_dir), "list"])
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "inventory-root==1.0.0" in output
+    assert "inventory-dependency==2.0.0" in output
+    assert "inventory-root" in output
+    assert "inventory-dependency" in output
+    assert command in output
+
+    exit_code = cli_main(["--cache-dir", str(cache_dir), "tree"])
     output = capsys.readouterr().out
     assert exit_code == 0
     assert command in output
     assert "└── inventory-root==1.0.0" in output
     assert "inventory-dependency==2.0.0" in output
 
-    exit_code = cli_main(["cache", "list", "--view", "tree", "--cache-dir", str(cache_dir), "--json"])
+    exit_code = cli_main(["tree", "--cache-dir", str(cache_dir), "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 0
     assert payload[0]["reason"]["command"] == command
@@ -339,11 +357,44 @@ def test_inventory_reports_code_locations_and_same_version_artifact_variants(
     assert Path(first_reason.source_file).resolve() == Path(__file__).resolve()
     assert first_reason.source_line == first_line
 
-    exit_code = cli_main(["--cache-dir", str(cache_dir), "cache", "list", "--view", "duplicates"])
+    exit_code = cli_main(["--cache-dir", str(cache_dir), "list", "--view", "duplicates"])
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "same-version variants: 1.0.0" in output
     assert "variant-demo — 2 artifacts" in output
+
+
+def test_cached_resolutions_and_explicit_manifest_inspection(
+    tmp_path: Path,
+    wheel_factory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    manifest = tmp_path / "imports.lock"
+    write_manifest(graph, manifest)
+    resolution = cache.root / "resolutions" / "request-identity" / "imports.lock"
+    write_manifest(graph, resolution)
+
+    assert cli_main(["--json", "--cache-dir", str(cache_dir), "cache", "resolutions"]) == 0
+    resolutions = json.loads(capsys.readouterr().out)
+    assert resolutions[0]["manifest_id"] == graph.graph_id
+    assert resolutions[0]["packages"] == ["cache-demo==1.2.3"]
+    assert resolutions[0]["requests"]
+    assert "imports.lock" not in resolutions[0]
+
+    assert cli_main(["--json", "list", "--manifest", str(manifest)]) == 0
+    requests = json.loads(capsys.readouterr().out)
+    assert requests[0]["alias"] == "demo"
+
+    assert cli_main(["--json", "tree", "--manifest", str(manifest)]) == 0
+    tree = json.loads(capsys.readouterr().out)
+    assert tree["manifest_id"] == graph.graph_id
+    assert tree["nodes"][0]["distribution"] == "cache-demo"
+
+    assert cli_main(["--json", "list", str(manifest)]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)[0]["alias"] == "demo"
+    assert "positional manifest inspection is deprecated" in captured.err
 
 
 def test_explicit_and_daily_cleanup_use_the_same_retention_contract(

@@ -28,11 +28,12 @@ successfully synchronized, it also records the retained roots, dependency edges,
 secret-redacted reason: a canonical Depfix command or the calling script path and line. Equivalent graph/origin records
 share one identity, so repeated runs do not grow provenance indefinitely.
 
-`depfix cache list` combines those records with the materialized package targets. Its duplicate view groups physical
+`depfix list` combines those records with the materialized package targets. Its duplicate view groups physical
 packages by normalized distribution; exact SHA-256 content cannot be
 duplicated, while different versions and distinct artifacts for the same version can coexist. Its tree view reconstructs
-currently retained installation roots and dependency edges without requiring the original project or requirements file
-to remain present. `depfix.inspect_cache()` exposes the same flat, duplicate, and tree structures to Python. Legacy
+currently retained installation roots and dependency edges through `depfix tree`, without requiring the original project
+or requirements file to remain present. Cached live-resolution manifests are separate operational records exposed by
+`depfix cache resolutions`. `depfix.inspect_cache()` exposes the same flat, duplicate, and tree structures to Python. Legacy
 installed targets without lifecycle/provenance metadata remain visible as `unknown` artifacts, use their filesystem
 modification time as the conservative installation time, and simply have no recorded reason/tree.
 

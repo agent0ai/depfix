@@ -37,6 +37,9 @@
 - Successful graph synchronization records deduplicated, secret-redacted installation origins and enough root/node data
   to inspect flat packages, distribution-level duplicate footprint, and top-down dependency trees without the original
   project. Exact artifact hashes remain single physical entries; same-version variants require distinct hashes.
+- Top-level `list` and `tree` inspect installed shared-store artifacts and provenance trees. Manifest inspection requires
+  explicit `--manifest` syntax (with migration guidance for positional compatibility), while `cache resolutions` owns
+  live-resolution record inspection and `cache list` remains only a deprecated compatibility alias.
 - Decode local `file:` URLs with platform-native rules, including Windows drive-letter and UNC path forms.
 - Realm imports preserve module identity and prevent undeclared cross-realm leakage.
 - `boundaries.py` owns opt-in provenance inspection, exact graph/node assertions, and sync/async boundary decorators.

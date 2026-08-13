@@ -113,8 +113,10 @@ Default section order:
   draft assets that match the verified PyPI files byte for byte.
 - Keep the local `.env` owner-readable only for explicitly authorized publication; never print, package, or commit it or
   persist its credentials elsewhere.
-- Keep the shared package store inspectable through equivalent Python and CLI flat, duplicate-footprint, and
-  installation-tree views. Retain secret-safe command or source-path/line provenance for successful installations.
+- Keep the shared package store inspectable through equivalent Python and top-level CLI flat, duplicate-footprint, and
+  installation-tree views. `depfix list` and `depfix tree` own installed-state inspection; cache-prefixed inspection owns
+  cached live-resolution records and maintenance. Retain secret-safe command or source-path/line provenance for
+  successful installations.
 
 ## Child DOX Index
 

@@ -243,8 +243,9 @@ depfix.remove_cached_package(
 ```
 
 `CachedPackage` reports normalized `distribution`, `version`, `artifact_hash`, `filename`, UTC `installed_at`, optional
-UTC `last_used_at`, total `size_bytes`, and zero or more `reasons`. Size is the retained operational package footprint,
-including materialized environment targets but excluding ephemeral downloads and build inputs. Each
+UTC `last_used_at`, total `size_bytes`, live-runtime `active` state, and zero or more `reasons`. Size is the retained
+operational package footprint, including materialized environment targets but excluding ephemeral downloads and build
+inputs. Each
 `PackageInstallReason` includes a kind,
 secret-redacted description, UTC `recorded_at`, and, when available, the originating command or Python source path and
 line plus the exact manifest path.

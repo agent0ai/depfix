@@ -27,8 +27,9 @@
 - Cache lifecycle tests must cover installation/use timestamps, total reclaimed targets, returning-graph reservations,
   active-runtime leases, read-only file/tree removal, retention configuration precedence, code/command provenance,
   same-version artifact variants, dependency trees, installed-payload corruption, ephemeral archive reconciliation,
-  abandoned download ownership, stale extraction/build staging, dry-run immutability, and equivalent Python/CLI
-  inspection and removal behavior. uv-boundary tests must prove Depfix uses and promptly removes its own subprocess cache,
+  abandoned download ownership, stale extraction/build staging, dry-run immutability, top-level installed inventory/tree
+  commands, explicit manifest inspection, live-resolution inspection, compatibility migration, and equivalent Python/CLI
+  removal behavior. uv-boundary tests must prove Depfix uses and promptly removes its own subprocess cache,
   preserves ambient user-owned uv caches, and reclaims only dead-owner crash leftovers.
 - Bundle and online manifest-repair tests must cover exact hash-verified reacquisition of source-built artifacts after
   their ephemeral wheels are removed; offline repair must still fail clearly when no complete target or bundle exists.

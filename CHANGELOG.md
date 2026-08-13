@@ -2,6 +2,14 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.9.5 - 2026-08-13
+
+- Made `depfix list` and `depfix tree` the primary installed-package inventory and provenance-tree commands, added
+  metadata-rich cached live-resolution inspection under `depfix cache resolutions`, and retained explicit manifest
+  inspection through `--manifest` with migration guidance for positional compatibility forms.
+- Retained `depfix cache list` as a deprecated migration alias and added active-runtime state to structured and human
+  installed-package inventory.
+
 ## 0.9.4 - 2026-08-13
 
 - Fixed grouped custom-index resolution when an otherwise compatible dependency has no advertised artifact SHA-256:

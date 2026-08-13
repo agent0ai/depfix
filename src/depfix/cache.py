@@ -67,6 +67,7 @@ class CachedPackage:
     last_used_at: datetime | None
     size_bytes: int
     reasons: tuple[PackageInstallReason, ...] = ()
+    active: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -971,6 +972,7 @@ class Cache:
                 _directory_size(target)
                 + (source_blob.stat().st_size if source_blob is not None and source_blob.is_file() else 0)
             ),
+            active=self._has_live_lease(digest),
             reasons=reasons,
         )
 

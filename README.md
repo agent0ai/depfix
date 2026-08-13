@@ -276,14 +276,15 @@ protected, so returning to an older project does not delete and immediately rein
 Downloaded wheels and source archives are temporary inputs: successful preparation removes them, while later install and
 cleanup activity safely reclaims abandoned download parts. Cross-project reuse comes from the complete unpacked store.
 
-Inspect or clean the store explicitly from the CLI:
+Inspect installed packages or clean the store explicitly from the CLI:
 
 ```bash
-depfix cache list
-depfix cache list --view duplicates
-depfix cache list --view tree
+depfix list
+depfix list --view duplicates
+depfix tree
 depfix cache cleanup --days 30
 depfix cache remove requests --version 2.31.0
+depfix cache resolutions
 ```
 
 The package view includes size, installation/last-use dates, artifact identity, and why the package was installed. The

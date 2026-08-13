@@ -20,7 +20,16 @@ Primary workflow:
 
 Inspection and operation:
 
-- `scan`, `check`, `verify`, `tree`, `show`, `why`, `list`, `doctor`.
+- `depfix list [--view packages|duplicates]` reports installed package artifacts in the shared store. The package view
+  includes distribution, version, retained size, full artifact identity in JSON (a concise prefix in human output), UTC
+  installation and last-use timestamps, active-runtime state, and every recorded installation reason. Add `--sort
+  name|size|installed|used` to order the flat view.
+- `depfix tree` groups retained installed roots by installation reason and renders their dependency trees. It includes
+  roots installed by the pip-compatible command, loading APIs, and exact manifest preparation.
+- `depfix list --manifest MANIFEST` lists requests in an exact project manifest; `depfix tree --manifest MANIFEST`
+  displays that manifest's exact nodes and dependency edges. The older positional `list MANIFEST` and `tree MANIFEST`
+  forms remain compatibility aliases and emit migration guidance.
+- `scan`, `check`, `verify`, `show`, `why`, `doctor` provide the remaining inspection operations.
 - `fetch SPECIFIER` prepares a live request.
 - `run SCRIPT [ARGS...]` or `run -m MODULE [ARGS...]` activates optional prepared state before execution.
 - `migrate requirements.txt` or `migrate pyproject.toml` creates reviewable dynamic declarations.
@@ -34,13 +43,12 @@ Inspection and operation:
   dependency artifacts, the complete package-artifact inventory in the shared store, and its path. Exact warm graphs are
   reported as reused; zero dependencies are omitted from the line. `--json` retains the complete structured install
   result. `depfix pip --version` reports the uv backend version.
-- `cache dir` prints the shared cache path. `cache list [--view packages]` reports each installed distribution/version
-  with size, artifact hash, UTC installation/last-use timestamps, and installation reason. Add `--sort
-  name|size|installed|used` to order this flat view.
-- `cache list --view duplicates` groups distributions with multiple physical artifacts, including different versions and
-  distinct same-version artifact hashes, and ranks their additional footprint. `cache list --view tree` groups retained
-  roots by installation reason and renders their dependencies with indentation. Every view supports `--json` with the
-  equivalent structured data.
+- `cache dir` prints the shared store path. `cache resolutions` reports cached live-resolution identity, requests,
+  selected packages, policy mode, creator version, and modification time; malformed records are identified without
+  hiding healthy records.
+- `cache list [--view packages|duplicates|tree]` remains a deprecated compatibility alias and prints the corresponding
+  `depfix list` or `depfix tree` migration command. Every installed and resolution view supports `--json` with equivalent
+  structured data.
 - `cache cleanup [--days N] [--dry-run]` removes inactive artifacts older than the configured 30-day default.
 - `cache remove PACKAGE [--version VERSION] [--artifact SHA256] [--dry-run]` removes an exact package selection while
   preserving artifacts being prepared or leased by active runtimes.

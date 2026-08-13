@@ -15,7 +15,7 @@ import sysconfig
 import tomllib
 import traceback
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -107,15 +107,28 @@ def _parser() -> argparse.ArgumentParser:
     check.add_argument("--manifest", type=Path, default=Path(".depfix/imports.lock"))
     check.add_argument("--offline", action="store_true")
 
-    tree = commands.add_parser("tree", help="display exact nodes and dependency edges")
-    tree.add_argument("manifest", nargs="?", type=Path, default=Path(".depfix/imports.lock"))
+    tree = commands.add_parser("tree", help="show installed roots and dependency trees")
+    tree.add_argument("legacy_manifest", nargs="?", type=Path, metavar="MANIFEST", help=argparse.SUPPRESS)
+    tree.add_argument("--manifest", type=Path, help="inspect dependency nodes in one project manifest")
     show = commands.add_parser("show", help="resolve and display one package request")
     show.add_argument("specifier")
     why = commands.add_parser("why", help="explain why a distribution is present")
     why.add_argument("package")
     why.add_argument("--manifest", type=Path, default=Path(".depfix/imports.lock"))
-    listing = commands.add_parser("list", help="list requests or cached live resolutions")
-    listing.add_argument("manifest", nargs="?", type=Path)
+    listing = commands.add_parser("list", help="show packages installed in the shared store")
+    listing.add_argument("legacy_manifest", nargs="?", type=Path, metavar="MANIFEST", help=argparse.SUPPRESS)
+    listing.add_argument("--manifest", type=Path, help="inspect requests in one project manifest")
+    listing.add_argument(
+        "--view",
+        choices=("packages", "duplicates"),
+        default="packages",
+        help="flat installed packages or duplicate package footprint",
+    )
+    listing.add_argument(
+        "--sort",
+        choices=("name", "size", "installed", "used"),
+        help="sort installed packages; defaults to name",
+    )
     commands.add_parser("doctor", help="diagnose backend, cache, manifest, and native policy")
 
     migrate = commands.add_parser("migrate", help="import roots from requirements or pyproject metadata")
@@ -162,7 +175,7 @@ def _parser() -> argparse.ArgumentParser:
     cache_commands = cache.add_subparsers(dest="cache_command", required=True)
     for name in ("dir", "prune", "clean", "verify"):
         cache_commands.add_parser(name)
-    cache_list = cache_commands.add_parser("list", help="inspect installed packages and their origins")
+    cache_list = cache_commands.add_parser("list", help="deprecated alias for depfix list/tree")
     cache_list.add_argument(
         "--view",
         choices=("packages", "duplicates", "tree"),
@@ -182,10 +195,12 @@ def _parser() -> argparse.ArgumentParser:
     remove.add_argument("--version")
     remove.add_argument("--artifact")
     remove.add_argument("--dry-run", action="store_true")
+    cache_resolutions = cache_commands.add_parser("resolutions", help="inspect cached live-resolution records")
     for command in commands.choices.values():
         _common_output_options(command)
     _common_output_options(pip_install)
     _common_output_options(cache_list)
+    _common_output_options(cache_resolutions)
     return parser
 
 
@@ -331,14 +346,20 @@ def _dispatch(args: argparse.Namespace) -> object | None:
     if args.command == "check":
         return _check(args.project, args.manifest, args.offline)
     if args.command == "tree":
-        return _tree(load_manifest(args.manifest.resolve()))
+        manifest = _selected_manifest(args)
+        if manifest is not None:
+            return _tree(load_manifest(manifest.resolve()))
+        return _installed_listing(args.cache_dir, view="tree")
     if args.command == "show":
         package = load_package(args.specifier, prefer_newest=args.prefer_newest)
         return _package_dict(package)
     if args.command == "why":
         return _why(load_manifest(args.manifest.resolve()), args.package)
     if args.command == "list":
-        return _list(args.manifest)
+        manifest = _selected_manifest(args)
+        if manifest is not None:
+            return _manifest_list(manifest)
+        return _installed_listing(args.cache_dir, view=args.view, sort=args.sort)
     if args.command == "doctor":
         return _doctor(args.cache_dir)
     if args.command == "migrate":
@@ -424,23 +445,80 @@ def _why(graph: Any, package: str) -> list[dict[str, object]]:
     return result
 
 
-def _list(manifest: Path | None) -> object:
-    settings = resolve_settings(discover=False)
-    cache = Cache(settings.cache_dir)
-    if manifest is not None:
-        graph = load_manifest(manifest.resolve())
-        return [
-            {
-                "alias": item.name,
-                "specifier": item.specifier,
-                "normalized": item.normalized_specifier,
-                "api": item.api,
-                "module": item.module,
-            }
-            for item in graph.aliases
-        ]
-    root = cache.root / "resolutions"
-    return sorted(str(path) for path in root.glob("*/imports.lock")) if root.exists() else []
+def _selected_manifest(args: argparse.Namespace) -> Path | None:
+    explicit: Path | None = args.manifest
+    legacy: Path | None = args.legacy_manifest
+    if explicit is not None and legacy is not None:
+        raise ValueError("choose either --manifest MANIFEST or the legacy positional MANIFEST, not both")
+    if legacy is not None:
+        print(
+            f"depfix: positional manifest inspection is deprecated; use '{args.command} --manifest {legacy}'",
+            file=sys.stderr,
+        )
+    return explicit or legacy
+
+
+def _manifest_list(manifest: Path) -> object:
+    graph = load_manifest(manifest.resolve())
+    return [
+        {
+            "alias": item.name,
+            "specifier": item.specifier,
+            "normalized": item.normalized_specifier,
+            "api": item.api,
+            "module": item.module,
+        }
+        for item in graph.aliases
+    ]
+
+
+def _installed_listing(cache_dir: Path | None, *, view: str, sort: str | None = None) -> _CacheListing:
+    settings = resolve_settings(cache_dir=cache_dir, discover=True)
+    inventory = Cache(settings.cache_dir).inventory()
+    if view == "duplicates":
+        value: object = inventory.duplicates
+    elif view == "tree":
+        value = inventory.installations
+    else:
+        packages = inventory.packages
+        if sort == "size":
+            packages = tuple(sorted(packages, key=lambda item: (-item.size_bytes, item.distribution, item.version)))
+        elif sort == "installed":
+            packages = tuple(sorted(packages, key=lambda item: item.installed_at, reverse=True))
+        elif sort == "used":
+            packages = tuple(sorted(packages, key=lambda item: item.last_used_at or item.installed_at, reverse=True))
+        value = packages
+    return _CacheListing(view, value, inventory.total_size_bytes)
+
+
+def _cached_resolutions(cache_dir: Path | None) -> _ResolutionListing:
+    settings = resolve_settings(cache_dir=cache_dir, discover=True)
+    root = Cache(settings.cache_dir).root / "resolutions"
+    records: list[dict[str, object]] = []
+    if root.is_dir():
+        for path in sorted(root.glob("*/imports.lock")):
+            try:
+                graph = load_manifest(path)
+                records.append(
+                    {
+                        "resolution": path.parent.name,
+                        "manifest_id": graph.graph_id,
+                        "mode": str(graph.policy.get("mode", "unknown")),
+                        "requests": [item.normalized_specifier or item.specifier for item in graph.aliases],
+                        "packages": [f"{item.distribution}=={item.version}" for item in graph.artifacts],
+                        "created_by": graph.created_by,
+                        "modified_at": datetime.fromtimestamp(path.stat().st_mtime, UTC),
+                    }
+                )
+            except (DepfixError, OSError, ValueError, KeyError) as exc:
+                records.append(
+                    {
+                        "resolution": path.parent.name,
+                        "valid": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+    return _ResolutionListing(tuple(records))
 
 
 def _doctor(cache_dir: Path | None) -> dict[str, object]:
@@ -509,6 +587,11 @@ class _CacheListing:
     view: str
     value: object
     total_size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolutionListing:
+    records: tuple[dict[str, object], ...]
 
 
 def _pip_install(args: argparse.Namespace) -> object:
@@ -819,27 +902,13 @@ def _cache(args: argparse.Namespace) -> object:
     if command == "dir":
         return {"path": str(cache.root)}
     if command == "list":
-        inventory = cache.inventory()
+        replacement = "depfix tree" if args.view == "tree" else "depfix list"
         if args.view == "duplicates":
-            value: object = inventory.duplicates
-        elif args.view == "tree":
-            value = inventory.installations
-        else:
-            packages = inventory.packages
-            if args.sort == "size":
-                packages = tuple(sorted(packages, key=lambda item: (-item.size_bytes, item.distribution, item.version)))
-            elif args.sort == "installed":
-                packages = tuple(sorted(packages, key=lambda item: item.installed_at, reverse=True))
-            elif args.sort == "used":
-                packages = tuple(
-                    sorted(
-                        packages,
-                        key=lambda item: item.last_used_at or item.installed_at,
-                        reverse=True,
-                    )
-                )
-            value = packages
-        return _CacheListing(args.view, value, inventory.total_size_bytes)
+            replacement += " --view duplicates"
+        print(f"depfix: 'cache list' is deprecated; use '{replacement}'", file=sys.stderr)
+        return _installed_listing(args.cache_dir, view=args.view, sort=args.sort)
+    if command == "resolutions":
+        return _cached_resolutions(args.cache_dir)
     if command == "verify":
         cache.reconcile_intermediates()
         return {"verified": cache.verify_packages()}
@@ -894,6 +963,12 @@ def _print_result(value: object, *, as_json: bool) -> None:
             print(json.dumps(_serialize(value.value), sort_keys=True))
         else:
             print(_render_cache_listing(value))
+        return
+    if isinstance(value, _ResolutionListing):
+        if as_json:
+            print(json.dumps(_serialize(value.records), sort_keys=True))
+        else:
+            print(_render_resolutions(value))
         return
     if isinstance(value, PackageInstallResult) and not as_json:
         print(_render_package_install(value))
@@ -966,17 +1041,17 @@ def _render_cache_listing(listing: _CacheListing) -> str:
     assert isinstance(packages, tuple)
     if not packages:
         return "No packages are installed in the Depfix store."
-    rows = [("PACKAGE", "VERSION", "SIZE", "INSTALLED", "LAST USED", "ARTIFACT", "REASON")]
+    rows = [("PACKAGE", "SIZE", "INSTALLED", "LAST USED", "ACTIVE", "ARTIFACT", "REASON")]
     for package in packages:
         assert isinstance(package, CachedPackage)
-        reason = _reason_text(package.reasons[0]) if package.reasons else "unknown"
+        reason = " | ".join(_reason_text(item) for item in package.reasons) if package.reasons else "unknown"
         rows.append(
             (
-                package.distribution,
-                package.version,
+                f"{package.distribution}=={package.version}",
                 _format_size(package.size_bytes),
                 _format_date(package.installed_at),
                 _format_date(package.last_used_at),
+                "yes" if package.active else "no",
                 package.artifact_hash[:12],
                 reason,
             )
@@ -991,13 +1066,39 @@ def _render_cache_listing(listing: _CacheListing) -> str:
     return "\n".join(rendered)
 
 
+def _render_resolutions(listing: _ResolutionListing) -> str:
+    if not listing.records:
+        return "No cached live-resolution records."
+    lines = [f"Cached live resolutions: {len(listing.records)}"]
+    for record in listing.records:
+        if record.get("valid") is False:
+            lines.append(f"\n{record['resolution']}  invalid  {record['error']}")
+            continue
+        packages = record["packages"]
+        requests = record["requests"]
+        modified_at = record["modified_at"]
+        assert isinstance(packages, list) and isinstance(requests, list) and isinstance(modified_at, datetime)
+        lines.append(
+            f"\n{record['resolution']}  {_format_date(modified_at)}  {len(requests)} requests  {len(packages)} packages"
+        )
+        lines.append(f"  manifest: {record['manifest_id']}  mode: {record['mode']}  created by: {record['created_by']}")
+        if requests:
+            lines.append("  requests: " + ", ".join(str(item) for item in requests))
+        if packages:
+            lines.append("  packages: " + ", ".join(str(item) for item in packages))
+    return "\n".join(lines)
+
+
 def _render_package_node(node: CachedPackageNode, prefix: str, last: bool, lines: list[str]) -> None:
     branch = "└── " if last else "├── "
     package = node.package
-    repeated = " (already shown)" if node.repeated else ""
+    states = ["active"] if package.active else []
+    if node.repeated:
+        states.append("already shown")
+    suffix = f" ({', '.join(states)})" if states else ""
     lines.append(
         f"{prefix}{branch}{package.distribution}=={package.version}  {_format_size(package.size_bytes)}  "
-        f"installed {_format_date(package.installed_at)}  used {_format_date(package.last_used_at)}{repeated}"
+        f"installed {_format_date(package.installed_at)}  used {_format_date(package.last_used_at)}{suffix}"
     )
     child_prefix = prefix + ("    " if last else "│   ")
     for index, child in enumerate(node.dependencies):

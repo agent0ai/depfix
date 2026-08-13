@@ -19,6 +19,8 @@
 - Installation provenance is secret-redacted and graph-aware: deduplicate equivalent origins, retain command or source
   path/line reasons, distinguish content identity from same-version artifact variants, and support flat, duplicate, and
   top-down dependency-tree inspection without the originating project files.
+- Present materialized package targets as installed packages through top-level list/tree commands; reserve cache-oriented
+  inspection terminology for reusable live-resolution records and maintenance operations.
 - Automatic retention defaults to 30 unused days, runs at most daily outside the foreground import path, and shares its
   selection/removal rules with the Python and CLI cache APIs.
 
