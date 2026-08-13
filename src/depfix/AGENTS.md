@@ -59,7 +59,8 @@
   process configuration, and is rejected when an exact prepared manifest is active.
 - `depfix pip install` and `project.install_packages()` resolve package/requirement-file roots as one store-only group,
   persist an exact cache manifest, materialize verified targets, and never invoke environment installation or import
-  activation. Requirement constraints apply to matching roots and dependency edges across every selected graph.
+  activation. Requirement constraints apply to matching roots and dependency edges across every selected graph. The CLI
+  renders one compact, identity-deduplicated store summary by default and retains the complete result under `--json`.
 - Exact `install_manifest()` preparation never resolves or builds; live grouped package installation may do both before
   writing its exact stored manifest.
 - Public failures use typed, credential-redacted `DepfixError` subclasses.

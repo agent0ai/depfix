@@ -30,7 +30,10 @@ Inspection and operation:
   dependency nodes instead of forcing one environment-wide version. `-c/--constraint`, nested requirement/constraint
   files, `--index-url`, repeated `--extra-index-url`, hashes, local `-e` paths, `--offline`, and `--refresh` are supported.
   `-U/--upgrade` is equivalent to `--prefer-newest`. Unsupported pip environment options fail explicitly rather than
-  being forwarded. `depfix pip --version` reports the uv backend version.
+  being forwarded. Default output is one line reporting distinct requested package artifacts, distinct transitive
+  dependency artifacts, the complete package-artifact inventory in the shared store, and its path. Exact warm graphs are
+  reported as reused; zero dependencies are omitted from the line. `--json` retains the complete structured install
+  result. `depfix pip --version` reports the uv backend version.
 - `cache dir` prints the shared cache path. `cache list [--view packages]` reports each installed distribution/version
   with size, artifact hash, UTC installation/last-use timestamps, and installation reason. Add `--sort
   name|size|installed|used` to order this flat view.

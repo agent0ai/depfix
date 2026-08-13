@@ -26,7 +26,14 @@ from .aliases import generate_aliases
 from .cache import Cache, CachedInstallation, CachedPackage, CachedPackageNode, PackageInstallReason
 from .errors import DepfixError
 from .manifest import load_manifest
-from .project import create_bundle, export_project, install_manifest, install_packages, verify_manifest
+from .project import (
+    PackageInstallResult,
+    create_bundle,
+    export_project,
+    install_manifest,
+    install_packages,
+    verify_manifest,
+)
 from .scanner import scan_project
 from .settings import resolve_settings
 from .uv_backend import UvBackend
@@ -889,6 +896,9 @@ def _print_result(value: object, *, as_json: bool) -> None:
         else:
             print(_render_cache_listing(value))
         return
+    if isinstance(value, PackageInstallResult) and not as_json:
+        print(_render_package_install(value))
+        return
     serialized = _serialize(value)
     if as_json:
         print(json.dumps(serialized, sort_keys=True))
@@ -896,6 +906,22 @@ def _print_result(value: object, *, as_json: bool) -> None:
         print(json.dumps(serialized, indent=2, sort_keys=True))
     else:
         print(serialized)
+
+
+def _render_package_install(result: PackageInstallResult) -> str:
+    graph = load_manifest(result.manifest)
+    nodes = graph.node_index
+    root_artifacts = {nodes[alias.node].artifact for alias in graph.aliases}
+    dependency_count = len({artifact.id for artifact in graph.artifacts} - root_artifacts)
+    root_count = len(root_artifacts)
+    inventory_count = len(Cache(result.store.parent).list_packages())
+    roots = f"{root_count} {'package' if root_count == 1 else 'packages'}"
+    dependencies = (
+        f" + {dependency_count} {'dependency' if dependency_count == 1 else 'dependencies'}" if dependency_count else ""
+    )
+    action = "reused" if result.warm else "installed"
+    inventory = f"{inventory_count} {'package' if inventory_count == 1 else 'packages'} total"
+    return f"{roots}{dependencies} {action}, {inventory} in {result.store}"
 
 
 def _render_cache_listing(listing: _CacheListing) -> str:

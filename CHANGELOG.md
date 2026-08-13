@@ -2,6 +2,12 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.8.1 - 2026-08-13
+
+- Replaced the default `depfix pip install` JSON block with one compact line reporting distinct requested packages,
+  transitive dependencies, the complete shared-store inventory, and its path; exact warm installs report reuse, while
+  `--json` retains the complete structured result.
+
 ## 0.8.0 - 2026-08-13
 
 - Hardened production publication against PyPI CDN propagation by retrying the clean simple-index install after the exact

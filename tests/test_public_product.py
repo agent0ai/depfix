@@ -849,15 +849,15 @@ def test_depfix_pip_install_populates_store_with_conflicting_dependency_realms(
             index,
             "--cache-dir",
             str(cache_dir),
-            "--json",
         ]
     )
 
     assert result == 0
-    output = json.loads(capsys.readouterr().out)
-    graph = load_manifest(Path(output["manifest"]))
+    assert capsys.readouterr().out == f"2 packages + 2 dependencies installed, 4 packages total in {cache_dir / 'v1'}\n"
+    manifests = tuple((Cache(cache_dir).root / "installs").glob("*/imports.lock"))
+    assert len(manifests) == 1
+    graph = load_manifest(manifests[0])
     shared_versions = {node.version for node in graph.nodes if node.distribution == "pip-shared"}
-    assert output["packages"] == ["pip-package-a==1.0.0", "pip-package-b==1.0.0"]
     assert shared_versions == {"1.0.0", "2.0.0"}
     assert {item.distribution for item in Cache(cache_dir).list_packages()} == {
         "pip-package-a",
@@ -866,6 +866,54 @@ def test_depfix_pip_install_populates_store_with_conflicting_dependency_realms(
     }
     assert sys.path == before_path
     assert importlib.util.find_spec("pip_package_a") is None
+
+    warm_result = cli_main(
+        [
+            "pip",
+            "install",
+            "-r",
+            str(requirements),
+            "--index-url",
+            index,
+            "--cache-dir",
+            str(cache_dir),
+        ]
+    )
+    assert warm_result == 0
+    assert capsys.readouterr().out == f"2 packages + 2 dependencies reused, 4 packages total in {cache_dir / 'v1'}\n"
+
+    json_result = cli_main(
+        [
+            "pip",
+            "install",
+            "-r",
+            str(requirements),
+            "--index-url",
+            index,
+            "--cache-dir",
+            str(cache_dir),
+            "--json",
+        ]
+    )
+    assert json_result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert set(output) == {"artifacts", "manifest", "manifest_id", "packages", "requests", "store", "warm"}
+    assert output["packages"] == ["pip-package-a==1.0.0", "pip-package-b==1.0.0"]
+    assert output["warm"] is True
+
+
+def test_depfix_pip_install_summary_handles_one_root_without_dependencies(
+    tmp_path: Path,
+    wheel_factory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    package = wheel_factory("pip-standalone", "1.0.0", {"pip_standalone.py": "VALUE = 1\n"})
+    cache_dir = tmp_path / "custom-cache"
+
+    result = cli_main(["pip", "install", file_spec(package), "--cache-dir", str(cache_dir)])
+
+    assert result == 0
+    assert capsys.readouterr().out == f"1 package installed, 1 package total in {cache_dir / 'v1'}\n"
 
 
 def test_depfix_pip_install_applies_nested_requirement_constraints(
