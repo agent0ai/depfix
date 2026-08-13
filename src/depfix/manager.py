@@ -353,7 +353,12 @@ def activate_manifest(path: Path, settings: Settings) -> DepfixRuntime:
     cache = Cache(settings.cache_dir)
     cache.reserve_artifacts({artifact.sha256 for artifact in graph.artifacts})
     for artifact in graph.artifacts:
-        cache.verify_blob(artifact.sha256, size=artifact.size)
+        if not cache.has_package(artifact.sha256):
+            raise CacheError(
+                "Prepared package is not materialized in the shared store",
+                artifact_hash=artifact.sha256,
+                remediation="install the exact manifest online or from a complete bundle",
+            )
     sync_graph(graph, cache, offline=True)
     runtime = _runtime(
         graph,

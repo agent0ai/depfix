@@ -195,13 +195,14 @@ def test_separate_resolution_reuses_cached_compatible_dependencies_and_supports_
 ) -> None:
     _old, _new, package_a, package_b, index = _compatible_reuse_project(tmp_path, wheel_factory)
     cache = Cache(tmp_path / "cache")
-    Resolver(cache, index_url=index).resolve(
+    primed = Resolver(cache, index_url=index).resolve(
         ProjectConfig(
             tmp_path / "prime.toml",
             (ImportDeclaration("package_a", file_spec(package_a), "compatible_package_a"),),
             {},
         )
     )
+    sync_graph(primed, cache, offline=True)
 
     reused = Resolver(cache, index_url=index).resolve(
         ProjectConfig(
@@ -235,13 +236,14 @@ def test_compatible_cached_root_bypasses_new_resolution_but_force_newest_uses_ba
 ) -> None:
     dependency_old, _new, package_a, _package_b, index = _compatible_reuse_project(tmp_path, wheel_factory)
     cache = Cache(tmp_path / "cache")
-    Resolver(cache, index_url=index).resolve(
+    primed = Resolver(cache, index_url=index).resolve(
         ProjectConfig(
             tmp_path / "prime.toml",
             (ImportDeclaration("package_a", file_spec(package_a), "compatible_package_a"),),
             {},
         )
     )
+    sync_graph(primed, cache, offline=True)
 
     class Backend:
         calls = 0

@@ -96,6 +96,10 @@ class UvBackend:
     ) -> subprocess.CompletedProcess[str]:
         executable = self.ensure_available()
         command = [str(executable.path), *arguments]
+        self.cache.reconcile_intermediates()
+        temporary_root = self.cache.root / "tmp"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        uv_cache = Path(tempfile.mkdtemp(prefix=f"uv-cache-{os.getpid()}-", dir=temporary_root))
         environment = os.environ.copy()
         environment.update(
             {
@@ -114,15 +118,22 @@ class UvBackend:
             environment["UV_INDEX"] = " ".join(self.settings.extra_index_url)
         if extra_env:
             environment.update(extra_env)
+        # Never let Depfix package operations populate uv's user/global cache. This
+        # process-owned directory is removed after the invocation and reclaimed by
+        # cache reconciliation if the process is interrupted.
+        environment["UV_CACHE_DIR"] = str(uv_cache)
         self.invocation_count += 1
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            env=environment,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                cwd=cwd,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        finally:
+            shutil.rmtree(uv_cache, ignore_errors=True)
         if forward_output and result.returncode == 0:
             self.progress.forward_uv(result.stdout, result.stderr)
         if check and result.returncode != 0:
@@ -169,7 +180,7 @@ class UvBackend:
     def resolve_root_version(self, requirement: str, distribution: str) -> str:
         temporary_root = self.cache.root / "tmp"
         temporary_root.mkdir(parents=True, exist_ok=True)
-        target = Path(tempfile.mkdtemp(prefix="uv-resolve-", dir=temporary_root))
+        target = Path(tempfile.mkdtemp(prefix=f"uv-resolve-{os.getpid()}-", dir=temporary_root))
         try:
             prepared = self.prepare_requirement(requirement, target=target)
             normalized = str(canonicalize_name(distribution))

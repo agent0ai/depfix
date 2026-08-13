@@ -4,11 +4,13 @@ import asyncio
 import importlib.util
 import inspect
 import json
+import shutil
 import subprocess
 import sys
 import sysconfig
 import warnings
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -30,12 +32,12 @@ from depfix.errors import (
     UnsafePackageError,
 )
 from depfix.manager import activate_manifest, load_generated_alias, reset_runtime_state
-from depfix.manifest import load_manifest, write_manifest
+from depfix.manifest import computed_graph_id, load_manifest, write_manifest
 from depfix.project import create_bundle, export_project, install_manifest, install_packages, verify_manifest
 from depfix.resolver import Resolver, _extract_source_archive, _versions_equivalent
 from depfix.scanner import scan_project
 from depfix.settings import Settings, reset_configuration, resolve_settings
-from depfix.sources import parse_source
+from depfix.sources import hash_local_source, parse_source
 from depfix.sync import sync_graph
 from depfix.uv_backend import UvBackend, UvExecutable
 from depfix.wheel import extract_wheel, inspect_wheel
@@ -600,6 +602,39 @@ def test_uv_success_summary_is_forwarded_to_progress(
     assert "https://<redacted>@example.test/simple" in captured.err
 
 
+def test_uv_invocation_uses_and_removes_depfix_owned_ephemeral_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = Cache(tmp_path / "cache")
+    backend = UvBackend(Settings(cache_dir=tmp_path / "cache"), cache)
+    executable = UvExecutable(Path("/fake/uv"), Version("0.11.0"), "test")
+    monkeypatch.setattr(backend, "ensure_available", lambda: executable)
+    user_cache = tmp_path / "user-uv-cache"
+    user_cache.mkdir()
+    user_file = user_cache / "owned-by-user"
+    user_file.write_text("keep\n", encoding="utf-8")
+    monkeypatch.setenv("UV_CACHE_DIR", str(user_cache))
+    observed: Path | None = None
+
+    def completed(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal observed
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        observed = Path(str(environment["UV_CACHE_DIR"]))
+        assert observed != user_cache
+        assert observed.parent == cache.root / "tmp"
+        (observed / "archive.whl").write_bytes(b"ephemeral")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", completed)
+
+    backend.run(["pip", "install", "demo"])
+
+    assert observed is not None and not observed.exists()
+    assert user_file.read_text(encoding="utf-8") == "keep\n"
+
+
 def test_json_cli_suppresses_progress(tmp_path: Path, wheel_factory, capsys: pytest.CaptureFixture[str]) -> None:
     wheel = wheel_factory("json-progress-demo", "1.0.0", {"json_progress_demo.py": "VALUE = 1\n"})
 
@@ -787,6 +822,102 @@ def test_bundle_is_deterministic_and_installs_without_network(tmp_path: Path, wh
         offline=True,
     )
     assert depfix.import_module(file_spec(wheel), module="bundle_demo").VALUE == 7
+
+
+def test_bundle_rebuilds_and_hash_verifies_ephemeral_source_wheel(
+    tmp_path: Path,
+    wheel_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wheel = wheel_factory("source-bundle", "1.0.0", {"source_bundle.py": "VALUE = 9\n"})
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text("[build-system]\nrequires = []\n", encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+    cache = Cache(cache_dir)
+    graph = Resolver(cache).resolve(
+        ProjectConfig(
+            tmp_path / ".depfix" / "config.toml",
+            (ImportDeclaration("demo", file_spec(wheel), "source_bundle"),),
+            {},
+        )
+    )
+    artifact = replace(
+        graph.artifacts[0],
+        build_backend="uv",
+        source_kind="file",
+        source_url=source.as_uri(),
+        source_sha256=hash_local_source(source),
+        local_source_hash=hash_local_source(source),
+    )
+    graph = replace(graph, artifacts=(artifact,), graph_id="")
+    graph = replace(graph, graph_id=computed_graph_id(graph))
+    sync_graph(graph, cache, offline=True)
+    manifest = tmp_path / "imports.lock"
+    write_manifest(graph, manifest)
+
+    def reproduce_wheel(_self, _source, *, output, offline=None):  # type: ignore[no-untyped-def]
+        output.mkdir(parents=True, exist_ok=True)
+        return Path(shutil.copy2(wheel, output / wheel.name))
+
+    monkeypatch.setattr(UvBackend, "version", lambda _self: "test")
+    monkeypatch.setattr(UvBackend, "build_wheel", reproduce_wheel)
+
+    bundle = create_bundle(manifest, tmp_path / "source.depfixbundle", cache_dir=cache_dir)
+
+    assert bundle.bundle.is_file()
+    assert not cache.has_blob(artifact.sha256)
+    assert not (cache.root / "built-wheels" / artifact.sha256).exists()
+
+
+def test_online_manifest_repair_rebuilds_ephemeral_source_wheel(
+    tmp_path: Path,
+    wheel_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wheel = wheel_factory("source-repair", "1.0.0", {"source_repair.py": "VALUE = 11\n"})
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text("[build-system]\nrequires = []\n", encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+    cache = Cache(cache_dir)
+    graph = Resolver(cache).resolve(
+        ProjectConfig(
+            tmp_path / ".depfix" / "config.toml",
+            (ImportDeclaration("demo", file_spec(wheel), "source_repair"),),
+            {},
+        )
+    )
+    artifact = graph.artifacts[0]
+    ephemeral_wheel = cache.root / "built-wheels" / artifact.sha256 / wheel.name
+    artifact = replace(
+        artifact,
+        url=ephemeral_wheel.as_uri(),
+        build_backend="uv",
+        source_kind="file",
+        source_url=source.as_uri(),
+        source_sha256=hash_local_source(source),
+        local_source_hash=hash_local_source(source),
+    )
+    graph = replace(graph, artifacts=(artifact,), graph_id="")
+    graph = replace(graph, graph_id=computed_graph_id(graph))
+    sync_graph(graph, cache, offline=True)
+    manifest = tmp_path / "imports.lock"
+    write_manifest(graph, manifest)
+    (cache.unpacked_path(artifact.id) / "purelib" / "source_repair.py").unlink()
+
+    def reproduce_wheel(_self, _source, *, output, offline=None):  # type: ignore[no-untyped-def]
+        output.mkdir(parents=True, exist_ok=True)
+        return Path(shutil.copy2(wheel, output / wheel.name))
+
+    monkeypatch.setattr(UvBackend, "version", lambda _self: "test")
+    monkeypatch.setattr(UvBackend, "build_wheel", reproduce_wheel)
+
+    install_manifest(manifest, offline=False, cache_dir=cache_dir)
+
+    assert cache.has_package(artifact.sha256)
+    assert not cache.has_blob(artifact.sha256)
+    assert not ephemeral_wheel.parent.exists()
 
 
 def test_uv_dependency_is_located_without_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

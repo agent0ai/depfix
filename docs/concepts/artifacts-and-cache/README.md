@@ -18,8 +18,9 @@ parent-specific dependency edges, module ownership, namespace contributions, and
 one artifact without merging their dependency contexts.
 
 The default root comes from `platformdirs.user_cache_path("depfix")`, with format-versioned data under `v1`. Important
-areas include `artifacts/sha256`, `targets`, `resolutions`, `manifests`, `metadata`, `ide`, `locks`, `tools/uv`, and
-`built-wheels`. `DEPFIX_CACHE_DIR` or `depfix.configure(cache_dir=...)` changes the parent location.
+areas include `targets`, `resolutions`, `manifests`, `metadata`, `ide`, `locks`, and `tools/uv`. Downloads may briefly
+appear under `artifacts/sha256` and `temp`, but they are installation inputs rather than cache inventory.
+`DEPFIX_CACHE_DIR` or `depfix.configure(cache_dir=...)` changes the parent location.
 
 Mutable lifecycle and provenance records are separate from immutable content. Depfix records an artifact's first
 installation time once, then updates a coalesced usage marker after successful package imports. After a graph is
@@ -27,8 +28,8 @@ successfully synchronized, it also records the retained roots, dependency edges,
 secret-redacted reason: a canonical Depfix command or the calling script path and line. Equivalent graph/origin records
 share one identity, so repeated runs do not grow provenance indefinitely.
 
-`depfix cache list` combines those records with the blob, materialized targets, retained build output, and source-archive
-footprint. Its duplicate view groups physical artifacts by normalized distribution; exact SHA-256 content cannot be
+`depfix cache list` combines those records with the materialized package targets. Its duplicate view groups physical
+packages by normalized distribution; exact SHA-256 content cannot be
 duplicated, while different versions and distinct artifacts for the same version can coexist. Its tree view reconstructs
 currently retained installation roots and dependency edges without requiring the original project or requirements file
 to remain present. `depfix.inspect_cache()` exposes the same flat, duplicate, and tree structures to Python. Legacy
@@ -39,8 +40,15 @@ Automatic retention defaults to 30 unused days. A missing maintenance clock is i
 daily checks run in a daemon thread so ordinary imports only pay a constant-time timestamp check. The current graph is
 reserved before synchronization, which prevents a returning application from evicting and refetching its own packages.
 Active runtimes hold per-artifact, cross-process leases; cleanup skips live leases and clears stale process markers.
-Removal takes the same target and artifact mutation locks as installation before deleting the blob, every environment
-target, lifecycle metadata, retained built wheel, and an unshared source archive.
+Removal takes the same target and artifact mutation locks as installation before deleting every environment target and
+lifecycle metadata.
+
+Downloads, source archives, and locally built wheels are ephemeral. Depfix verifies their exact size and SHA-256,
+materializes a package atomically, then removes the input while still holding the mutation locks. A later install or cache
+maintenance pass removes obsolete retained blobs for already-complete targets and abandoned download parts only after
+their recorded process is gone and the age grace has elapsed. The same boundary applies to the isolated uv cache created
+for each Depfix-owned uv subprocess; direct user uv caches are never selected for cleanup. Completed unpacked targets,
+manifests, provenance, aliases, and runtime leases do not depend on the archive remaining present.
 
 Explicit `cleanup_cache()` / `depfix cache cleanup` operations use the same retention and lease rules. Exact package
 removal uses `remove_cached_package()` / `depfix cache remove`; dry-run mode reports the selection and reclaimable bytes
@@ -50,7 +58,9 @@ Extracted files and child directories are hardened before promotion. The staging
 atomic rename because Darwin rejects renaming a write-disabled directory; Depfix hardens the completed root immediately
 after promotion while the cache mutation lock is still held.
 
-Offline mode rejects absent content instead of fetching it. Integrity failures never promote partial state. See the
+Offline mode reuses already-materialized targets and rejects an absent target because its ephemeral archive is no longer
+an offline cache. Online manifest repair and bundle creation reacquire and hash-check the exact artifact when necessary.
+Integrity failures never promote partial state. See the
 [threat model](../../operations/threat-model.md) for hostile-input assumptions and
 [deployment modes](../deployment/) for cache preparation and bundles.
 

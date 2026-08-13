@@ -20,13 +20,20 @@
   before application scopes/defaults, and delegate unmanaged imports to the prior importer.
 - Resolved artifacts are hash-pinned and materialized outside ambient `site-packages`.
 - Pinned downloads retry and resume bounded transient truncation, but exact size and SHA-256 verification remain mandatory
-  before cache promotion.
+  before atomic target promotion. Downloads and build inputs are ephemeral, remain protected through materialization,
+  and are removed afterward; completed unpacked targets are the cross-project cache. Completion metadata verifies the
+  installed payload rather than trusting a marker alone, while legacy targets retain a conservative file-count check.
 - Cross-process cache locks retry transient Windows permission races without masking permanent permission failures on
   other platforms.
 - Cache lifecycle metadata preserves first installation time and coalesces successful-import usage writes. Automatic
   retention uses a daily background sweep, protects the graph before synchronization, and skips cross-process leases held
   by active runtimes; explicit inventory, cleanup, dry-run, and removal APIs use the same artifact/target lock boundary and
   repair owner write permissions before deleting read-only files or materialization trees.
+- Install and cache-maintenance passes reconcile obsolete retained blobs, abandoned process-owned download parts, stale
+  extraction targets, and stale built-wheel staging without deleting active work. Dry-run reconciliation is observational;
+  offline reuse requires a complete target or an exact bundle-provided artifact.
+- Bundle creation rebuilds source-derived ephemeral wheels from recorded provenance when necessary and accepts them only
+  when their size and SHA-256 exactly match the locked artifact.
 - Successful graph synchronization records deduplicated, secret-redacted installation origins and enough root/node data
   to inspect flat packages, distribution-level duplicate footprint, and top-down dependency trees without the original
   project. Exact artifact hashes remain single physical entries; same-version variants require distinct hashes.
@@ -38,8 +45,12 @@
 - Package compatibility fallbacks may use modules embedded in the same selected artifact; declared dependency providers
   always take precedence.
 - Cold package preparation reports secret-safe progress on stderr by default; warning and higher log levels remain quiet.
-- Prepared installation never resolves or builds; a custom materialization target is valid only with explicit local copying.
+- Prepared installation never resolves or changes locked selections; connected repair may reproducibly rebuild an exact
+  source-derived wheel from recorded provenance. A custom materialization target is valid only with explicit local copying.
 - Private uv repair must preserve dynamically linked uv-managed CPython layouts when it creates a temporary environment.
+- Every Depfix uv prepare, resolve, and build invocation uses a process-owned cache beneath the Depfix temporary root,
+  removes it after the subprocess returns, and reclaims only dead-owner crash leftovers after the age grace. Never use or
+  delete the uv cache owned by direct user invocations.
 - `auto` selects in-process isolation for pure request closures and shared logical imports for closures containing native
   artifacts; mode selection is request-scoped inside mixed manifests and does not use package-name allowlists.
 - Shared mode owns public and explicitly requested roots exactly, tolerates process-global private helpers and deliberate
@@ -57,12 +68,16 @@
 - Every loading API accepts request-scoped primary and extra index overrides. A scoped primary suppresses inherited extra
   indexes unless the same call explicitly supplies them; index policy is part of request and graph identity, never mutates
   process configuration, and is rejected when an exact prepared manifest is active.
+- Custom indexes prefer PEP 691 JSON but also accept standards-compatible Simple HTML media types. Dispatch by the
+  response Content-Type, resolve HTML links against the final project URL, and preserve SHA-256, Requires-Python, yanked,
+  size, index-isolation, and transport policy checks without falling back after valid Simple discovery.
 - `depfix pip install` and `project.install_packages()` resolve package/requirement-file roots as one store-only group,
   persist an exact cache manifest, materialize verified targets, and never invoke environment installation or import
   activation. Requirement constraints apply to matching roots and dependency edges across every selected graph. The CLI
   renders one compact, identity-deduplicated store summary by default and retains the complete result under `--json`.
-- Exact `install_manifest()` preparation never resolves or builds; live grouped package installation may do both before
-  writing its exact stored manifest.
+- Exact `install_manifest()` preparation never resolves or changes locked selections; online repair may rebuild a missing
+  source-derived artifact only when its recorded provenance reproduces the locked size and SHA-256. Live grouped package
+  installation may resolve and build before writing its exact stored manifest.
 - Public failures use typed, credential-redacted `DepfixError` subclasses.
 
 ## Work Guidance

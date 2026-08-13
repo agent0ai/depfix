@@ -279,6 +279,11 @@ def extract_wheel(
                 with archive.open(info) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output, length=1024 * 1024)
         marker = temporary / ".complete"
+        file_hashes = {
+            path.relative_to(temporary).as_posix(): _hash_file(path)
+            for path in sorted(temporary.rglob("*"))
+            if path.is_file()
+        }
         marker.write_text(
             json.dumps(
                 {
@@ -286,6 +291,7 @@ def extract_wheel(
                     "kind": "wheel",
                     "artifact_sha256": _hash_file(path),
                     "installed_files": len(targets),
+                    "file_hashes": file_hashes,
                 },
                 sort_keys=True,
             )

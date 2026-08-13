@@ -252,7 +252,8 @@ Standard PEP 508 direct references work as well.
 
 ## Start simple, lock it later
 
-For local development, just run your Python file. Depfix installs and caches packages as the code reaches them. It does
+For local development, just run your Python file. Depfix installs packages into its shared unpacked store as the code
+reaches them, then removes the downloaded archives. It does
 not create project files.
 
 When you want a repeatable deployment, Depfix can scan the same imports and prepare everything in advance:
@@ -272,6 +273,8 @@ Depfix reuses one package store across projects, repositories, and working direc
 artifact was installed and when Depfix last imported it. Once per day, a lightweight background check removes packages
 that have gone unused for 30 days. The graph being prepared and packages held by active Depfix runtimes are always
 protected, so returning to an older project does not delete and immediately reinstall its own dependencies.
+Downloaded wheels and source archives are temporary inputs: successful preparation removes them, while later install and
+cleanup activity safely reclaims abandoned download parts. Cross-project reuse comes from the complete unpacked store.
 
 Inspect or clean the store explicitly from the CLI:
 

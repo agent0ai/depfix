@@ -15,8 +15,8 @@ authority for reviewed artifacts.
 - [x] Record the owner-specified canonical source, documentation, issue, and changelog URLs.
 - [ ] Apply [the prepared GitHub About metadata](.github/REPOSITORY_METADATA.md) in repository settings.
 - [x] Confirm normalized name `depfix` is owned by the published functional `0.1.0` Alpha release.
-- [x] Configure the protected `pypi` repository environment with required reviewers and deployment tags restricted to
-  `v*`; configure `testpypi` separately only when that staging workflow is wanted.
+- [x] Configure the protected `pypi` repository environment with deployment tags restricted to `v*`; publication remains
+  manually dispatched from a checked annotated tag, so no additional required-reviewer confirmation is needed.
 - [x] Add the production Trusted Publisher under PyPI project `depfix` → Publishing with these exact values:
   - Owner: `agent0ai`
   - Repository: `depfix`
@@ -160,7 +160,7 @@ authority for reviewed artifacts.
 - [ ] Confirm request validation and the complete reusable CI matrix pass; any failure must leave GitHub Releases and PyPI
   unchanged.
 - [ ] Confirm the workflow stages a hidden draft with only the checked wheel and sdist attached.
-- [ ] Approve the protected `pypi` deployment after reviewing the completed checks and draft assets.
+- [ ] Confirm the protected `pypi` deployment starts only after the completed checks and exact draft assets are staged.
 - [ ] Confirm OIDC publishing and the clean public-index installation job pass, then confirm the GitHub Release becomes
   public. A failed upload must remove its unpublished draft; a post-upload verification failure must retain the checked
   draft for a failed-job retry.

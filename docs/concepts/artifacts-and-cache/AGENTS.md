@@ -10,11 +10,12 @@
 
 ## Local Contracts
 
-- Blob identity is SHA-256 content identity; completed extracted targets are environment-specific and read-only.
+- Artifact identity is SHA-256 content identity; downloaded blobs are ephemeral, while completed extracted targets are
+  environment-specific, read-only, and reusable across projects.
 - Cache mutation uses bounded input, locks, temporary construction, verification, and atomic promotion.
 - Staging roots remain owner-writable only through promotion for Darwin compatibility; completed roots are hardened.
 - Lifecycle metadata is mutable and separate from package content: preserve the first installation time, mark successful
-  imports, include retained artifact/build/target size, and keep cleanup from removing reserved or live-leased packages.
+  imports, include retained operational target size, and keep cleanup from removing reserved or live-leased packages.
 - Installation provenance is secret-redacted and graph-aware: deduplicate equivalent origins, retain command or source
   path/line reasons, distinguish content identity from same-version artifact variants, and support flat, duplicate, and
   top-down dependency-tree inspection without the originating project files.

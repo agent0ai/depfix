@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import compileall
+import contextlib
 import hashlib
 import json
 import os
@@ -221,35 +222,36 @@ def install_manifest(
     )
     cache = Cache(settings.cache_dir)
     progress = ProgressReporter(settings.log_level)
-    allowed_hosts = _policy_strings(graph.policy.get("allowed-hosts"))
-    allow_insecure = bool(graph.policy.get("allow-insecure-transport", False))
     marker = cache.root / "manifests" / graph.graph_id.removeprefix("sha256:") / "installed.json"
     warm = marker.is_file()
-    for artifact in graph.artifacts:
-        if not cache.has_blob(artifact.sha256):
-            progress.emit("download", f"{artifact.distribution}=={artifact.version}")
-        try:
-            cache.fetch_artifact(
+    artifact_rebuilder = Resolver(cache, settings=settings)
+    allowed_hosts = _policy_strings(graph.policy.get("allowed-hosts"))
+    allow_insecure = bool(graph.policy.get("allow-insecure-transport", False))
+    try:
+        sync_graph(
+            graph,
+            cache,
+            offline=offline or cached_only,
+            progress=progress,
+            artifact_rebuilder=lambda artifact: artifact_rebuilder.reacquire_built_artifact(
                 artifact,
-                offline=offline or cached_only,
-                verify=True,
                 allowed_hosts=allowed_hosts,
                 allow_insecure=allow_insecure,
-            )
-        except IntegrityError:
-            raise
-        except CacheError as exc:
-            if (offline or cached_only) and not cache.has_blob(artifact.sha256):
-                raise OfflineArtifactMissingError(
-                    "A manifest artifact is unavailable in offline/cached-only mode",
-                    manifest=source,
-                    artifact_hash=artifact.sha256,
-                    cache_path=cache.blob_path(artifact.sha256),
-                    offline=True,
-                    remediation="install from a complete bundle or fetch artifacts on a connected host",
-                ) from exc
-            raise
-    sync_graph(graph, cache, offline=True, progress=progress)
+            ),
+        )
+    except IntegrityError:
+        raise
+    except CacheError as exc:
+        if offline or cached_only:
+            missing = next((item for item in graph.artifacts if not cache.has_package(item.sha256)), None)
+            raise OfflineArtifactMissingError(
+                "A manifest package is not materialized and its ephemeral input is unavailable offline",
+                manifest=source,
+                artifact_hash=missing.sha256 if missing is not None else "",
+                offline=True,
+                remediation="install from a complete bundle or prepare the exact manifest on a connected host",
+            ) from exc
+        raise
     cache.record_installation(
         graph,
         root_nodes=_graph_roots(graph),
@@ -440,7 +442,12 @@ def verify_manifest(
     assert_compatible_environment(graph, path)
     cache = Cache(Path(cache_dir) if cache_dir is not None else None)
     for artifact in graph.artifacts:
-        cache.verify_blob(artifact.sha256, size=artifact.size)
+        if not cache.has_package(artifact.sha256):
+            raise CacheError(
+                "A manifest package is not completely materialized",
+                artifact_hash=artifact.sha256,
+                remediation="install the manifest on a connected host or from a complete bundle",
+            )
     return VerificationResult(path, graph.graph_id, len(graph.artifacts), True)
 
 
@@ -454,8 +461,6 @@ def create_bundle(
     manifest_path = Path(manifest).expanduser().resolve()
     graph = load_manifest(manifest_path)
     cache = Cache(Path(cache_dir) if cache_dir is not None else None)
-    for artifact in graph.artifacts:
-        cache.verify_blob(artifact.sha256, size=artifact.size)
     runtime_wheels: list[Path] = []
     if include_depfix_runtime:
         runtime_wheels = _runtime_wheels(cache)
@@ -490,26 +495,60 @@ def create_bundle(
         ],
     }
     files = 2 + len(graph.artifacts) + len(runtime_wheels)
-    with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-        _write_zip_entry(
-            archive, "bundle.json", json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-        )
-        _write_zip_entry(archive, "manifest/imports.lock", manifest_bytes)
+    rebuild_settings = resolve_settings(cache_dir=cache_dir, frozen=False, offline=False, discover=False)
+    artifact_rebuilder = Resolver(cache, settings=rebuild_settings)
+    allowed_hosts = _policy_strings(graph.policy.get("allowed-hosts"))
+    allow_insecure = bool(graph.policy.get("allow-insecure-transport", False))
+    with contextlib.ExitStack() as locks:
+        archive_paths: dict[str, Path] = {}
         for artifact in sorted(graph.artifacts, key=lambda item: item.sha256):
+            locks.enter_context(cache.lock("target:" + artifact.id))
+            if not cache.has_blob(artifact.sha256) and artifact.build_backend:
+                artifact_rebuilder.reacquire_built_artifact(
+                    artifact,
+                    allowed_hosts=allowed_hosts,
+                    allow_insecure=allow_insecure,
+                )
+            locks.enter_context(cache._artifact_lock(artifact.sha256))
+            archive_paths[artifact.sha256] = cache.fetch_artifact(
+                artifact,
+                verify=True,
+                allowed_hosts=allowed_hosts,
+                allow_insecure=allow_insecure,
+                _lock_held=True,
+            )
+        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
             _write_zip_entry(
-                archive, f"artifacts/sha256/{artifact.sha256}", cache.blob_path(artifact.sha256).read_bytes()
+                archive, "bundle.json", json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode() + b"\n"
             )
-        for wheel in sorted(runtime_wheels, key=lambda item: item.name):
-            _write_zip_entry(archive, f"runtime/wheels/{wheel.name}", wheel.read_bytes())
-        if runtime_wheels:
-            bootstrap = (
-                b"Install all wheels in runtime/wheels without an index, then run:\n"
-                b"    depfix install manifest/imports.lock --offline --frozen\n"
-            )
-            _write_zip_entry(archive, "runtime/BOOTSTRAP.txt", bootstrap)
-            files += 1
+            _write_zip_entry(archive, "manifest/imports.lock", manifest_bytes)
+            for artifact in sorted(graph.artifacts, key=lambda item: item.sha256):
+                _write_zip_entry(
+                    archive, f"artifacts/sha256/{artifact.sha256}", archive_paths[artifact.sha256].read_bytes()
+                )
+            for wheel in sorted(runtime_wheels, key=lambda item: item.name):
+                _write_zip_entry(archive, f"runtime/wheels/{wheel.name}", wheel.read_bytes())
+            if runtime_wheels:
+                bootstrap = (
+                    b"Install all wheels in runtime/wheels without an index, then run:\n"
+                    b"    depfix install manifest/imports.lock --offline --frozen\n"
+                )
+                _write_zip_entry(archive, "runtime/BOOTSTRAP.txt", bootstrap)
+                files += 1
+        for artifact in graph.artifacts:
+            cache.blob_path(artifact.sha256).unlink(missing_ok=True)
+            if artifact.source_sha256 and artifact.source_sha256 != artifact.sha256:
+                cache.blob_path(artifact.source_sha256).unlink(missing_ok=True)
+            shutil.rmtree(cache.root / "built-wheels" / artifact.sha256, ignore_errors=True)
     os.replace(temporary, destination)
     digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    for wheel in runtime_wheels:
+        wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+        wheel.unlink(missing_ok=True)
+        cache.blob_path(wheel_digest).unlink(missing_ok=True)
+    runtime_store = cache.root / "built-wheels" / "depfix-runtime"
+    with contextlib.suppress(OSError):
+        runtime_store.rmdir()
     return BundleResult(destination, graph.graph_id, files, digest)
 
 

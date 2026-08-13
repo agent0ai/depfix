@@ -44,7 +44,8 @@ Inspection and operation:
 - `cache cleanup [--days N] [--dry-run]` removes inactive artifacts older than the configured 30-day default.
 - `cache remove PACKAGE [--version VERSION] [--artifact SHA256] [--dry-run]` removes an exact package selection while
   preserving artifacts being prepared or leased by active runtimes.
-- `cache verify|prune|clean` retains the low-level integrity, manifest-reference, and complete-root maintenance commands.
+- `cache verify` validates retained package targets and reconciles obsolete download intermediates. `cache prune`
+  removes unreferenced intermediates, and `cache clean` deliberately removes the complete cache root.
 
 IDE commands are `ide sync`, `path`, `configure`, `attach`, `detach`, `status`, and `clean`. Attaching is allowed only in an
 active virtual environment and writes a graph-specific `.pth`; `detach` removes it. Generated configuration puts the

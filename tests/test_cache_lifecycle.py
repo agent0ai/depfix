@@ -6,6 +6,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -17,7 +18,10 @@ from depfix import cache as cache_module
 from depfix.cache import Cache
 from depfix.cli import main as cli_main
 from depfix.config import ImportDeclaration, ProjectConfig
+from depfix.errors import CacheError
 from depfix.manager import reset_runtime_state
+from depfix.manifest import write_manifest
+from depfix.project import verify_manifest
 from depfix.resolver import Resolver
 from depfix.runtime import DepfixRuntime
 from depfix.settings import reset_configuration, resolve_settings
@@ -65,7 +69,8 @@ def test_inventory_records_installation_size_and_successful_import_use(tmp_path:
     assert installed[0].version == "1.2.3"
     assert installed[0].artifact_hash == artifact.sha256
     assert installed[0].last_used_at is None
-    assert installed[0].size_bytes > artifact.size
+    assert installed[0].size_bytes > 0
+    assert not cache.has_blob(artifact.sha256)
 
     runtime = DepfixRuntime(graph, cache).activate()
     assert runtime.import_for_node(graph.nodes[0].id, "cache_demo").VALUE == 7
@@ -85,7 +90,7 @@ def test_cleanup_reclaims_stale_artifact_and_all_targets(tmp_path: Path, wheel_f
     result = cache.cleanup(30)
 
     assert [item.artifact_hash for item in result.removed] == [artifact.sha256]
-    assert result.reclaimed_bytes > artifact.size
+    assert result.reclaimed_bytes > 0
     assert not cache.blob_path(artifact.sha256).exists()
     assert not (cache.root / "targets" / artifact.sha256).exists()
     assert cache.list_packages() == ()
@@ -190,7 +195,8 @@ def test_returning_graph_reservation_prevents_remove_then_reinstall(tmp_path: Pa
     cache.reserve_artifacts({artifact.sha256})
     assert cache.cleanup(30).removed == ()
     assert [item.artifact_hash for item in cache.remove_package("cache-demo").skipped_active] == [artifact.sha256]
-    assert cache.blob_path(artifact.sha256).is_file()
+    assert cache.has_package(artifact.sha256)
+    assert not cache.blob_path(artifact.sha256).exists()
 
     reservation = cache.root / "metadata" / "reservations" / f"{artifact.sha256}.touch"
     stale = time.time() - 2 * 60 * 60
@@ -211,11 +217,12 @@ def test_python_and_cli_cache_inventory_cleanup_and_removal(
     payload = json.loads(capsys.readouterr().out)
     assert exit_code == 0
     assert payload[0]["distribution"] == "cache-demo"
-    assert payload[0]["size_bytes"] > artifact.size
+    assert payload[0]["size_bytes"] > 0
 
     preview = depfix.remove_cached_package("cache-demo", version="1.2.3", cache_dir=cache_dir, dry_run=True)
     assert preview.dry_run is True and len(preview.removed) == 1
-    assert cache.has_blob(artifact.sha256)
+    assert cache.has_package(artifact.sha256)
+    assert not cache.has_blob(artifact.sha256)
 
     exit_code = cli_main(
         [
@@ -350,7 +357,8 @@ def test_explicit_and_daily_cleanup_use_the_same_retention_contract(
 
     preview = depfix.cleanup_cache(days=30, cache_dir=cache_dir, dry_run=True)
     assert [item.artifact_hash for item in preview.removed] == [artifact.sha256]
-    assert cache.has_blob(artifact.sha256)
+    assert cache.has_package(artifact.sha256)
+    assert not cache.has_blob(artifact.sha256)
 
     exit_code = cli_main(["--json", "--cache-dir", str(cache_dir), "cache", "cleanup", "--days", "30"])
     payload = json.loads(capsys.readouterr().out)
@@ -404,3 +412,186 @@ def test_windows_lease_probe_never_uses_terminating_os_kill(monkeypatch: pytest.
 
     monkeypatch.setattr(os, "kill", forbidden_kill)
     assert cache_module._pid_is_running(os.getpid() + 100_000) is True
+
+
+def test_install_reconciles_retained_archive_without_removing_package(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    retained = cache.blob_path(artifact.sha256)
+    retained.parent.mkdir(parents=True, exist_ok=True)
+    retained.write_bytes(b"obsolete duplicate")
+    abandoned_staging = cache.unpacked_path(artifact.id).with_name(cache.unpacked_path(artifact.id).name + ".abandoned")
+    abandoned_staging.mkdir()
+    (abandoned_staging / "partial.py").write_text("PARTIAL = True\n", encoding="utf-8")
+
+    sync_graph(graph, cache, offline=True)
+
+    assert not retained.exists()
+    assert not abandoned_staging.exists()
+    assert cache.has_package(artifact.sha256)
+    runtime = DepfixRuntime(graph, cache).activate()
+    try:
+        assert runtime.import_for_node(graph.nodes[0].id, "cache_demo").VALUE == 7
+    finally:
+        runtime.deactivate()
+
+
+def test_package_verification_detects_deleted_materialized_payload(tmp_path: Path, wheel_factory) -> None:
+    cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    payload = cache.unpacked_path(artifact.id) / "purelib" / "cache_demo.py"
+
+    payload.unlink()
+
+    assert not cache.has_package(artifact.sha256)
+    manifest = cache_dir / "imports.lock"
+    write_manifest(graph, manifest)
+    with pytest.raises(CacheError, match="not completely materialized"):
+        verify_manifest(manifest, cache_dir=cache_dir)
+
+
+def test_cache_verify_reports_corrupt_target_omitted_from_inventory(
+    tmp_path: Path,
+    wheel_factory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    (cache.unpacked_path(artifact.id) / "purelib" / "cache_demo.py").unlink()
+
+    assert cache.list_packages() == ()
+    exit_code = cli_main(["--json", "--cache-dir", str(cache_dir), "cache", "verify"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert payload["error"] == "CacheError"
+    assert artifact.sha256 in payload["message"]
+
+
+def test_prune_waits_for_active_artifact_reader(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache")
+    digest = "e" * 64
+    blob = cache.blob_path(digest)
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"active input")
+    locked = threading.Event()
+    release = threading.Event()
+
+    def hold_input() -> None:
+        with cache._artifact_lock(digest):
+            locked.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_input)
+    holder.start()
+    assert locked.wait(timeout=5)
+    pruner = threading.Thread(target=lambda: cache.prune(set()))
+    pruner.start()
+    pruner.join(timeout=0.1)
+
+    assert pruner.is_alive()
+    assert blob.is_file()
+
+    release.set()
+    holder.join(timeout=5)
+    pruner.join(timeout=5)
+    assert not blob.exists()
+
+
+def test_cleanup_removes_dead_download_but_preserves_live_owner(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache")
+    temporary = cache.root / "temp"
+    temporary.mkdir(parents=True)
+    stale = time.time() - 2 * 60 * 60
+    dead = temporary / f"download-{os.getpid() + 100_000}-dead.part"
+    live = temporary / f"download-{os.getpid()}-live.part"
+    dead.write_bytes(b"dead")
+    live.write_bytes(b"live")
+    work = cache.root / "tmp"
+    work.mkdir()
+    abandoned_build = work / f"depfix-build-{os.getpid() + 100_000}-dead"
+    abandoned_build.mkdir()
+    abandoned_uv_cache = work / f"uv-cache-{os.getpid() + 100_000}-dead"
+    abandoned_uv_cache.mkdir()
+    live_uv_cache = work / f"uv-cache-{os.getpid()}-live"
+    live_uv_cache.mkdir()
+    os.utime(dead, (stale, stale))
+    os.utime(live, (stale, stale))
+    os.utime(abandoned_build, (stale, stale))
+    os.utime(abandoned_uv_cache, (stale, stale))
+    os.utime(live_uv_cache, (stale, stale))
+
+    cache.cleanup(30)
+
+    assert not dead.exists()
+    assert live.exists()
+    assert not abandoned_build.exists()
+    assert not abandoned_uv_cache.exists()
+    assert live_uv_cache.exists()
+
+
+def test_cleanup_removes_stale_orphan_blob_and_legacy_download(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache")
+    digest = "a" * 64
+    orphan = cache.blob_path(digest)
+    orphan.parent.mkdir(parents=True)
+    orphan.write_bytes(b"verified but never materialized")
+    temporary = cache.root / "temp"
+    temporary.mkdir(parents=True)
+    legacy_download = temporary / "download-legacyname"
+    legacy_download.write_bytes(b"interrupted legacy download")
+    stale = time.time() - 2 * 24 * 60 * 60
+    os.utime(orphan, (stale, stale))
+    os.utime(legacy_download, (stale, stale))
+
+    cache.cleanup(0, dry_run=True)
+
+    assert orphan.exists()
+    assert legacy_download.exists()
+
+    cache.cleanup(0)
+
+    assert not orphan.exists()
+    assert not legacy_download.exists()
+    assert cache.list_packages() == ()
+
+
+def test_cleanup_preserves_recent_orphan_blob(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache")
+    digest = "b" * 64
+    orphan = cache.blob_path(digest)
+    orphan.parent.mkdir(parents=True)
+    orphan.write_bytes(b"recent verified download")
+
+    cache.cleanup(0)
+
+    assert orphan.is_file()
+
+
+def test_cleanup_dry_run_preserves_then_removes_stale_extraction_and_build_state(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache")
+    extraction_digest = "c" * 64
+    extraction = cache.root / "targets" / extraction_digest / "environment.crashed"
+    extraction.mkdir(parents=True)
+    (extraction / "partial.py").write_text("PARTIAL = True\n", encoding="utf-8")
+    build_digest = "d" * 64
+    build = cache.root / "built-wheels" / build_digest
+    build.mkdir(parents=True)
+    (build / "package.whl").write_bytes(b"incomplete build")
+    stale = time.time() - 2 * 24 * 60 * 60
+    for path in (extraction / "partial.py", extraction, build / "package.whl", build):
+        os.utime(path, (stale, stale))
+
+    assert cache.list_packages() == ()
+    dry_run = cache.cleanup(30, dry_run=True)
+
+    assert dry_run.dry_run is True
+    assert extraction.exists()
+    assert build.exists()
+    assert cache.list_packages() == ()
+
+    cache.cleanup(30)
+
+    assert not extraction.exists()
+    assert not build.exists()
+    assert cache.list_packages() == ()

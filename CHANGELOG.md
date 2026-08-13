@@ -2,6 +2,16 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.9.0 - 2026-08-13
+
+- Added standards-compatible Simple HTML custom-index discovery alongside PEP 691 JSON, preserving redirected-link
+  resolution, SHA-256, `Requires-Python`, yanked, size, transport-policy, and grouped index-isolation checks.
+- Made downloaded wheels, source archives, locally built wheels, and Depfix-owned uv caches ephemeral after verified
+  materialization, with lock-safe cleanup of dead-owner crash leftovers while preserving complete unpacked targets and
+  never touching user-owned uv caches.
+- Hardened installed-package completeness checks and exact online/bundle repair so missing payloads are detected and
+  source-derived artifacts are reproducibly rebuilt and hash-verified when their temporary wheels no longer exist.
+
 ## 0.8.1 - 2026-08-13
 
 - Replaced the default `depfix pip install` JSON block with one compact line reporting distinct requested packages,

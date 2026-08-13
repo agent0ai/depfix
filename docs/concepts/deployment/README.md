@@ -11,7 +11,9 @@ live resolution atomically.
 Run `depfix export`, commit the manifest when reproducibility is desired, and run `depfix install --frozen` before startup.
 The ordinary interpreter then discovers the manifest and performs a local graph lookup. Frozen install performs no version
 resolution; offline install performs no network access. `--compile-bytecode` prepares bytecode, and `--local` explicitly
-copies targets beneath `.depfix/runtime`.
+copies targets beneath `.depfix/runtime`. The global unpacked target is the reusable package store; downloaded archives
+are removed after materialization. An offline manifest install therefore requires its targets to be already complete or
+its exact artifacts to arrive in a `.depfixbundle`.
 
 Container layering should copy source and manifest first, install the manifest into a persistent cache layer, then copy
 frequently changing application files. Do not copy a developer's entire cache. Serverless builds should install for the
@@ -26,5 +28,7 @@ promotion. The bundle contains no credential and never invokes a network operati
 ## Concurrency
 
 Artifact, target, resolution, and uv-bootstrap mutations use cross-process directory locks and temporary/atomic promotion.
-Threaded calls share canonical identities. Temporary `using()` selections are context-local across threads and async tasks.
+Threaded calls share canonical identities. Download inputs remain protected through extraction and are deleted before the
+artifact lock is released; abandoned process-owned parts are reclaimed by later install and cleanup passes.
+Temporary `using()` selections are context-local across threads and async tasks.
 Spawn workers should use `depfix.multiprocessing_initializer` in their initializer.

@@ -14,9 +14,10 @@ import tempfile
 import urllib.request
 import zipfile
 from dataclasses import replace
+from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import urldefrag, urljoin, urlsplit
+from urllib.parse import unquote, urldefrag, urljoin, urlsplit
 
 from packaging.markers import default_environment
 from packaging.requirements import InvalidRequirement, Requirement
@@ -44,6 +45,33 @@ from .settings import Settings, resolve_settings
 from .sources import SourceInfo, hash_local_source, parse_source
 from .uv_backend import UvBackend
 from .wheel import WheelInspection, inspect_wheel
+
+_SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
+_SIMPLE_HTML = {"application/vnd.pypi.simple.v1+html", "text/html"}
+_SIMPLE_ACCEPT = "application/vnd.pypi.simple.v1+json, application/vnd.pypi.simple.v1+html;q=0.9, text/html;q=0.8"
+
+
+class _SimpleHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.files: list[dict[str, object]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        values = {key.lower(): value for key, value in attrs}
+        href = values.get("href")
+        if not href:
+            return
+        yanked = "data-yanked" in values
+        self.files.append(
+            {
+                "url": href,
+                "requires-python": values.get("data-requires-python") or "",
+                "yanked": yanked,
+                "yanked-reason": (values.get("data-yanked") or "") if yanked else "",
+            }
+        )
 
 
 class _Candidate:
@@ -192,6 +220,81 @@ class Resolver:
         )
         return replace(graph, graph_id=computed_graph_id(graph))
 
+    def reacquire_built_artifact(
+        self,
+        artifact: Artifact,
+        *,
+        allowed_hosts: tuple[str, ...] = (),
+        allow_insecure: bool = False,
+    ) -> Path:
+        """Rebuild a source-derived wheel and accept only the exact locked bytes."""
+        if not artifact.build_backend or not artifact.source_url:
+            raise SourceError(
+                "The ephemeral artifact cannot be rebuilt from recorded provenance",
+                artifact_hash=artifact.sha256,
+                remediation="re-export the project while the original source is available",
+            )
+        source = parse_source(artifact.source_url)
+        if source.kind == "git":
+            source = replace(
+                source,
+                commit=artifact.vcs_commit or source.commit,
+                requested_ref=artifact.requested_ref or source.requested_ref,
+                subdirectory=artifact.subdirectory or source.subdirectory,
+                mutable=False,
+            )
+            wheel, _observed = self._build_git(source)
+            candidate_path = wheel
+        else:
+            if source.path is not None:
+                if not source.path.exists():
+                    raise SourceError(
+                        "The recorded source for an ephemeral built artifact is unavailable",
+                        source=artifact.source_url,
+                        artifact_hash=artifact.sha256,
+                        remediation="restore the exact source tree or re-export the project",
+                    )
+                expected_source = artifact.local_source_hash or artifact.source_sha256
+                actual_source = hash_local_source(source.path)
+                if expected_source and actual_source != expected_source:
+                    raise HashMismatchError(
+                        "The recorded source changed and cannot reproduce the locked artifact",
+                        source=artifact.source_url,
+                        artifact_hash=artifact.sha256,
+                        remediation="restore the exact source or explicitly refresh the manifest",
+                    )
+                source_path = source.path
+            else:
+                assert source.url is not None
+                if not artifact.source_sha256:
+                    raise SourceError(
+                        "The remote source lacks the hash required to rebuild an ephemeral artifact",
+                        source=artifact.source_url,
+                        artifact_hash=artifact.sha256,
+                        remediation="re-export the project with exact source provenance",
+                    )
+                source_path, final_url = self.cache.fetch_url_with_final(
+                    source.url,
+                    artifact.source_sha256,
+                    expected_size=artifact.source_size or None,
+                    allowed_hosts=allowed_hosts,
+                    allow_insecure=allow_insecure,
+                )
+                source = replace(source, sha256=artifact.source_sha256, final_url=final_url, mutable=False)
+            candidate = self._build_source_candidate(source_path, source)
+            candidate_path = self.cache.blob_path(candidate.sha256)
+        actual = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+        if actual != artifact.sha256 or candidate_path.stat().st_size != artifact.size:
+            self.cache.blob_path(actual).unlink(missing_ok=True)
+            shutil.rmtree(self.cache.root / "built-wheels" / actual, ignore_errors=True)
+            raise HashMismatchError(
+                "Rebuilt source artifact does not match the exact locked wheel",
+                source=artifact.source_url,
+                artifact_hash=artifact.sha256,
+                remediation="re-export and bundle in a reproducible build environment",
+            )
+        return self.cache.fetch_url(candidate_path.as_uri(), artifact.sha256, expected_size=artifact.size)
+
     def _apply_declaration_indexes(self, declaration: ImportDeclaration) -> None:
         if declaration.index_url is None and declaration.extra_index_url is None:
             selected = self._base_settings
@@ -282,7 +385,7 @@ class Resolver:
                     requested_constraint,
                     prefer_newest=False,
                 )
-                if self.cache.has_blob(preferred.sha256):
+                if self.cache.has_package(preferred.sha256) or f"sha256:{preferred.sha256}" in self._artifacts:
                     cached_candidate = preferred
             exact_version = (
                 cached_candidate.version
@@ -422,14 +525,21 @@ class Resolver:
         ancestors: dict[str, Node],
         prefer_newest: bool,
     ) -> Node:
-        blob, final_url = self.cache.fetch_url_with_final(
-            candidate.url,
-            candidate.sha256,
-            expected_size=candidate.size,
-            allowed_hosts=self._allowed_hosts,
-            allow_insecure=self._allow_insecure,
-        )
-        inspection = self._inspect_artifact(blob, candidate)
+        if self.cache.has_package(candidate.sha256):
+            blob = self.cache.blob_path(candidate.sha256)
+            final_url = candidate.url
+            inspection = self._inspect_artifact(blob, candidate)
+        else:
+            with self.cache._artifact_lock(candidate.sha256):
+                blob, final_url = self.cache.fetch_url_with_final(
+                    candidate.url,
+                    candidate.sha256,
+                    expected_size=candidate.size,
+                    allowed_hosts=self._allowed_hosts,
+                    allow_insecure=self._allow_insecure,
+                    _lock_held=True,
+                )
+                inspection = self._inspect_artifact(blob, candidate)
         if inspection.distribution != candidate.distribution or not _versions_equivalent(
             inspection.version, candidate.version
         ):
@@ -660,7 +770,7 @@ class Resolver:
         self._uv_version = self.backend.version()
         temporary_root = self.cache.root / "tmp"
         temporary_root.mkdir(parents=True, exist_ok=True)
-        output = Path(tempfile.mkdtemp(prefix="depfix-build-", dir=temporary_root))
+        output = Path(tempfile.mkdtemp(prefix=f"depfix-build-{os.getpid()}-", dir=temporary_root))
         extracted: Path | None = None
         try:
             source_url = source.url or (source.path.as_uri() if source.path is not None else "")
@@ -669,7 +779,7 @@ class Resolver:
             source_size = source_path.stat().st_size if source_path.is_file() else 0
             build_root = source_path
             if source_path.is_file():
-                extracted = Path(tempfile.mkdtemp(prefix="depfix-source-", dir=temporary_root))
+                extracted = Path(tempfile.mkdtemp(prefix=f"depfix-source-{os.getpid()}-", dir=temporary_root))
                 _extract_source_archive(source_path, extracted)
                 build_root = _source_project_root(extracted)
             wheel = self.backend.build_wheel(build_root, output=output)
@@ -728,8 +838,8 @@ class Resolver:
         assert source.url is not None
         root = self.cache.root / "tmp"
         root.mkdir(parents=True, exist_ok=True)
-        checkout = Path(tempfile.mkdtemp(prefix="git-", dir=root))
-        output = Path(tempfile.mkdtemp(prefix="git-wheel-", dir=root))
+        checkout = Path(tempfile.mkdtemp(prefix=f"git-{os.getpid()}-", dir=root))
+        output = Path(tempfile.mkdtemp(prefix=f"git-wheel-{os.getpid()}-", dir=root))
         try:
             clone = subprocess.run(
                 ["git", "clone", "--no-checkout", source.url, str(checkout)],
@@ -898,7 +1008,7 @@ class Resolver:
                     bool(item.get("yanked", False)),
                     item.get("yanked_reason") or "",
                 )
-                cached = int(self.cache.has_blob(digest))
+                cached = int(self.cache.has_package(digest) or f"sha256:{digest}" in self._artifacts)
                 if item.get("packagetype") == "bdist_wheel" and filename.endswith(".whl"):
                     try:
                         _name, _version, _build, wheel_tags = parse_wheel_filename(filename)
@@ -936,6 +1046,8 @@ class Resolver:
                 reverse=True,
             )
         selected = candidates[0][5]
+        if selected.size <= 0:
+            selected.size = self._remote_size(selected.url)
         self._candidate_cache[key] = selected
         return selected
 
@@ -953,7 +1065,7 @@ class Resolver:
             request = urllib.request.Request(
                 simple_url,
                 headers={
-                    "Accept": "application/vnd.pypi.simple.v1+json",
+                    "Accept": _SIMPLE_ACCEPT,
                     "User-Agent": "depfix/0.1",
                 },
             )
@@ -964,44 +1076,28 @@ class Resolver:
                     allowed_hosts=self._allowed_hosts,
                     allow_insecure=self._allow_insecure,
                 ) as response:
-                    simple = json.load(response)
-                releases: dict[str, list[dict[str, object]]] = {}
-                for item in simple.get("files", []):
-                    filename = str(item.get("filename", ""))
-                    try:
-                        if filename.endswith(".whl"):
-                            _name, version, _build, _tags = parse_wheel_filename(filename)
-                            package_type = "bdist_wheel"
-                        else:
-                            _name, version = parse_sdist_filename(filename)
-                            package_type = "sdist"
-                    except Exception:
-                        continue
-                    file_url = urljoin(simple_url, str(item.get("url", "")))
-                    file_url, fragment = urldefrag(file_url)
-                    hashes = dict(item.get("hashes", {}))
-                    if "sha256" not in hashes and fragment.startswith("sha256="):
-                        hashes["sha256"] = fragment.removeprefix("sha256=")
-                    size = item.get("size")
-                    if size is None:
-                        size = self._remote_size(file_url)
-                    releases.setdefault(str(version), []).append(
-                        {
-                            "filename": filename,
-                            "packagetype": package_type,
-                            "url": file_url,
-                            "size": int(size),
-                            "digests": hashes,
-                            "requires_python": item.get("requires-python") or "",
-                            "yanked": bool(item.get("yanked", False)),
-                            "yanked_reason": item.get("yanked") if isinstance(item.get("yanked"), str) else "",
-                        }
-                    )
+                    media_type = self._response_media_type(response)
+                    final_url = response.geturl()
+                    if media_type == _SIMPLE_JSON:
+                        simple = json.load(response)
+                        files = simple.get("files", []) if isinstance(simple, dict) else []
+                    elif media_type in _SIMPLE_HTML:
+                        parser = _SimpleHTMLParser()
+                        parser.feed(response.read().decode("utf-8"))
+                        parser.close()
+                        files = parser.files
+                    else:
+                        raise ResolutionError(
+                            "Package index returned an unsupported Simple API media type",
+                            source=redact(final_url),
+                            rejections=(f"received {media_type or 'missing Content-Type'}",),
+                        )
+                releases = self._simple_releases(files, final_url)
                 if releases:
                     return {"releases": releases}
-                errors.append("the PEP 691 project response contained no supported artifacts")
+                errors.append(f"Simple API {redact(final_url)}: response contained no supported artifacts")
             except Exception as exc:
-                errors.append(f"PEP 691 {redact(simple_url)}: {redact(str(exc))}")
+                errors.append(f"Simple API {redact(simple_url)}: {redact(str(exc))}")
         for index in indexes:
             legacy_url = f"{index.rstrip('/')}/{distribution}/json"
             request = urllib.request.Request(
@@ -1028,6 +1124,57 @@ class Resolver:
             rejections=tuple(errors),
             remediation="verify the PyPI-compatible index URL and its PEP 691 or project JSON support",
         )
+
+    @staticmethod
+    def _response_media_type(response: Any) -> str:
+        content_type = response.headers.get("Content-Type", "")
+        return str(content_type).partition(";")[0].strip().lower()
+
+    def _simple_releases(self, files: Any, base_url: str) -> dict[str, list[dict[str, object]]]:
+        releases: dict[str, list[dict[str, object]]] = {}
+        if not isinstance(files, list):
+            return releases
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            file_url = urljoin(base_url, str(item.get("url", "")))
+            file_url, fragment = urldefrag(file_url)
+            filename = str(item.get("filename") or unquote(PurePosixPath(urlsplit(file_url).path).name))
+            try:
+                if filename.endswith(".whl"):
+                    _name, version, _build, _tags = parse_wheel_filename(filename)
+                    package_type = "bdist_wheel"
+                else:
+                    _name, version = parse_sdist_filename(filename)
+                    package_type = "sdist"
+            except Exception:
+                continue
+            raw_hashes = item.get("hashes", {})
+            hashes = dict(raw_hashes) if isinstance(raw_hashes, dict) else {}
+            if "sha256" not in hashes:
+                for field in fragment.split("&"):
+                    algorithm, separator, digest = field.partition("=")
+                    if separator and algorithm.lower() == "sha256":
+                        hashes["sha256"] = digest
+                        break
+            size = item.get("size")
+            yanked_value = item.get("yanked", False)
+            yanked_reason = item.get("yanked-reason")
+            if yanked_reason is None and isinstance(yanked_value, str):
+                yanked_reason = yanked_value
+            releases.setdefault(str(version), []).append(
+                {
+                    "filename": filename,
+                    "packagetype": package_type,
+                    "url": file_url,
+                    "size": int(size) if size is not None else 0,
+                    "digests": hashes,
+                    "requires_python": item.get("requires-python") or "",
+                    "yanked": bool(yanked_value),
+                    "yanked_reason": str(yanked_reason or ""),
+                }
+            )
+        return releases
 
     def _remote_size(self, url: str) -> int:
         request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "depfix/0.1"})

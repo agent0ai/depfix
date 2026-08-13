@@ -9,6 +9,7 @@ import http.client
 import json
 import os
 import platform
+import re
 import shutil
 import stat
 import sys
@@ -37,6 +38,8 @@ _DOWNLOAD_ATTEMPTS = 3
 _AUTOMATIC_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 _RESERVATION_GRACE_SECONDS = 60 * 60
 _USAGE_WRITE_INTERVAL_SECONDS = 60 * 60
+_STALE_INTERMEDIATE_SECONDS = 60 * 60
+_LEGACY_STALE_INTERMEDIATE_SECONDS = 24 * 60 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +174,42 @@ class Cache:
     def has_blob(self, sha256: str) -> bool:
         return self.blob_path(sha256).is_file()
 
+    def has_package(self, sha256: str) -> bool:
+        """Return whether the current environment has a complete unpacked package."""
+        target = self.unpacked_path("sha256:" + sha256.removeprefix("sha256:"))
+        return self._target_is_complete(target, sha256.removeprefix("sha256:"))
+
+    def _target_is_complete(self, target: Path, digest: str) -> bool:
+        """Validate one unpacked target without relying on its directory name."""
+        marker = target / ".complete"
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, TypeError, json.JSONDecodeError):
+            return False
+        if data.get("format_version") != 1 or data.get("artifact_sha256") != digest:
+            return False
+        purelib = target / "purelib"
+        if not purelib.is_dir():
+            return False
+        file_hashes = data.get("file_hashes")
+        if isinstance(file_hashes, dict) and file_hashes:
+            for relative, expected in file_hashes.items():
+                if not isinstance(relative, str) or not isinstance(expected, str):
+                    return False
+                path = target / relative
+                if not path.is_file() or _hash_file(path) != expected:
+                    return False
+            return True
+        installed_files = data.get("installed_files")
+        if not isinstance(installed_files, int) or installed_files < 1:
+            return False
+        present = sum(
+            1
+            for path in target.rglob("*")
+            if path.is_file() and path.name != ".complete" and path.suffix != ".pyc" and "__pycache__" not in path.parts
+        )
+        return present >= installed_files
+
     def verify_blob(self, sha256: str, *, size: int | None = None) -> Path:
         path = self.blob_path(sha256)
         if not path.is_file():
@@ -199,6 +238,7 @@ class Cache:
         verify: bool = True,
         allowed_hosts: tuple[str, ...] = (),
         allow_insecure: bool = False,
+        _lock_held: bool = False,
     ) -> Path:
         existing = self.blob_path(artifact.sha256)
         if existing.is_file():
@@ -215,6 +255,7 @@ class Cache:
             expected_size=artifact.size,
             allowed_hosts=allowed_hosts,
             allow_insecure=allow_insecure,
+            _lock_held=_lock_held,
         )
 
     def fetch_url(
@@ -225,6 +266,7 @@ class Cache:
         expected_size: int | None = None,
         allowed_hosts: tuple[str, ...] = (),
         allow_insecure: bool = False,
+        _lock_held: bool = False,
     ) -> Path:
         path, _final_url = self.fetch_url_with_final(
             url,
@@ -232,6 +274,7 @@ class Cache:
             expected_size=expected_size,
             allowed_hosts=allowed_hosts,
             allow_insecure=allow_insecure,
+            _lock_held=_lock_held,
         )
         return path
 
@@ -243,6 +286,7 @@ class Cache:
         expected_size: int | None = None,
         allowed_hosts: tuple[str, ...] = (),
         allow_insecure: bool = False,
+        _lock_held: bool = False,
     ) -> tuple[Path, str]:
         _validate_network_url(url, allowed_hosts=allowed_hosts, allow_insecure=allow_insecure)
         if expected_size is not None and expected_size > self.max_artifact_size:
@@ -251,12 +295,13 @@ class Cache:
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.is_file():
             return self.verify_blob(sha256, size=expected_size), self._recorded_final_url(sha256, url)
-        with self._artifact_lock(sha256):
+        lock_context = contextlib.nullcontext() if _lock_held else self._artifact_lock(sha256)
+        with lock_context:
             if destination.is_file():
                 return self.verify_blob(sha256, size=expected_size), self._recorded_final_url(sha256, url)
             temporary_dir = self.root / "temp"
             temporary_dir.mkdir(parents=True, exist_ok=True)
-            fd, temporary_name = tempfile.mkstemp(prefix="download-", dir=temporary_dir)
+            fd, temporary_name = tempfile.mkstemp(prefix=f"download-{os.getpid()}-", suffix=".part", dir=temporary_dir)
             temporary = Path(temporary_name)
             final_url = url
             try:
@@ -371,7 +416,7 @@ class Cache:
         """Fetch mutable live content once and promote it by its observed hash."""
         temporary_dir = self.root / "tmp"
         temporary_dir.mkdir(parents=True, exist_ok=True)
-        fd, temporary_name = tempfile.mkstemp(prefix="live-download-", dir=temporary_dir)
+        fd, temporary_name = tempfile.mkstemp(prefix=f"live-download-{os.getpid()}-", suffix=".part", dir=temporary_dir)
         temporary = Path(temporary_name)
         digest = hashlib.sha256()
         total = 0
@@ -416,30 +461,180 @@ class Cache:
         while True:
             try:
                 lock.mkdir()
+                (lock / "owner").write_text(str(os.getpid()) + "\n", encoding="ascii")
                 break
             except OSError as error:
                 if not isinstance(error, FileExistsError) and not (_IS_WINDOWS and isinstance(error, PermissionError)):
                     raise
+                if self._recover_abandoned_lock(lock):
+                    continue
                 if time.monotonic() >= deadline:
                     raise CacheError("Timed out waiting for another cache writer", artifact_hash=digest) from None
                 time.sleep(0.025)
         try:
             yield
         finally:
-            with contextlib.suppress(OSError):
-                lock.rmdir()
+            shutil.rmtree(lock, ignore_errors=True)
+
+    def _recover_abandoned_lock(self, lock: Path) -> bool:
+        """Remove a lock only when its recorded process is gone and it is old enough."""
+        try:
+            pid = int((lock / "owner").read_text(encoding="ascii").strip())
+            age = time.time() - lock.stat().st_mtime
+        except (OSError, ValueError):
+            return False
+        if age < 1.0 or _pid_is_running(pid):
+            return False
+        abandoned = lock.with_name(lock.name + f".abandoned-{uuid.uuid4().hex}")
+        try:
+            os.replace(lock, abandoned)
+        except OSError:
+            return False
+        shutil.rmtree(abandoned, ignore_errors=True)
+        return True
 
     def list_blobs(self) -> list[Path]:
         root = self.root / "artifacts" / "sha256"
         return sorted(path for path in root.glob("*/*") if path.is_file()) if root.exists() else []
 
     def prune(self, referenced_hashes: set[str]) -> list[Path]:
+        self.reconcile_intermediates()
         removed: list[Path] = []
         for path in self.list_blobs():
-            if path.name not in referenced_hashes:
+            digest = path.name
+            if digest in referenced_hashes:
+                continue
+            with self.lock("target:sha256:" + digest), self._artifact_lock(digest):
+                if digest in referenced_hashes or not path.is_file():
+                    continue
                 path.unlink()
-                (self.root / "metadata" / "origins" / f"{path.name}.json").unlink(missing_ok=True)
+                (self.root / "metadata" / "origins" / f"{digest}.json").unlink(missing_ok=True)
                 removed.append(path)
+        return removed
+
+    def verify_packages(self) -> int:
+        """Validate every retained unpacked target, including corrupt targets omitted from inventory."""
+        targets = self.root / "targets"
+        digests = (
+            sorted(path.name for path in targets.iterdir() if path.is_dir() and _is_sha256(path.name))
+            if targets.is_dir()
+            else []
+        )
+        verified = 0
+        for digest in digests:
+            with self.lock("target:sha256:" + digest), self._artifact_lock(digest):
+                digest_root = targets / digest
+                retained = tuple(path for path in digest_root.iterdir() if path.is_dir())
+                if not retained or any(not self._target_is_complete(path, digest) for path in retained):
+                    raise CacheError("Cached package target is incomplete", artifact_hash=digest)
+                verified += 1
+        return verified
+
+    def discard_download(self, sha256: str) -> None:
+        """Discard a materialized package's source archive under its mutation locks."""
+        digest = sha256.removeprefix("sha256:")
+        with self.lock("target:sha256:" + digest), self._artifact_lock(digest):
+            if self.has_package(digest):
+                _remove_path(self.blob_path(digest))
+
+    def reconcile_intermediates(
+        self,
+        *,
+        stale_after: float = _STALE_INTERMEDIATE_SECONDS,
+        dry_run: bool = False,
+    ) -> list[Path]:
+        """Remove obsolete blobs and abandoned download parts without touching active work."""
+        removed: list[Path] = []
+        now = time.time()
+        for path in self.list_blobs():
+            digest = path.name
+            complete = self.has_package(digest)
+            try:
+                stale_orphan = not complete and now - path.stat().st_mtime >= _LEGACY_STALE_INTERMEDIATE_SECONDS
+            except OSError:
+                continue
+            if not complete and not stale_orphan:
+                continue
+            with self.lock("target:sha256:" + digest), self._artifact_lock(digest):
+                try:
+                    stale_orphan = (
+                        not self.has_package(digest)
+                        and now - path.stat().st_mtime >= _LEGACY_STALE_INTERMEDIATE_SECONDS
+                    )
+                except OSError:
+                    continue
+                if path.is_file() and (self.has_package(digest) or stale_orphan):
+                    if not dry_run:
+                        _remove_path(path)
+                    removed.append(path)
+        temporary_root = self.root / "temp"
+        if temporary_root.is_dir():
+            for path in temporary_root.glob("download-*"):
+                try:
+                    age = now - path.stat().st_mtime
+                except OSError:
+                    continue
+                try:
+                    pid = int(path.name.split("-", 2)[1])
+                except (ValueError, IndexError):
+                    pid = None
+                abandoned = pid is not None and not _pid_is_running(pid) and age >= stale_after
+                legacy_stale = pid is None and age >= _LEGACY_STALE_INTERMEDIATE_SECONDS
+                if abandoned or legacy_stale:
+                    if not dry_run:
+                        _remove_path(path)
+                    removed.append(path)
+        work_root = self.root / "tmp"
+        prefixes = (
+            "live-download-",
+            "depfix-build-",
+            "depfix-source-",
+            "git-",
+            "git-wheel-",
+            "uv-cache-",
+            "uv-resolve-",
+        )
+        if work_root.is_dir():
+            for path in work_root.iterdir():
+                if not path.name.startswith(prefixes):
+                    continue
+                try:
+                    age = now - path.stat().st_mtime
+                except OSError:
+                    continue
+                match = re.search(r"-(\d+)-", path.name)
+                pid = int(match.group(1)) if match is not None else None
+                abandoned = pid is not None and not _pid_is_running(pid) and age >= stale_after
+                legacy_stale = pid is None and age >= _LEGACY_STALE_INTERMEDIATE_SECONDS
+                if abandoned or legacy_stale:
+                    if not dry_run:
+                        _remove_path(path)
+                    removed.append(path)
+        targets_root = self.root / "targets"
+        if targets_root.is_dir():
+            for digest_root in targets_root.iterdir():
+                if not digest_root.is_dir() or not _is_sha256(digest_root.name):
+                    continue
+                digest = digest_root.name
+                for path in digest_root.iterdir():
+                    if self._target_is_complete(path, digest) or not _is_stale(path, now):
+                        continue
+                    with self.lock("target:sha256:" + digest), self._artifact_lock(digest):
+                        if path.exists() and not self._target_is_complete(path, digest) and _is_stale(path, now):
+                            if not dry_run:
+                                _remove_path(path)
+                            removed.append(path)
+        built_root = self.root / "built-wheels"
+        if built_root.is_dir():
+            for path in built_root.iterdir():
+                if not path.is_dir() or not _is_sha256(path.name) or not _is_stale(path, now):
+                    continue
+                digest = path.name
+                with self.lock("target:sha256:" + digest), self._artifact_lock(digest):
+                    if path.exists() and _is_stale(path, now):
+                        if not dry_run:
+                            _remove_path(path)
+                        removed.append(path)
         return removed
 
     def record_artifact(self, artifact: Artifact) -> None:
@@ -581,9 +776,6 @@ class Cache:
         targets = self.root / "targets"
         if targets.is_dir():
             digests.update(path.name for path in targets.iterdir() if path.is_dir() and _is_sha256(path.name))
-        built_wheels = self.root / "built-wheels"
-        if built_wheels.is_dir():
-            digests.update(path.name for path in built_wheels.iterdir() if path.is_dir() and _is_sha256(path.name))
         metadata = self.root / "metadata" / "packages"
         if metadata.is_dir():
             digests.update(path.stem for path in metadata.glob("*.json") if _is_sha256(path.stem))
@@ -638,6 +830,7 @@ class Cache:
         dry_run: bool = False,
     ) -> CacheCleanupResult:
         """Remove artifacts unused for at least ``days`` while preserving active leases."""
+        self.reconcile_intermediates(dry_run=dry_run)
         if isinstance(days, bool) or not isinstance(days, int) or days < 0:
             raise ValueError("cache cleanup days must be a non-negative integer")
         now = time.time()
@@ -654,7 +847,8 @@ class Cache:
             dry_run=dry_run,
             eligible_before=cutoff,
         )
-        self._touch_cleanup_clock()
+        if not dry_run:
+            self._touch_cleanup_clock()
         return result
 
     def remove_package(
@@ -729,10 +923,10 @@ class Cache:
         *,
         reasons: tuple[PackageInstallReason, ...] = (),
     ) -> CachedPackage | None:
-        blob = self.blob_path(digest)
         target = self.root / "targets" / digest
-        built_wheel = self.root / "built-wheels" / digest
-        if not blob.is_file() and not target.is_dir() and not built_wheel.is_dir():
+        if not target.is_dir() or not any(
+            self._target_is_complete(path, digest) for path in target.iterdir() if path.is_dir()
+        ):
             return None
         data: dict[str, object] = {}
         try:
@@ -764,13 +958,11 @@ class Cache:
             distribution=distribution,
             version=str(data.get("version") or ""),
             artifact_hash=digest,
-            filename=str(data.get("filename") or blob.name),
+            filename=str(data.get("filename") or digest),
             installed_at=datetime.fromtimestamp(installed, UTC),
             last_used_at=datetime.fromtimestamp(last_used, UTC) if last_used is not None else None,
             size_bytes=(
-                (blob.stat().st_size if blob.is_file() else 0)
-                + _directory_size(target)
-                + _directory_size(built_wheel)
+                _directory_size(target)
                 + (source_blob.stat().st_size if source_blob is not None and source_blob.is_file() else 0)
             ),
             reasons=reasons,
@@ -1195,6 +1387,17 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_stale(path: Path, now: float) -> bool:
+    """Require an entire intermediate tree to be older than the legacy grace period."""
+    try:
+        newest = path.stat().st_mtime
+        if path.is_dir():
+            newest = max((item.stat().st_mtime for item in path.rglob("*")), default=newest)
+    except OSError:
+        return False
+    return now - newest >= _LEGACY_STALE_INTERMEDIATE_SECONDS
 
 
 def _header_integer(value: object) -> int | None:

@@ -9,6 +9,8 @@
 - `conftest.py` owns deterministic artifact fixtures.
 - Test modules group end-to-end, runtime/resolver, public-product, lock/cache, standard-import scope, and live cross-version
   object-boundary behavior.
+- `test_simple_index.py` owns network-free Simple JSON/HTML negotiation, metadata translation, redirect, media-type,
+  missing-size, and grouped custom-index isolation regressions.
 - `test_release_tooling.py` owns network-free immutable-tag and tag-safe dispatch regressions for the owner release helper.
 
 ## Local Contracts
@@ -24,7 +26,12 @@
   real compiled-extension path when the interpreter provides a suitable test extension.
 - Cache lifecycle tests must cover installation/use timestamps, total reclaimed targets, returning-graph reservations,
   active-runtime leases, read-only file/tree removal, retention configuration precedence, code/command provenance,
-  same-version artifact variants, dependency trees, and equivalent Python/CLI inspection and removal behavior.
+  same-version artifact variants, dependency trees, installed-payload corruption, ephemeral archive reconciliation,
+  abandoned download ownership, stale extraction/build staging, dry-run immutability, and equivalent Python/CLI
+  inspection and removal behavior. uv-boundary tests must prove Depfix uses and promptly removes its own subprocess cache,
+  preserves ambient user-owned uv caches, and reclaims only dead-owner crash leftovers.
+- Bundle and online manifest-repair tests must cover exact hash-verified reacquisition of source-built artifacts after
+  their ephemeral wheels are removed; offline repair must still fail clearly when no complete target or bundle exists.
 - Resolution tests must cover compatible cache reuse across separate and grouped roots, newest-first overrides, cached
   top-level requests, public loading signatures, scanner preservation, and configuration precedence.
 - Scoped-index tests must cover primary-only precedence, grouped and async loading, concurrent isolation, graph identity,

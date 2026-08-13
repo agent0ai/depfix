@@ -841,9 +841,8 @@ def _cache(args: argparse.Namespace) -> object:
             value = packages
         return _CacheListing(args.view, value, inventory.total_size_bytes)
     if command == "verify":
-        for path in cache.list_blobs():
-            cache.verify_blob(path.name)
-        return {"verified": len(cache.list_blobs())}
+        cache.reconcile_intermediates()
+        return {"verified": cache.verify_packages()}
     if command == "prune":
         referenced: set[str] = set()
         for manifest in (cache.root / "manifests").glob("*/imports.lock"):

@@ -243,8 +243,9 @@ depfix.remove_cached_package(
 ```
 
 `CachedPackage` reports normalized `distribution`, `version`, `artifact_hash`, `filename`, UTC `installed_at`, optional
-UTC `last_used_at`, total `size_bytes`, and zero or more `reasons`. Size includes the immutable blob, all materialized
-environment targets, and associated retained build/source data. Each `PackageInstallReason` includes a kind,
+UTC `last_used_at`, total `size_bytes`, and zero or more `reasons`. Size is the retained operational package footprint,
+including materialized environment targets but excluding ephemeral downloads and build inputs. Each
+`PackageInstallReason` includes a kind,
 secret-redacted description, UTC `recorded_at`, and, when available, the originating command or Python source path and
 line plus the exact manifest path.
 
@@ -271,12 +272,19 @@ daily in the background. It protects the graph currently being
 prepared and every live runtime lease; it can be disabled with `cache_auto_cleanup=False` without disabling explicit
 cleanup.
 
+Downloaded archives are not an offline cache. Successful materialization removes them; repeated projects reuse the
+complete unpacked package by hash. `verify_manifest()` validates that each target is complete. `create_bundle()` may
+reacquire and hash-check exact manifest artifacts online, while offline installation fails clearly when neither a complete
+target nor a bundle supplies the required ephemeral input.
+
 ## Project API
 
 `depfix.project` exports `scan_project`, `export_project`, `install_packages`, `install_manifest`, `create_bundle`, and
 `verify_manifest`.
 These are the implementations called by the CLI; they return immutable result dataclasses. `install_manifest()` never
-resolves or builds. Passing `target=` requires `local=True` so verified package trees are actually copied to that location.
+resolves or changes locked selections. During connected repair it may rebuild a missing source-derived wheel from recorded
+provenance, but accepts it only when its size and SHA-256 match the manifest exactly. Passing `target=` requires
+`local=True` so verified package trees are actually copied to that location.
 `export_project(..., prefer_newest=None)` uses the same inherited cache-reuse policy and accepts an explicit override.
 
 ```python
