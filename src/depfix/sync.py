@@ -100,9 +100,9 @@ def _sync_artifact(
             raise ValueError(f"unsupported locked artifact type: {artifact.filename}")
     cache.record_artifact(artifact)
     if cache.has_package(artifact.sha256):
-        cache.blob_path(artifact.sha256).unlink(missing_ok=True)
+        cache.discard_blob(artifact.sha256, _lock_held=True)
         if artifact.source_sha256 and artifact.source_sha256 != artifact.sha256:
-            cache.blob_path(artifact.source_sha256).unlink(missing_ok=True)
+            cache.discard_blob(artifact.source_sha256)
         built = cache.root / "built-wheels" / artifact.sha256
         if built.exists():
             _remove_incomplete_target(built)

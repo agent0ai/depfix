@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 import json
 import shutil
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -904,7 +905,10 @@ def test_online_manifest_repair_rebuilds_ephemeral_source_wheel(
     sync_graph(graph, cache, offline=True)
     manifest = tmp_path / "imports.lock"
     write_manifest(graph, manifest)
-    (cache.unpacked_path(artifact.id) / "purelib" / "source_repair.py").unlink()
+    materialized = cache.unpacked_path(artifact.id) / "purelib" / "source_repair.py"
+    materialized.parent.chmod(stat.S_IRWXU)
+    materialized.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    materialized.unlink()
 
     def reproduce_wheel(_self, _source, *, output, offline=None):  # type: ignore[no-untyped-def]
         output.mkdir(parents=True, exist_ok=True)

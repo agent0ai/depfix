@@ -536,16 +536,16 @@ def create_bundle(
                 _write_zip_entry(archive, "runtime/BOOTSTRAP.txt", bootstrap)
                 files += 1
         for artifact in graph.artifacts:
-            cache.blob_path(artifact.sha256).unlink(missing_ok=True)
+            cache.discard_blob(artifact.sha256, _lock_held=True)
             if artifact.source_sha256 and artifact.source_sha256 != artifact.sha256:
-                cache.blob_path(artifact.source_sha256).unlink(missing_ok=True)
+                cache.discard_blob(artifact.source_sha256)
             shutil.rmtree(cache.root / "built-wheels" / artifact.sha256, ignore_errors=True)
     os.replace(temporary, destination)
     digest = hashlib.sha256(destination.read_bytes()).hexdigest()
     for wheel in runtime_wheels:
         wheel_digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
         wheel.unlink(missing_ok=True)
-        cache.blob_path(wheel_digest).unlink(missing_ok=True)
+        cache.discard_blob(wheel_digest)
     runtime_store = cache.root / "built-wheels" / "depfix-runtime"
     with contextlib.suppress(OSError):
         runtime_store.rmdir()

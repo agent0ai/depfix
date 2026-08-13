@@ -2,6 +2,11 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.9.1 - 2026-08-13
+
+- Restored owner write permission before deleting hardened ephemeral artifacts, preserving self-cleaning behavior on
+  Windows while keeping completed package targets read-only.
+
 ## 0.9.0 - 2026-08-13
 
 - Added standards-compatible Simple HTML custom-index discovery alongside PEP 691 JSON, preserving redirected-link

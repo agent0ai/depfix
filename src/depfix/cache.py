@@ -174,6 +174,12 @@ class Cache:
     def has_blob(self, sha256: str) -> bool:
         return self.blob_path(sha256).is_file()
 
+    def discard_blob(self, sha256: str, *, _lock_held: bool = False) -> None:
+        """Remove an ephemeral artifact after restoring owner write permission."""
+        lock_context = contextlib.nullcontext() if _lock_held else self._artifact_lock(sha256)
+        with lock_context:
+            _remove_path(self.blob_path(sha256))
+
     def has_package(self, sha256: str) -> bool:
         """Return whether the current environment has a complete unpacked package."""
         target = self.unpacked_path("sha256:" + sha256.removeprefix("sha256:"))

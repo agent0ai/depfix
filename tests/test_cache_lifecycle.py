@@ -441,6 +441,8 @@ def test_package_verification_detects_deleted_materialized_payload(tmp_path: Pat
     artifact = graph.artifacts[0]
     payload = cache.unpacked_path(artifact.id) / "purelib" / "cache_demo.py"
 
+    payload.parent.chmod(stat.S_IRWXU)
+    payload.chmod(stat.S_IRUSR | stat.S_IWUSR)
     payload.unlink()
 
     assert not cache.has_package(artifact.sha256)
@@ -457,7 +459,10 @@ def test_cache_verify_reports_corrupt_target_omitted_from_inventory(
 ) -> None:
     cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
     artifact = graph.artifacts[0]
-    (cache.unpacked_path(artifact.id) / "purelib" / "cache_demo.py").unlink()
+    payload_path = cache.unpacked_path(artifact.id) / "purelib" / "cache_demo.py"
+    payload_path.parent.chmod(stat.S_IRWXU)
+    payload_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    payload_path.unlink()
 
     assert cache.list_packages() == ()
     exit_code = cli_main(["--json", "--cache-dir", str(cache_dir), "cache", "verify"])

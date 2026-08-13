@@ -43,6 +43,13 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.9.0 — 2026-08-13 (superseded before PyPI publication)
+
+- Tag: `https://github.com/agent0ai/depfix/tree/v0.9.0`
+- The complete hosted gate exposed permission failures when removing hardened ephemeral inputs on Windows and when test
+  fixtures intentionally corrupted read-only targets on non-root runners. Validation failed before draft staging, OIDC,
+  or PyPI publication; the permission-safe correction is released as `0.9.1` without moving the immutable tag.
+
 ### 0.7.0 — 2026-08-06
 
 - PyPI: `https://pypi.org/project/depfix/0.7.0/`
