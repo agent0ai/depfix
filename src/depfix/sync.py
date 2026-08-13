@@ -11,7 +11,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from .cache import Cache
+from .cache import Cache, _remove_path
 from .models import Artifact, LockedGraph
 from .progress import ProgressReporter
 from .wheel import extract_wheel
@@ -156,14 +156,7 @@ def _materialize_python_file(
 
 
 def _remove_incomplete_target(path: Path) -> None:
-    def make_writable_and_retry(function, value, _error):  # type: ignore[no-untyped-def]
-        Path(value).chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-        function(value)
-
-    if path.is_dir():
-        shutil.rmtree(path, onerror=make_writable_and_retry)
-    else:
-        path.unlink()
+    _remove_path(path)
 
 
 def _policy_strings(value: object) -> tuple[str, ...]:

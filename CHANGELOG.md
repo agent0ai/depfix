@@ -2,6 +2,11 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.9.2 - 2026-08-13
+
+- Made incomplete-target recovery restore write permissions across the complete hardened tree before removal, including
+  Python 3.13 non-root runners.
+
 ## 0.9.1 - 2026-08-13
 
 - Restored owner write permission before deleting hardened ephemeral artifacts, preserving self-cleaning behavior on

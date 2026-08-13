@@ -43,6 +43,13 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.9.1 — 2026-08-13 (superseded before PyPI publication)
+
+- Tag: `https://github.com/agent0ai/depfix/tree/v0.9.1`
+- The hosted non-root Python 3.13 gate exposed a second permission boundary when replacing an intentionally corrupted
+  hardened target. Validation failed before draft staging, OIDC, or PyPI publication; complete tree permission recovery
+  is released as `0.9.2` without moving the immutable tag.
+
 ### 0.9.0 — 2026-08-13 (superseded before PyPI publication)
 
 - Tag: `https://github.com/agent0ai/depfix/tree/v0.9.0`
