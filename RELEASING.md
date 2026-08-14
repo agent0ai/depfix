@@ -43,6 +43,13 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.10.1 — 2026-08-14 (superseded before PyPI publication)
+
+- Tag: `https://github.com/agent0ai/depfix/tree/v0.10.1`
+- Hosted validation showed that one shared SQLite timeout could not both merge routine concurrent usage writes reliably
+  and preserve bounded first-activation failure. Validation failed before distribution staging, OIDC, or PyPI
+  publication; separate contention bounds are released as `0.10.2` without moving the immutable tag.
+
 ### 0.10.0 — 2026-08-14 (superseded before PyPI publication)
 
 - Tag: `https://github.com/agent0ai/depfix/tree/v0.10.0`

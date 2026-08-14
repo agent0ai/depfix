@@ -41,7 +41,8 @@ _DOWNLOAD_ATTEMPTS = 3
 _AUTOMATIC_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 _RESERVATION_GRACE_SECONDS = 60 * 60
 _USAGE_WRITE_INTERVAL_SECONDS = 60 * 60
-_USAGE_BUSY_TIMEOUT_SECONDS = 0.5
+_USAGE_BUSY_TIMEOUT_SECONDS = 2.0
+_ACTIVATION_USAGE_BUSY_TIMEOUT_SECONDS = 0.1
 _STALE_INTERMEDIATE_SECONDS = 60 * 60
 _LEGACY_STALE_INTERMEDIATE_SECONDS = 24 * 60 * 60
 
@@ -808,7 +809,7 @@ class Cache:
         """Register one active artifact closure with the process-wide renewer."""
         if interval_seconds <= 0:
             raise ValueError("usage renewal interval must be positive")
-        self.record_usage(artifact_hashes)
+        self._record_usage(artifact_hashes, busy_timeout_seconds=_ACTIVATION_USAGE_BUSY_TIMEOUT_SECONDS)
         return _register_usage(
             self,
             artifact_hashes,
@@ -819,13 +820,22 @@ class Cache:
 
     def record_usage(self, artifact_hashes: set[str] | frozenset[str], *, used_at: float | None = None) -> None:
         """Atomically renew exact artifact timestamps in the shared usage store."""
+        self._record_usage(artifact_hashes, used_at=used_at, busy_timeout_seconds=_USAGE_BUSY_TIMEOUT_SECONDS)
+
+    def _record_usage(
+        self,
+        artifact_hashes: set[str] | frozenset[str],
+        *,
+        used_at: float | None = None,
+        busy_timeout_seconds: float,
+    ) -> None:
         hashes = tuple(sorted(artifact_hashes))
         if not hashes:
             return
         now = time.time() if used_at is None else used_at
         path = self._usage_store_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        timeout = min(max(self.timeout, 0.0), _USAGE_BUSY_TIMEOUT_SECONDS)
+        timeout = min(max(self.timeout, 0.0), busy_timeout_seconds)
         try:
             with sqlite3.connect(path, timeout=timeout, isolation_level=None) as connection:
                 connection.execute(f"PRAGMA busy_timeout = {round(timeout * 1000)}")
