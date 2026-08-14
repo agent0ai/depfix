@@ -57,6 +57,61 @@ def default(
     register_default(selection)
 
 
+def default_requirements(
+    path: str | os.PathLike[str],
+    *,
+    refresh: bool = False,
+    manifest: str | os.PathLike[str] | None = None,
+    frozen: bool | None = None,
+    offline: bool | None = None,
+    isolation: str | None = None,
+    allow_unsafe: bool | None = None,
+    prefer_newest: bool | None = None,
+    index_url: str | None = None,
+    extra_index_url: str | tuple[str, ...] | list[str] | None = None,
+) -> None:
+    """Activate the supported declarations in one requirements-file tree."""
+    from .requirements import read_requirements
+
+    source_file, source_line, _caller_base = _caller_location(1)
+    requirements_path = Path(path).expanduser().resolve()
+    collected = read_requirements(requirements_path)
+    selected_index = index_url or collected.index_url
+    explicit_extras = _index_tuple(extra_index_url)
+    selected_extras = tuple(dict.fromkeys((*collected.extra_index_urls, *explicit_extras)))
+    settings = resolve_loading_settings(
+        manifest=manifest,
+        frozen=frozen,
+        offline=offline,
+        allow_unsafe=allow_unsafe,
+        prefer_newest=prefer_newest,
+        index_url=selected_index,
+        extra_index_url=selected_extras or None,
+    )
+    if not collected.requirements:
+        return
+    selection = prepare_import_selection(
+        tuple(collected.requirements),
+        constraints=tuple(collected.constraints),
+        declaration_origins=tuple((str(source), line) for source, line in collected.requirement_origins),
+        mode="default",
+        refresh=refresh,
+        isolation=isolation,
+        settings=settings,
+        base_dir=requirements_path.parent,
+        source_file=source_file,
+        source_line=source_line,
+    )
+    if selection.bindings:
+        register_default(selection)
+
+
+def _index_tuple(value: str | tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    return (value,) if isinstance(value, str) else tuple(value)
+
+
 def using(
     *specifiers: str,
     refresh: bool = False,

@@ -22,6 +22,30 @@ add new import roots but cannot silently replace an existing root with another a
 several roots, such as `setuptools` and `pkg_resources`.
 
 ```python
+depfix.default_requirements(
+    path,
+    *,
+    refresh=False,
+    manifest=None,
+    frozen=None,
+    offline=None,
+    isolation=None,
+    allow_unsafe=None,
+    prefer_newest=None,
+    index_url=None,
+    extra_index_url=None,
+) -> None
+```
+
+`default_requirements()` accepts `str` and `os.PathLike` paths, resolved from the current working directory. It parses
+the complete file tree before resolution, resolves active declarations as one group, and commits their ordinary-import
+bindings atomically with `default()` precedence. Nested `-r` and `-c` paths resolve from the containing file. Supported
+syntax includes blank lines, comments, continuations, PEP 508 names/specifiers/extras/markers, direct URLs, local paths,
+VCS references, local editable entries, and `--index-url`/`--extra-index-url`. Environment-marker exclusions are not
+resolved or activated. Pip `--hash` and other unsupported directives fail explicitly with credential-redacted filename
+and line context; express an exact direct artifact hash as `#sha256=` or use a prepared Depfix manifest.
+
+```python
 depfix.using(
     *specifiers,
     refresh=False,
@@ -40,12 +64,39 @@ depfix.using(
 function decorators. Scope state uses context-local storage; leaving a scope restores the prior selection while modules
 already loaded from it remain usable. It is not a class decorator.
 
-Both functions accept one or more bare/PyPI requirements, `pypi:`, `git:`, `url:`, `file:`, `py:`, or standard PEP 508
+`default()` and `using()` accept one or more bare/PyPI requirements, `pypi:`, `git:`, `url:`, `file:`, `py:`, or standard PEP 508
 direct references. A multi-argument call is resolved and exported as one grouped top-level selection.
 
-The ordinary-import dispatcher is installed once, on the first `default()` or `using()` call. It resolves a Depfix-loaded
-caller's permanent realm first, then the active scope, then defaults, and delegates unmanaged imports unchanged. Merely
-importing `depfix` has no import-hook, resolver, subprocess, cache, or network side effect.
+The ordinary-import dispatcher is installed once, when the first `default()`, active `default_requirements()`, or
+`using()` selection needs it. It resolves a Depfix-loaded caller's permanent realm first, then the active scope, then
+defaults, and delegates unmanaged imports unchanged. Merely importing `depfix` has no import-hook, resolver, subprocess,
+cache, or network side effect.
+
+```python
+depfix.patch_import() -> None
+depfix.unpatch_import() -> None
+```
+
+`patch_import()` installs an idempotent, thread-safe, process-local fallback for packages already materialized in the
+configured shared store. It invokes Python's pre-existing importer first, so builtins, standard-library modules, local
+and active-environment packages, namespace state, and third-party finders retain precedence. A failure raised while an
+ordinary package is executing is propagated and never treated as a missing root. Explicit `using()` scopes and
+`default()` bindings precede the catch-all fallback. If the configured exact manifest provides the requested root, that
+pinned graph precedes unrelated installed graphs.
+
+Selection uses the exact target-compatible manifests and distribution-to-module metadata recorded during Depfix
+installation. When the configured manifest does not provide the root, the newest installed version among complete
+compatible graphs for one distribution wins. Identical graph records are deduplicated. Compatible namespace contributors
+from one exact recorded graph are co-selected; competing
+artifacts/dependency graphs at the selected version, unrelated providers of one root, or incomparable contributor sets
+raise `StoreImportError` with an explicit-selection remedy. Unsafe/native classification, ABI/platform checks, shared-owner
+compatibility, and the graph's exact dependencies remain enforced. Unknown imports retain Python's original
+`ModuleNotFoundError`; the fallback never resolves, downloads, or installs packages.
+
+`unpatch_import()` is idempotent and removes only Depfix's catch-all behavior. It does not remove unrelated hooks or
+unload modules that were already imported. Pure-Python fallback modules preserve synthetic realm identity; native graphs
+retain Python's process-global module lifetime. Threads share one selection cache and serialize first selection per root.
+New subprocesses, including spawn workers, must call `patch_import()` themselves.
 
 ## Explicit dynamic loading
 
@@ -196,9 +247,11 @@ decision. Loaded package code still has the normal authority of the Python proce
 
 `depfix.configure(...)` is the single process-wide Python configuration entry point, including for future global
 parameters. It accepts `manifest`, `frozen`, `offline`, `allow_unsafe`, `prefer_newest`, `cache_dir`, `cache_retention_days`,
-`cache_auto_cleanup`, `uv`, `index_url`, `extra_index_url`, and `log_level`. Precedence is per-call, `configure`,
-environment, optional project config/manifest discovery, defaults. An explicit per-call `False` therefore overrides a
-process-wide `True`.
+`cache_auto_cleanup`, `cache_renewal_seconds`, `cache_deletion_grace_hours`, `uv`, `index_url`, `extra_index_url`, and
+`log_level`. Precedence is per-call, `configure`, environment, project configuration, global user configuration, then
+defaults. The cleanup environment names are `DEPFIX_CACHE_RETENTION_DAYS`, `DEPFIX_CACHE_AUTO_CLEANUP`,
+`DEPFIX_CACHE_RENEWAL_SECONDS`, and `DEPFIX_CACHE_DELETION_GRACE_HOURS`; TOML uses the corresponding hyphenated names. An
+explicit per-call `False` therefore overrides a process-wide `True`.
 
 Persistent project defaults live together in `.depfix/config.toml`. For example:
 
@@ -240,6 +293,7 @@ depfix.remove_cached_package(
     cache_dir=None,
     dry_run=False,
 ) -> CacheCleanupResult
+depfix.uninstall_packages(*specifiers, cache_dir=None, dry_run=False) -> UninstallResult
 ```
 
 `CachedPackage` reports normalized `distribution`, `version`, `artifact_hash`, `filename`, UTC `installed_at`, optional
@@ -265,13 +319,19 @@ remove.
 
 `cleanup_cache()` uses the configured 30-day retention when `days` is omitted; zero selects every inactive installed
 artifact. `remove_cached_package()` matches one normalized distribution and can be narrowed by version or SHA-256.
+`uninstall_packages()` is the preferred explicit distribution-removal API. Each argument is a bare PEP 508 distribution
+name or a name with PEP 440 clauses. It rejects URLs, extras, markers, and source forms, deduplicates overlapping artifact
+matches, protects active preparation/runtime targets, and never selects dependencies implicitly. `UninstallResult`
+contains per-specifier normalized match identities plus the deduplicated `matched`, `removed`, and `skipped_active`
+artifacts; with `dry_run=True`, `removed` means would remove and no filesystem or metadata state changes.
 
-`CacheCleanupResult.removed` contains the selected entries (the would-remove entries for `dry_run=True`),
-`skipped_active` contains matching artifacts protected by preparation reservations or live runtimes, and
-`reclaimed_bytes` reports the removed or would-remove package footprint. Automatic cleanup uses the same policy once
-daily in the background. It protects the graph currently being
-prepared and every live runtime lease; it can be disabled with `cache_auto_cleanup=False` without disabling explicit
-cleanup.
+`CacheCleanupResult.removed` contains the selected entries (the would-remove entries for explicit `dry_run=True`),
+`skipped_active` contains matching artifacts protected by preparation reservations or an explicit protected set, and
+`reclaimed_bytes` reports the removed or would-remove package footprint. Automatic cleanup runs at most daily, records
+`pending_candidates` first, and removes `eligible` candidates only after the configured grace and locked revalidation.
+It protects prepared and periodically renewed full dependency closures. Set `cache_auto_cleanup=False` to disable the
+background policy without disabling explicit immediate cleanup. Usage is one transactional artifact-keyed store without
+process/runtime identity; a process suspended beyond retention plus grace is not distinguishable from stopped use.
 
 Downloaded archives are not an offline cache. Successful materialization removes them; repeated projects reuse the
 complete unpacked package by hash. `verify_manifest()` validates that each target is complete. `create_bundle()` may

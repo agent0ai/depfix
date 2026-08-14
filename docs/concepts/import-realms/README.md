@@ -32,6 +32,12 @@ persistent default map, and finally the previous importer. Pure managed versions
 keys. Native selections use guarded logical keys; `using()` scopes their lookup visibility but do not unload them or
 release process ownership on exit.
 
+`patch_import()` adds an explicit final fallback after that previous importer reports a genuinely missing root. It scans
+only exact compatible graphs already materialized in the shared store, uses their recorded module ownership, and does not
+invoke resolution or network access. Explicit scope/default bindings remain earlier in dispatch, and a configured exact
+manifest remains authoritative for roots it provides. `unpatch_import()` removes the fallback without removing unrelated
+hooks; already imported modules keep normal Python lifetimes.
+
 The public `depfix_imports` alias root is a lightweight finder at runtime and a physical generated stub package for editors.
 The two layers share graph/node/module/specifier identities.
 

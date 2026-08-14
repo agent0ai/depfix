@@ -49,6 +49,7 @@ class DepfixError(Exception):
     ) -> None:
         super().__init__(message)
         self.message = message
+        self.name: str | None = module
         self.request = request if request is not None else specifier
         self.normalized_request = normalized_request
         self.source = source
@@ -226,8 +227,16 @@ class InvalidUsingScopeError(DepfixError):
     pass
 
 
+class RequirementsFileError(DepfixError, ValueError):
+    """A requirements declaration could not be parsed safely."""
+
+
 class ScopeModuleNotProvidedError(ModuleNotProvidedError):
     pass
+
+
+class StoreImportError(ModuleDiscoveryError, ModuleNotFoundError):
+    """An installed-store fallback exists but cannot be selected safely."""
 
 
 class ImportDispatcherConflictError(DepfixError, ImportError):

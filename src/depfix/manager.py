@@ -11,6 +11,11 @@ from threading import RLock, Thread
 from types import ModuleType
 from typing import TYPE_CHECKING
 
+from packaging.markers import Marker, default_environment
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
+
 from .cache import Cache
 from .config import ImportDeclaration, ProjectConfig
 from .dispatcher import ImportSelection, ModuleBinding, reset_dispatcher_state
@@ -18,8 +23,11 @@ from .errors import (
     CacheError,
     FrozenManifestError,
     InvalidUsingScopeError,
+    ManifestError,
     ManifestMismatchError,
     NativeIsolationRequired,
+    ResolutionError,
+    StoreImportError,
     UnsafePackageError,
 )
 from .manifest import assert_compatible_environment, load_manifest, write_manifest
@@ -34,7 +42,9 @@ from .sync import sync_graph
 if TYPE_CHECKING:
     from .handles import PackageHandle
 
-_runtimes: dict[tuple[str, str, str, tuple[str, ...], bool], DepfixRuntime] = {}
+_runtimes: dict[
+    tuple[str, str, str, tuple[str, ...], bool, tuple[tuple[str, tuple[str, ...]], ...]], DepfixRuntime
+] = {}
 _active_runtimes: dict[tuple[str, str, str, bool], DepfixRuntime] = {}
 _memory_requests: dict[str, tuple[DepfixRuntime, Alias]] = {}
 _memory_groups: dict[str, ImportSelection] = {}
@@ -75,6 +85,7 @@ def prepare_request(
             return _memory_requests[identity]
         request_lock = _request_locks.setdefault(identity, RLock())
     cache = Cache(settings.cache_dir)
+    cache.renewal_interval_seconds = settings.cache_renewal_seconds
     progress = ProgressReporter(settings.log_level)
     record_manifest: Path | None = settings.manifest
     with request_lock, cache.lock("resolution:" + identity):
@@ -185,6 +196,8 @@ def prepare_request(
 def prepare_import_selection(
     specifiers: tuple[str, ...],
     *,
+    constraints: tuple[str, ...] = (),
+    declaration_origins: tuple[tuple[str, int], ...] = (),
     mode: str,
     refresh: bool,
     isolation: str | None,
@@ -208,14 +221,24 @@ def prepare_import_selection(
             request=", ".join(specifiers),
             remediation="run native packages in an application-owned worker process",
         )
-    unique_sources: dict[str, tuple[SourceInfo, str]] = {}
-    for specifier in specifiers:
+    if declaration_origins and len(declaration_origins) != len(specifiers):
+        raise ValueError("declaration origins must match the package declarations")
+    input_origins = declaration_origins or tuple((source_file, source_line) for _ in specifiers)
+    unique_sources: dict[str, tuple[SourceInfo, str, tuple[str, int]]] = {}
+    marker_environment = {key: str(value) for key, value in default_environment().items()}
+    for index, specifier in enumerate(specifiers):
         source = parse_source(specifier, base_dir=base_dir)
-        unique_sources.setdefault(source.normalized, (source, specifier))
+        if source.marker and not Marker(source.marker).evaluate(marker_environment):
+            continue
+        unique_sources.setdefault(source.normalized, (source, specifier, input_origins[index]))
     sources = sorted(unique_sources.values(), key=lambda item: item[0].normalized)
-    normalized = tuple(source.normalized for source, _specifier in sources)
-    originals = tuple(specifier for _source, specifier in sources)
-    identity = _group_identity(normalized, mode, selected_isolation, settings)
+    normalized = tuple(source.normalized for source, _specifier, _origin in sources)
+    originals = tuple(specifier for _source, specifier, _origin in sources)
+    active_origins = tuple(origin for _source, _specifier, origin in sources)
+    normalized_constraints = _constraint_identity(constraints)
+    if not originals:
+        return ImportSelection.create({}, (), (), mode, source_file=source_file, source_line=source_line)
+    identity = _group_identity(normalized, normalized_constraints, mode, selected_isolation, settings)
     with _guard:
         if not refresh and identity in _memory_groups:
             cached = _memory_groups[identity]
@@ -229,6 +252,7 @@ def prepare_import_selection(
             )
         request_lock = _request_locks.setdefault("group:" + identity, RLock())
     cache = Cache(settings.cache_dir)
+    cache.renewal_interval_seconds = settings.cache_renewal_seconds
     progress = ProgressReporter(settings.log_level)
     record_manifest: Path | None = settings.manifest
     with request_lock, cache.lock("group-resolution:" + identity):
@@ -246,7 +270,14 @@ def prepare_import_selection(
         if settings.manifest is not None:
             graph = load_manifest(settings.manifest)
             assert_compatible_environment(graph, settings.manifest)
-            aliases = _match_manifest_group(graph, normalized, mode, selected_isolation, settings)
+            aliases = _match_manifest_group(
+                graph,
+                normalized,
+                normalized_constraints,
+                mode,
+                selected_isolation,
+                settings,
+            )
             _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
             runtime = _runtime(
                 graph,
@@ -286,8 +317,8 @@ def prepare_import_selection(
                         specifier=specifier,
                         module=None,
                         api="load_package",
-                        source_file=source_file,
-                        source_line=source_line,
+                        source_file=active_origins[index][0],
+                        source_line=active_origins[index][1],
                         base_dir=base_dir,
                         isolation=selected_isolation,
                         allow_unsafe=settings.allow_unsafe,
@@ -304,6 +335,7 @@ def prepare_import_selection(
                             "isolation": selected_isolation,
                             "allow-unsafe": settings.allow_unsafe,
                             "prefer-newest": settings.prefer_newest,
+                            **({"constraints": normalized_constraints} if normalized_constraints else {}),
                         },
                     )
                 )
@@ -347,10 +379,210 @@ def prepare_import_selection(
         return selection
 
 
+def prepare_store_import(root: str) -> ModuleBinding | None:
+    """Select one exact, compatible installed graph for an unresolved import root."""
+    settings = resolve_settings(discover=True)
+    cache = Cache(settings.cache_dir)
+    cache.renewal_interval_seconds = settings.cache_renewal_seconds
+    candidates: list[tuple[tuple[tuple[str, Version], ...], str, Path, LockedGraph, tuple[str, ...]]] = []
+    rejected: list[str] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    manifest_paths = _store_manifest_paths(cache, settings.manifest)
+    if settings.manifest is not None and settings.manifest.is_file():
+        configured = settings.manifest.resolve()
+        try:
+            configured_graph = load_manifest(configured)
+        except (ManifestError, OSError, ValueError):
+            pass
+        else:
+            if any(
+                root in {name.split(".", 1)[0] for name in node.provided_modules} for node in configured_graph.nodes
+            ):
+                manifest_paths = (configured,)
+    for path in manifest_paths:
+        try:
+            graph = load_manifest(path)
+        except (ManifestError, OSError, ValueError):
+            continue
+        providers = tuple(
+            sorted(
+                (node for node in graph.nodes if root in {name.split(".", 1)[0] for name in node.provided_modules}),
+                key=lambda node: (node.distribution, node.version, node.artifact),
+            )
+        )
+        if not providers:
+            continue
+        if len(providers) > 1 and not all(root in node.namespace_contributions for node in providers):
+            rejected.append(
+                "multiple non-namespace providers: "
+                + ", ".join(sorted(f"{node.distribution}=={node.version}" for node in providers))
+            )
+            continue
+        provider_ids = tuple(node.id for node in providers)
+        identity = (graph.graph_id, provider_ids)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        try:
+            assert_compatible_environment(graph, path)
+            versions = tuple(sorted((node.distribution, Version(node.version)) for node in providers))
+        except (ManifestMismatchError, InvalidVersion) as exc:
+            rejected.append(f"{', '.join(sorted(f'{node.distribution}=={node.version}' for node in providers))}: {exc}")
+            continue
+        closure = _node_closure(graph, provider_ids)
+        missing = [
+            graph.artifact_index[graph.node_index[node_id].artifact].sha256
+            for node_id in closure
+            if not cache.has_package(graph.artifact_index[graph.node_index[node_id].artifact].sha256)
+        ]
+        if missing:
+            rejected.append(
+                f"{', '.join(sorted(f'{node.distribution}=={node.version}' for node in providers))}: "
+                "installed graph is incomplete"
+            )
+            continue
+        candidates.append((versions, _closure_fingerprint(graph, provider_ids), path, graph, provider_ids))
+    if not candidates:
+        if rejected:
+            raise StoreImportError(
+                "Depfix found an installed provider, but none is compatible with this process",
+                module=root,
+                rejections=tuple(sorted(set(rejected))),
+                remediation="install a compatible artifact or select an exact package with depfix.default(...)",
+            )
+        return None
+    provider_sets = {
+        tuple(distribution for distribution, _version in versions)
+        for versions, _fingerprint, _path, _graph, _node_ids in candidates
+    }
+    maximal_provider_sets = {
+        providers for providers in provider_sets if not any(set(providers) < set(other) for other in provider_sets)
+    }
+    if len(maximal_provider_sets) > 1:
+        raise StoreImportError(
+            "Several installed distributions provide this import name",
+            module=root,
+            candidates=tuple(
+                sorted(
+                    ", ".join(f"{distribution}=={version}" for distribution, version in versions)
+                    for versions, _fingerprint, _path, _graph, _node_ids in candidates
+                )
+            ),
+            remediation="choose the intended distribution and version with depfix.default(...)",
+        )
+    selected_provider_set = next(iter(maximal_provider_sets))
+    comparable = [
+        item
+        for item in candidates
+        if tuple(distribution for distribution, _version in item[0]) == selected_provider_set
+    ]
+    version_sets = {item[0] for item in comparable}
+    newest_sets = {
+        versions
+        for versions in version_sets
+        if not any(
+            all(
+                other_version >= version
+                for (_distribution, version), (_other, other_version) in zip(versions, other, strict=True)
+            )
+            and any(
+                other_version > version
+                for (_distribution, version), (_other, other_version) in zip(versions, other, strict=True)
+            )
+            for other in version_sets
+        )
+    }
+    if len(newest_sets) > 1:
+        raise StoreImportError(
+            "No single installed namespace graph has the newest version of every provider",
+            module=root,
+            candidates=tuple(
+                sorted(
+                    ", ".join(f"{distribution}=={version}" for distribution, version in versions)
+                    for versions in newest_sets
+                )
+            ),
+            remediation="choose one compatible namespace package set with depfix.default(...)",
+        )
+    newest = next(iter(newest_sets))
+    newest_candidates = [item for item in comparable if item[0] == newest]
+    fingerprints = {item[1] for item in newest_candidates}
+    if len(fingerprints) > 1:
+        raise StoreImportError(
+            "The newest installed version has several incompatible dependency graphs or artifacts",
+            module=root,
+            candidates=tuple(
+                sorted(
+                    ", ".join(
+                        f"{graph.node_index[node_id].distribution}=={graph.node_index[node_id].version} "
+                        f"({graph.node_index[node_id].artifact})"
+                        for node_id in node_ids
+                    )
+                    for _versions, _fingerprint, _path, graph, node_ids in newest_candidates
+                )
+            ),
+            remediation="choose an exact package source or version with depfix.default(...)",
+        )
+    _versions, _fingerprint, path, graph, node_ids = min(newest_candidates, key=lambda item: str(item[2]))
+    namespace_group = len(node_ids) > 1 and all(
+        root in graph.node_index[node_id].namespace_contributions for node_id in node_ids
+    )
+    runtime = _runtime(
+        graph,
+        cache,
+        path,
+        "auto",
+        allow_unsafe=settings.allow_unsafe,
+        root_nodes=node_ids,
+        namespace_groups={root: node_ids} if namespace_group else None,
+    )
+    node_id = node_ids[0]
+    node = graph.node_index[node_id]
+    return ModuleBinding(
+        runtime,
+        node.id,
+        node.distribution,
+        node.version,
+        node.artifact,
+        f"shared:{node.artifact}" if runtime.shared else resolved_realm_id(graph, (node.id,)),
+        (f"{node.distribution}=={node.version}",),
+        "store-fallback",
+    )
+
+
+def _store_manifest_paths(cache: Cache, configured: Path | None) -> tuple[Path, ...]:
+    paths: set[Path] = set()
+    if configured is not None and configured.is_file():
+        paths.add(configured.resolve())
+    for directory in ("installs", "groups", "resolutions"):
+        root = cache.root / directory
+        if root.is_dir():
+            paths.update(path.resolve() for path in root.rglob("imports.lock") if path.is_file())
+    return tuple(sorted(paths))
+
+
+def _closure_fingerprint(graph: LockedGraph, roots: tuple[str, ...]) -> str:
+    nodes = graph.node_index
+
+    def describe(node_id: str, active: frozenset[str]) -> object:
+        if node_id in active:
+            return ("cycle", nodes[node_id].distribution)
+        node = nodes[node_id]
+        return (
+            node.distribution,
+            node.version,
+            node.artifact,
+            tuple((name, describe(child, active | {node_id})) for name, child in sorted(node.dependencies.items())),
+        )
+
+    return json.dumps(tuple(describe(root, frozenset()) for root in roots), sort_keys=True, separators=(",", ":"))
+
+
 def activate_manifest(path: Path, settings: Settings) -> DepfixRuntime:
     graph = load_manifest(path)
     assert_compatible_environment(graph, path)
     cache = Cache(settings.cache_dir)
+    cache.renewal_interval_seconds = settings.cache_renewal_seconds
     cache.reserve_artifacts({artifact.sha256 for artifact in graph.artifacts})
     for artifact in graph.artifacts:
         if not cache.has_package(artifact.sha256):
@@ -432,7 +664,11 @@ def _schedule_cache_cleanup(cache: Cache, settings: Settings, graph: LockedGraph
 
     def maintain() -> None:
         try:
-            cache.automatic_cleanup(settings.cache_retention_days, protected_hashes=protected)
+            cache.automatic_cleanup(
+                settings.cache_retention_days,
+                protected_hashes=protected,
+                grace_hours=settings.cache_deletion_grace_hours,
+            )
         except (CacheError, OSError, ValueError):
             # Retention is opportunistic; explicit cache commands surface errors.
             pass
@@ -465,6 +701,7 @@ def _runtime(
     *,
     allow_unsafe: bool,
     root_nodes: tuple[str, ...] | None = None,
+    namespace_groups: dict[str, tuple[str, ...]] | None = None,
     enforce_unsafe: bool = True,
     register_active: bool = True,
 ) -> DepfixRuntime:
@@ -473,7 +710,8 @@ def _runtime(
     if enforce_unsafe:
         _assert_unsafe_allowed(graph, active_nodes, allow_unsafe, manifest)
     runtime_nodes = active_nodes if import_mode == "shared" else tuple(node.id for node in graph.nodes)
-    key = (graph.graph_id, str(cache.root.resolve()), import_mode, runtime_nodes, allow_unsafe)
+    namespace_identity = tuple(sorted((root, node_ids) for root, node_ids in (namespace_groups or {}).items()))
+    key = (graph.graph_id, str(cache.root.resolve()), import_mode, runtime_nodes, allow_unsafe, namespace_identity)
     with _guard:
         runtime = _runtimes.get(key)
         if runtime is None:
@@ -483,6 +721,7 @@ def _runtime(
                 manifest=manifest,
                 import_mode=import_mode,
                 active_node_ids=runtime_nodes,
+                namespace_groups=namespace_groups,
                 allow_unsafe=allow_unsafe,
             ).activate()
             _runtimes[key] = runtime
@@ -664,10 +903,17 @@ def _isolation_matches(prepared: str, requested: str) -> bool:
     return prepared == requested or (requested == "auto" and prepared == "inprocess")
 
 
-def _group_identity(normalized: tuple[str, ...], mode: str, isolation: str, settings: Settings) -> str:
+def _group_identity(
+    normalized: tuple[str, ...],
+    constraints: tuple[str, ...],
+    mode: str,
+    isolation: str,
+    settings: Settings,
+) -> str:
     payload = json.dumps(
         {
             "specifiers": normalized,
+            **({"constraints": constraints} if constraints else {}),
             "mode": mode,
             "isolation": isolation,
             "allow_unsafe": settings.allow_unsafe,
@@ -760,10 +1006,22 @@ def _selection_from_aliases(
 def _match_manifest_group(
     graph: LockedGraph,
     normalized: tuple[str, ...],
+    constraints: tuple[str, ...],
     mode: str,
     isolation: str,
     settings: Settings,
 ) -> tuple[Alias, ...]:
+    prepared_constraints = tuple(sorted(str(item) for item in graph.policy.get("constraints", ())))
+    if prepared_constraints != constraints:
+        error = FrozenManifestError if settings.frozen else ManifestMismatchError
+        raise error(
+            "The prepared manifest does not contain this exact requirements constraint set",
+            normalized_request=", ".join(normalized),
+            manifest=settings.manifest,
+            frozen=settings.frozen,
+            candidates=prepared_constraints,
+            remediation="export and install the requirements file with its current constraints",
+        )
     groups = [
         group
         for group in graph.groups
@@ -798,3 +1056,21 @@ def _match_manifest_group(
         ),
         remediation="export and install the current default()/using() declarations",
     )
+
+
+def _constraint_identity(values: tuple[str, ...]) -> tuple[str, ...]:
+    normalized: set[str] = set()
+    for value in values:
+        if not value.strip():
+            continue
+        try:
+            requirement = Requirement(value)
+        except InvalidRequirement as exc:
+            raise ResolutionError("Invalid requirements constraint", request=value, remediation=str(exc)) from exc
+        if requirement.url or requirement.extras or requirement.marker:
+            raise ResolutionError(
+                "Requirements constraints may contain only a distribution name and version specifier",
+                request=value,
+            )
+        normalized.add(f"{canonicalize_name(requirement.name)}{requirement.specifier}")
+    return tuple(sorted(normalized))

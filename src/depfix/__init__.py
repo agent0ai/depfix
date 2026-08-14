@@ -32,11 +32,13 @@ from .errors import (
     NoImportModulesError,
     OfflineArtifactMissingError,
     RealmBoundaryError,
+    RequirementsFileError,
     ResolutionError,
     ScopeModuleNotProvidedError,
     SharedImportConflictError,
     SourceError,
     SpecifierError,
+    StoreImportError,
     UnsafePackageError,
     UnsupportedManifestVersionError,
     UnsupportedUvVersionError,
@@ -55,9 +57,11 @@ if TYPE_CHECKING:
         CachedPackageNode,
         CacheInventory,
         PackageInstallReason,
+        UninstallResult,
+        UninstallSpecifierResult,
     )
     from .handles import PackageHandle
-    from .scopes import default, using
+    from .scopes import default, default_requirements, using
     from .settings import Settings
 
 
@@ -71,6 +75,8 @@ def configure(
     cache_dir: str | os.PathLike[str] | None = None,
     cache_retention_days: int | None = None,
     cache_auto_cleanup: bool | None = None,
+    cache_renewal_seconds: int | None = None,
+    cache_deletion_grace_hours: int | None = None,
     uv: str | os.PathLike[str] | None = None,
     index_url: str | None = None,
     extra_index_url: str | tuple[str, ...] | list[str] | None = None,
@@ -88,6 +94,8 @@ def configure(
         cache_dir=cache_dir,
         cache_retention_days=cache_retention_days,
         cache_auto_cleanup=cache_auto_cleanup,
+        cache_renewal_seconds=cache_renewal_seconds,
+        cache_deletion_grace_hours=cache_deletion_grace_hours,
         uv=uv,
         index_url=index_url,
         extra_index_url=extra_index_url,
@@ -320,6 +328,20 @@ def _caller_location() -> tuple[str, int]:
     return frame.f_code.co_filename, frame.f_lineno
 
 
+def patch_import() -> None:
+    """Use compatible packages in the installed Depfix store as an import fallback."""
+    from .dispatcher import patch_import as enable_store_fallback
+
+    enable_store_fallback()
+
+
+def unpatch_import() -> None:
+    """Disable the installed-store import fallback."""
+    from .dispatcher import unpatch_import as disable_store_fallback
+
+    disable_store_fallback()
+
+
 def list_cached_packages(*, cache_dir: str | os.PathLike[str] | None = None) -> tuple[CachedPackage, ...]:
     """List installed package artifacts in the shared Depfix cache."""
     from .cache import Cache
@@ -372,6 +394,19 @@ def remove_cached_package(
         artifact_hash=artifact_hash,
         dry_run=dry_run,
     )
+
+
+def uninstall_packages(
+    *specifiers: str,
+    cache_dir: str | os.PathLike[str] | None = None,
+    dry_run: bool = False,
+) -> UninstallResult:
+    """Remove installed artifacts matching explicit PEP 440 distribution specifiers."""
+    from .cache import Cache
+    from .settings import resolve_settings
+
+    settings = resolve_settings(cache_dir=cache_dir, discover=True)
+    return Cache(settings.cache_dir).uninstall(specifiers, dry_run=dry_run)
 
 
 def activate(
@@ -430,10 +465,10 @@ def __getattr__(name: str) -> Any:
         }[name]
         globals()[name] = boundary_api
         return boundary_api
-    if name in {"default", "using"}:
-        from .scopes import default, using
+    if name in {"default", "default_requirements", "using"}:
+        from .scopes import default, default_requirements, using
 
-        value = default if name == "default" else using
+        value = {"default": default, "default_requirements": default_requirements, "using": using}[name]
         globals()[name] = value
         return value
     if name == "PackageHandle":
@@ -449,6 +484,8 @@ def __getattr__(name: str) -> Any:
         "CachedPackageNode",
         "CacheInventory",
         "PackageInstallReason",
+        "UninstallResult",
+        "UninstallSpecifierResult",
     }:
         from .cache import (
             CacheCleanupResult,
@@ -458,6 +495,8 @@ def __getattr__(name: str) -> Any:
             CachedPackageNode,
             CacheInventory,
             PackageInstallReason,
+            UninstallResult,
+            UninstallSpecifierResult,
         )
 
         cache_type = {
@@ -468,6 +507,8 @@ def __getattr__(name: str) -> Any:
             "CachedPackageNode": CachedPackageNode,
             "CacheInventory": CacheInventory,
             "PackageInstallReason": PackageInstallReason,
+            "UninstallResult": UninstallResult,
+            "UninstallSpecifierResult": UninstallSpecifierResult,
         }[name]
         globals()[name] = cache_type
         return cache_type
@@ -508,8 +549,10 @@ __all__ = [
     "RealmBoundaryError",
     "RealmInfo",
     "ResolutionError",
+    "RequirementsFileError",
     "ScopeModuleNotProvidedError",
     "SharedImportConflictError",
+    "StoreImportError",
     "Settings",
     "SourceError",
     "SpecifierError",
@@ -519,10 +562,13 @@ __all__ = [
     "UvBootstrapError",
     "UvNotFoundError",
     "UnsafePackageError",
+    "UninstallResult",
+    "UninstallSpecifierResult",
     "assert_same_realm",
     "cleanup_cache",
     "configure",
     "default",
+    "default_requirements",
     "enforce_same_realm",
     "import_module",
     "import_module_async",
@@ -531,7 +577,10 @@ __all__ = [
     "load_package_async",
     "list_cached_packages",
     "multiprocessing_initializer",
+    "patch_import",
     "remove_cached_package",
+    "uninstall_packages",
+    "unpatch_import",
     "realm_of",
     "using",
     "__version__",

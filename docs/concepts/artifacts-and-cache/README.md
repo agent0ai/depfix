@@ -37,23 +37,35 @@ or requirements file to remain present. Cached live-resolution manifests are sep
 installed targets without lifecycle/provenance metadata remain visible as `unknown` artifacts, use their filesystem
 modification time as the conservative installation time, and simply have no recorded reason/tree.
 
-Automatic retention defaults to 30 unused days. A missing maintenance clock is initialized without scanning, and later
-daily checks run in a daemon thread so ordinary imports only pay a constant-time timestamp check. The current graph is
-reserved before synchronization, which prevents a returning application from evicting and refetching its own packages.
-Active runtimes hold per-artifact, cross-process leases; cleanup skips live leases and clears stale process markers.
-Removal takes the same target and artifact mutation locks as installation before deleting every environment target and
-lifecycle metadata.
+Automatic retention defaults to 30 unused days. Activating the first real runtime starts one process-wide daemon that
+renews roots and transitive artifacts every hour by default. All processes merge artifact-keyed timestamps through one
+transactional SQLite usage store; it contains no process IDs, runtime IDs, or liveness records. Each process coalesces its
+active closures in memory, and importing `depfix` alone starts nothing. Activation, successful imports, preparation
+reservations, and renewal invalidate deletion candidacy. Renewal is one database operation without per-artifact lock or
+candidate-file writes; final deletion serializes its usage recheck with that database transaction while holding the
+artifact and target mutation locks.
+
+Automatic cleanup is two-phase. Its first sweep records an inactive artifact as a candidate without deleting it; a later
+sweep may remove it only after the default 24-hour grace and revalidation under the target and artifact locks. This gives
+legacy caches and old container layers a boot-safe first sweep. Future or malformed clocks fail conservatively. The grace
+must be at least twice the renewal interval. A process suspended or unable to renew beyond retention plus grace cannot be
+distinguished from stopped use and may lose its cached files; applications needing stronger suspension guarantees must
+increase those windows. Manual retention cleanup remains deliberately immediate under mutation locks and does not infer
+runtime liveness beyond those process leases. Explicit `uninstall_packages()`, `uninstall`, `remove_cached_package()`, and
+`cache remove` also honor short-lived preparation reservations. Uninstall selects only explicitly named
+distributions; it never cascades into their dependencies. Exact resolution and project manifests remain immutable
+historical records, while installed inventory and provenance trees filter removed physical artifacts immediately. A later
+exact online use reacquires a missing artifact and offline use fails clearly. `cache cleanup --automatic --dry-run`
+reports pending and eligible candidates without changing metadata.
 
 Downloads, source archives, and locally built wheels are ephemeral. Depfix verifies their exact size and SHA-256,
 materializes a package atomically, then removes the input while still holding the mutation locks. A later install or cache
 maintenance pass removes obsolete retained blobs for already-complete targets and abandoned download parts only after
 their recorded process is gone and the age grace has elapsed. The same boundary applies to the isolated uv cache created
 for each Depfix-owned uv subprocess; direct user uv caches are never selected for cleanup. Completed unpacked targets,
-manifests, provenance, aliases, and runtime leases do not depend on the archive remaining present.
+manifests, provenance, aliases, and usage activity do not depend on the archive remaining present.
 
-Explicit `cleanup_cache()` / `depfix cache cleanup` operations use the same retention and lease rules. Exact package
-removal uses `remove_cached_package()` / `depfix cache remove`; dry-run mode reports the selection and reclaimable bytes
-without deleting it. Full `depfix cache clean` remains the deliberate operation for deleting the complete cache root.
+Full `depfix cache clean` remains the deliberate operation for deleting the complete cache root.
 
 Extracted files and child directories are hardened before promotion. The staging root remains owner-writable until the
 atomic rename because Darwin rejects renaming a write-disabled directory; Depfix hardens the completed root immediately

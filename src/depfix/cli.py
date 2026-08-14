@@ -14,16 +14,23 @@ import sys
 import sysconfig
 import tomllib
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from packaging.utils import canonicalize_name
 
-from . import __version__, configure, load_package
+from . import __version__, configure, load_package, patch_import
 from .aliases import generate_aliases
-from .cache import Cache, CachedInstallation, CachedPackage, CachedPackageNode, PackageInstallReason
+from .cache import (
+    Cache,
+    CachedInstallation,
+    CachedPackage,
+    CachedPackageNode,
+    PackageInstallReason,
+    UninstallResult,
+)
 from .errors import DepfixError
 from .manifest import load_manifest
 from .project import (
@@ -34,8 +41,9 @@ from .project import (
     install_packages,
     verify_manifest,
 )
+from .requirements import RequirementCollection, read_requirements
 from .scanner import scan_project
-from .settings import resolve_settings
+from .settings import Settings, resolve_settings, user_config_file
 from .uv_backend import UvBackend
 
 
@@ -131,6 +139,20 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands.add_parser("doctor", help="diagnose backend, cache, manifest, and native policy")
 
+    uninstall = commands.add_parser("uninstall", help="remove installed packages matching PEP 440 constraints")
+    uninstall.add_argument("specifiers", nargs="+", metavar="SPECIFIER")
+    uninstall.add_argument("--dry-run", action="store_true", help="show exact matches without changing the store")
+
+    config = commands.add_parser("config", help="inspect or persist global Depfix settings")
+    config_commands = config.add_subparsers(dest="config_command", required=True)
+    config_commands.add_parser("show", help="show the effective cleanup policy and its global file")
+    config_commands.add_parser("path", help="show the global configuration file")
+    config_set = config_commands.add_parser("set", help="persist global cleanup policy values")
+    config_set.add_argument("--retention-days", type=int)
+    config_set.add_argument("--auto-cleanup", choices=("true", "false"))
+    config_set.add_argument("--renewal-seconds", type=int)
+    config_set.add_argument("--deletion-grace-hours", type=int)
+
     migrate = commands.add_parser("migrate", help="import roots from requirements or pyproject metadata")
     migrate.add_argument("file", type=Path)
     migrate.add_argument("--output", "-o", type=Path, default=Path(".depfix/config.toml"))
@@ -190,6 +212,11 @@ def _parser() -> argparse.ArgumentParser:
     cleanup = cache_commands.add_parser("cleanup", help="remove packages unused beyond a retention window")
     cleanup.add_argument("--days", type=int, help="unused days; defaults to configured cache retention")
     cleanup.add_argument("--dry-run", action="store_true")
+    cleanup.add_argument(
+        "--automatic",
+        action="store_true",
+        help="preview or run the two-phase automatic policy, including pending candidates",
+    )
     remove = cache_commands.add_parser("remove", help="remove one cached distribution selection")
     remove.add_argument("package")
     remove.add_argument("--version")
@@ -323,6 +350,7 @@ def _dispatch(args: argparse.Namespace) -> object | None:
             configure(manifest=manifest, frozen=args.frozen, offline=args.offline)
         else:
             configure(frozen=args.frozen, offline=args.offline)
+        patch_import()
         if args.module:
             module_args = ([str(args.script)] if args.script is not None else []) + list(args.args)
             if module_args[:1] == ["--"]:
@@ -362,6 +390,11 @@ def _dispatch(args: argparse.Namespace) -> object | None:
         return _installed_listing(args.cache_dir, view=args.view, sort=args.sort)
     if args.command == "doctor":
         return _doctor(args.cache_dir)
+    if args.command == "uninstall":
+        settings = resolve_settings(cache_dir=args.cache_dir, discover=False)
+        return Cache(settings.cache_dir).uninstall(tuple(args.specifiers), dry_run=args.dry_run)
+    if args.command == "config":
+        return _config(args)
     if args.command == "migrate":
         return _migrate(args.file, args.output)
     if args.command == "requirements":
@@ -562,26 +595,6 @@ def _migrate(source: Path, output: Path) -> dict[str, object]:
     return {"output": str(destination), "requirements": len(requirements)}
 
 
-@dataclass(slots=True)
-class _RequirementCollection:
-    requirements: list[str] = field(default_factory=list)
-    constraints: list[str] = field(default_factory=list)
-    index_url: str | None = None
-    extra_index_urls: list[str] = field(default_factory=list)
-
-    def merge(self, other: _RequirementCollection) -> None:
-        self.requirements.extend(other.requirements)
-        self.constraints.extend(other.constraints)
-        if other.index_url is not None:
-            if self.index_url is not None and self.index_url != other.index_url:
-                raise ValueError(
-                    f"requirements files declare conflicting primary indexes: {self.index_url!r} and "
-                    f"{other.index_url!r}"
-                )
-            self.index_url = other.index_url
-        self.extra_index_urls.extend(other.extra_index_urls)
-
-
 @dataclass(frozen=True, slots=True)
 class _CacheListing:
     view: str
@@ -595,12 +608,14 @@ class _ResolutionListing:
 
 
 def _pip_install(args: argparse.Namespace) -> object:
-    collected = _RequirementCollection(requirements=list(args.requirements))
+    collected = RequirementCollection(requirements=list(args.requirements))
     collected.requirements.extend(_editable_specifier(value, Path.cwd()) for value in args.editable)
     for requirement_file in args.requirement:
-        collected.merge(_read_requirement_input(requirement_file))
+        parsed = read_requirements(requirement_file)
+        collected.merge(parsed, source=requirement_file.resolve(), line=1)
     for constraint_file in args.constraint:
-        collected.merge(_read_requirement_input(constraint_file, constraints_only=True))
+        parsed = read_requirements(constraint_file, constraints_only=True)
+        collected.merge(parsed, source=constraint_file.resolve(), line=1)
     if not collected.requirements:
         raise ValueError("pip install requires package arguments or at least one -r/--requirement file")
     index_url = args.index_url or collected.index_url
@@ -632,120 +647,6 @@ def _pip_install_reason(args: argparse.Namespace) -> str:
     return shlex.join(command)
 
 
-def _read_requirement_input(
-    path: Path,
-    *,
-    constraints_only: bool = False,
-    _seen: set[tuple[Path, bool]] | None = None,
-) -> _RequirementCollection:
-    source = path.expanduser().resolve()
-    key = (source, constraints_only)
-    seen = _seen if _seen is not None else set()
-    if key in seen:
-        raise ValueError(f"recursive requirements include detected at {source}")
-    seen.add(key)
-    result = _RequirementCollection()
-    try:
-        for value in _logical_requirement_lines(source):
-            cleaned = re.sub(r"\s+#.*$", "", value).strip()
-            if not cleaned:
-                continue
-            cleaned = re.sub(r"\s+--hash(?:=|\s+)\S+", "", cleaned).strip()
-            tokens = shlex.split(cleaned, comments=False)
-            if not tokens:
-                continue
-            option, option_value = _requirement_file_option(tokens)
-            if option in {"requirement", "constraint"}:
-                assert option_value is not None
-                included = Path(option_value)
-                if not included.is_absolute():
-                    included = source.parent / included
-                result.merge(
-                    _read_requirement_input(
-                        included,
-                        constraints_only=constraints_only or option == "constraint",
-                        _seen=seen,
-                    )
-                )
-                continue
-            if option == "index-url":
-                assert option_value is not None
-                result.merge(_RequirementCollection(index_url=option_value))
-                continue
-            if option == "extra-index-url":
-                assert option_value is not None
-                result.extra_index_urls.append(option_value)
-                continue
-            if option == "editable":
-                if constraints_only:
-                    raise ValueError(f"editable entries are not valid constraints in {source}")
-                assert option_value is not None
-                result.requirements.append(_editable_specifier(option_value, source.parent))
-                continue
-            if option is not None or any(token.startswith("-") for token in tokens[1:]):
-                unsupported = (
-                    tokens[0] if option is not None else next(token for token in tokens[1:] if token.startswith("-"))
-                )
-                raise ValueError(f"unsupported requirements option {unsupported!r} in {source}")
-            if constraints_only:
-                result.constraints.append(cleaned)
-            else:
-                result.requirements.append(_requirement_specifier(cleaned, source.parent))
-    finally:
-        seen.remove(key)
-    return result
-
-
-def _logical_requirement_lines(source: Path) -> tuple[str, ...]:
-    pending = ""
-    result: list[str] = []
-    for physical in source.read_text(encoding="utf-8").splitlines():
-        value = physical.strip()
-        if not pending and (not value or value.startswith("#")):
-            continue
-        pending += value[:-1].rstrip() + " " if value.endswith("\\") else value
-        if not value.endswith("\\"):
-            result.append(pending.strip())
-            pending = ""
-    if pending:
-        result.append(pending.strip())
-    return tuple(result)
-
-
-def _requirement_file_option(tokens: list[str]) -> tuple[str | None, str | None]:
-    names = {
-        "-r": "requirement",
-        "--requirement": "requirement",
-        "-c": "constraint",
-        "--constraint": "constraint",
-        "-e": "editable",
-        "--editable": "editable",
-        "--index-url": "index-url",
-        "--extra-index-url": "extra-index-url",
-    }
-    head = tokens[0]
-    if head in names:
-        if len(tokens) != 2:
-            raise ValueError(f"requirements option {head!r} requires exactly one value")
-        return names[head], tokens[1]
-    for prefix, name in (
-        ("--requirement=", "requirement"),
-        ("--constraint=", "constraint"),
-        ("--editable=", "editable"),
-        ("--index-url=", "index-url"),
-        ("--extra-index-url=", "extra-index-url"),
-    ):
-        if head.startswith(prefix):
-            if len(tokens) != 1 or not head[len(prefix) :]:
-                raise ValueError(f"requirements option {prefix[:-1]!r} requires exactly one value")
-            return name, head[len(prefix) :]
-    if head.startswith("-r") and len(head) > 2 and len(tokens) == 1:
-        return "requirement", head[2:]
-    if head.startswith("-c") and len(head) > 2 and len(tokens) == 1:
-        return "constraint", head[2:]
-    return (head, None) if head.startswith("-") else (None, None)
-
-
 def _requirement_specifier(value: str, base_dir: Path) -> str:
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
@@ -767,6 +668,8 @@ def _editable_specifier(value: str, base_dir: Path) -> str:
 
 
 def _requirements_lines(path: Path, _seen: set[Path] | None = None) -> list[str]:
+    if _seen is None:
+        return read_requirements(path).requirements
     source = path.expanduser().resolve()
     seen = _seen if _seen is not None else set()
     if source in seen:
@@ -924,6 +827,14 @@ def _cache(args: argparse.Namespace) -> object:
         return {"cleaned": str(cache.root)}
     if command == "cleanup":
         days = settings.cache_retention_days if args.days is None else args.days
+        if args.automatic:
+            return cache.automatic_cleanup(
+                days,
+                protected_hashes=set(),
+                grace_hours=settings.cache_deletion_grace_hours,
+                dry_run=args.dry_run,
+                force=True,
+            )
         return cache.cleanup(days, dry_run=args.dry_run)
     if command == "remove":
         return cache.remove_package(
@@ -933,6 +844,82 @@ def _cache(args: argparse.Namespace) -> object:
             dry_run=args.dry_run,
         )
     raise ValueError(command)
+
+
+def _config(args: argparse.Namespace) -> object:
+    path = user_config_file()
+    if args.config_command == "path":
+        return {"path": str(path)}
+    if args.config_command == "set":
+        values = {
+            "cache-retention-days": args.retention_days,
+            "cache-auto-cleanup": None if args.auto_cleanup is None else args.auto_cleanup == "true",
+            "cache-renewal-seconds": args.renewal_seconds,
+            "cache-deletion-grace-hours": args.deletion_grace_hours,
+        }
+        selected = {key: value for key, value in values.items() if value is not None}
+        if not selected:
+            raise ValueError("config set requires at least one cleanup policy option")
+        if args.retention_days is not None and args.retention_days < 0:
+            raise ValueError("retention days must be non-negative")
+        if args.renewal_seconds is not None and args.renewal_seconds <= 0:
+            raise ValueError("renewal seconds must be positive")
+        if args.deletion_grace_hours is not None and args.deletion_grace_hours < 0:
+            raise ValueError("deletion grace hours must be non-negative")
+        persisted: dict[str, Any] = {}
+        if path.is_file():
+            with path.open("rb") as handle:
+                raw = tomllib.load(handle)
+            table = raw.get("settings", {})
+            if isinstance(table, dict):
+                persisted = table
+        renewal = int(
+            args.renewal_seconds
+            if args.renewal_seconds is not None
+            else persisted.get("cache-renewal-seconds", Settings().cache_renewal_seconds)
+        )
+        grace = int(
+            args.deletion_grace_hours
+            if args.deletion_grace_hours is not None
+            else persisted.get("cache-deletion-grace-hours", Settings().cache_deletion_grace_hours)
+        )
+        if grace * 3600 < renewal * 2:
+            raise ValueError("deletion grace must be at least twice the usage renewal interval")
+        _update_global_settings(path, selected)
+    settings = resolve_settings(discover=True)
+    return {
+        "path": str(path),
+        "cache_retention_days": settings.cache_retention_days,
+        "cache_auto_cleanup": settings.cache_auto_cleanup,
+        "cache_renewal_seconds": settings.cache_renewal_seconds,
+        "cache_deletion_grace_hours": settings.cache_deletion_grace_hours,
+        "precedence": "per-call > depfix.configure() > environment > project > global > defaults",
+    }
+
+
+def _update_global_settings(path: Path, values: dict[str, object]) -> None:
+    """Update only cleanup keys in the global TOML while preserving other text."""
+    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    start = next((index for index, line in enumerate(lines) if line.strip() == "[settings]"), None)
+    if start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("[settings]")
+        start = len(lines) - 1
+    end = next((index for index in range(start + 1, len(lines)) if lines[index].lstrip().startswith("[")), len(lines))
+    for key, value in values.items():
+        rendered = str(value).lower() if isinstance(value, bool) else str(value)
+        replacement = f"{key} = {rendered}"
+        found = next((index for index in range(start + 1, end) if lines[index].split("=", 1)[0].strip() == key), None)
+        if found is None:
+            lines.insert(end, replacement)
+            end += 1
+        else:
+            lines[found] = replacement
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _validate_target_options(args: argparse.Namespace) -> None:
@@ -958,6 +945,12 @@ def _package_dict(package: Any) -> dict[str, object]:
 
 
 def _print_result(value: object, *, as_json: bool) -> None:
+    if isinstance(value, UninstallResult):
+        if as_json:
+            print(json.dumps(_serialize(value), sort_keys=True))
+        else:
+            print(_render_uninstall(value))
+        return
     if isinstance(value, _CacheListing):
         if as_json:
             print(json.dumps(_serialize(value.value), sort_keys=True))
@@ -996,6 +989,33 @@ def _render_package_install(result: PackageInstallResult) -> str:
     action = "reused" if result.warm else "installed"
     inventory = f"{inventory_count} {'package' if inventory_count == 1 else 'packages'} total"
     return f"{roots}{dependencies} {action}, {inventory} in {result.store}"
+
+
+def _render_uninstall(result: UninstallResult) -> str:
+    lines: list[str] = []
+    for selection in result.specifiers:
+        if not selection.matched_artifacts:
+            lines.append(f"No installed artifacts match {selection.normalized}.")
+    action = "Would remove" if result.dry_run else "Removed"
+    for package in result.removed:
+        lines.append(
+            f"{action} {package.distribution}=={package.version} "
+            f"({package.artifact_hash[:12]}, {_format_size(package.size_bytes)})."
+        )
+    for package in result.skipped_active:
+        lines.append(
+            f"Protected {package.distribution}=={package.version} "
+            f"({package.artifact_hash[:12]}): active runtime or preparation."
+        )
+    if not lines:
+        lines.append("No installed artifacts matched.")
+    elif result.removed:
+        verb = "would remove" if result.dry_run else "removed"
+        lines.append(
+            f"{len(result.removed)} artifact{'s' if len(result.removed) != 1 else ''} {verb}; "
+            f"{_format_size(result.reclaimed_bytes)} {'selected' if result.dry_run else 'reclaimed'}."
+        )
+    return "\n".join(lines)
 
 
 def _render_cache_listing(listing: _CacheListing) -> str:

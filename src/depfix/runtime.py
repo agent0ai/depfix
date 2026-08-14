@@ -22,7 +22,7 @@ from pathlib import Path
 from types import MappingProxyType, ModuleType
 from typing import Any, SupportsIndex
 
-from .cache import Cache, CacheLease
+from .cache import Cache, UsageHandle
 from .errors import (
     AmbiguousMetadataError,
     CacheError,
@@ -331,6 +331,7 @@ class DepfixRuntime:
         lockfile: Path | None = None,
         import_mode: str = "inprocess",
         active_node_ids: Iterable[str] | None = None,
+        namespace_groups: dict[str, tuple[str, ...]] | None = None,
         allow_unsafe: bool = False,
     ) -> None:
         if import_mode not in {"inprocess", "shared"}:
@@ -347,6 +348,7 @@ class DepfixRuntime:
         if missing_nodes:
             raise ValueError(f"active_node_ids contains unknown nodes: {sorted(missing_nodes)}")
         self._active_node_ids = selected_nodes
+        self._namespace_groups = dict(namespace_groups or {})
         self._locks: dict[tuple[str, str], threading.RLock] = {}
         self._locks_guard = threading.Lock()
         self._locations: dict[str, tuple[Node, str, _Location]] = {}
@@ -355,7 +357,7 @@ class DepfixRuntime:
         self._shared_paths: tuple[str, ...] = ()
         self._shared_claims: dict[str, dict[tuple[str, str, str], bool]] = {}
         self._dispatch_alias_modes = False
-        self._cache_lease: CacheLease | None = None
+        self._usage_handle: UsageHandle | None = None
 
     @property
     def shared(self) -> bool:
@@ -376,10 +378,15 @@ class DepfixRuntime:
         return runtime_for_alias(self.graph.graph_id, alias.node, alias_name)
 
     def activate(self) -> DepfixRuntime:
-        lease = self._cache_lease
-        if lease is None:
-            lease = self.cache.lease(self.artifact_hashes)
-            self._cache_lease = lease
+        usage = self._usage_handle
+        if usage is None:
+            usage = self.cache.renew_usage(
+                self.artifact_hashes,
+                interval_seconds=getattr(self.cache, "renewal_interval_seconds", 60 * 60),
+                require_installed=True,
+                manifest=self.manifest,
+            )
+            self._usage_handle = usage
         try:
             for artifact in self.graph.artifacts:
                 root = self.cache.unpacked_path(artifact.id)
@@ -396,8 +403,8 @@ class DepfixRuntime:
                 sys.meta_path.insert(0, self._finder)
             return self
         except BaseException:
-            lease.close()
-            self._cache_lease = None
+            usage.close()
+            self._usage_handle = None
             raise
 
     def deactivate(self) -> None:
@@ -405,9 +412,9 @@ class DepfixRuntime:
         sys.meta_path[:] = [finder for finder in sys.meta_path if finder is not self._finder]
         if self.shared:
             self._deactivate_shared()
-        if self._cache_lease is not None:
-            self._cache_lease.close()
-            self._cache_lease = None
+        if self._usage_handle is not None:
+            self._usage_handle.close()
+            self._usage_handle = None
 
     @property
     def artifact_hashes(self) -> set[str]:
@@ -663,6 +670,9 @@ class DepfixRuntime:
 
     def _provider_nodes(self, caller: Node, logical_name: str) -> list[Node]:
         root = logical_name.split(".", 1)[0]
+        namespace_group = self._namespace_groups.get(root, ())
+        if caller.id in namespace_group:
+            return [self._nodes[node_id] for node_id in namespace_group]
         if root in caller.provided_modules:
             providers = [caller]
             if root in caller.namespace_contributions:
@@ -694,7 +704,13 @@ class DepfixRuntime:
     def _load_from_provider(self, node: Node, logical_name: str) -> ModuleType:
         if "." in logical_name:
             parent_name = logical_name.rpartition(".")[0]
-            parent = self._load_from_provider(node, parent_name)
+            root = logical_name.split(".", 1)[0]
+            namespace_group = self._namespace_groups.get(root, ())
+            parent = (
+                self.import_for_node(node.id, parent_name)
+                if node.id in namespace_group
+                else self._load_from_provider(node, parent_name)
+            )
         else:
             parent = None
         canonical = self.canonical_name(node.id, logical_name)
@@ -845,7 +861,10 @@ class DepfixRuntime:
                 value.__module__ = compatible_name
 
     def _load_namespace(self, caller: Node, logical_name: str, providers: list[Node]) -> ModuleType:
-        canonical = self.namespace_name(caller.id, logical_name)
+        root = logical_name.split(".", 1)[0]
+        namespace_group = self._namespace_groups.get(root, ())
+        realm_id = namespace_group[0] if caller.id in namespace_group else caller.id
+        canonical = self.namespace_name(realm_id, logical_name)
         existing = sys.modules.get(canonical)
         if existing is not None:
             return existing

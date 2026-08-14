@@ -2,6 +2,20 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.10.0 - 2026-08-14
+
+- Added `depfix.default_requirements(path)` for transactional grouped activation of requirements files, including nested
+  requirements and constraints, environment markers, file-relative sources, scoped indexes, explicit contextual parser
+  errors, and warm/offline reuse through the same standard-import runtime as `default()`.
+
+- Added explicit, reversible `depfix.patch_import()` installed-store fallback for ordinary imports, with normal importer
+  precedence, exact module metadata, newest-compatible deterministic selection, ambiguity diagnostics, no implicit
+  network resolution, unchanged exact-manifest/`default()`/`using()` priority, and automatic activation for `depfix run`
+  applications.
+
+- Added `depfix uninstall` and the matching Python API for normalized names, exact versions, and PEP 440 ranges, with
+  dry-run and JSON reporting, non-cascading removal, and lock-safe protection for preparation and active runtimes.
+
 ## 0.9.5 - 2026-08-13
 
 - Made `depfix list` and `depfix tree` the primary installed-package inventory and provenance-tree commands, added

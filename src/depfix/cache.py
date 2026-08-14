@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import atexit
 import contextlib
 import hashlib
 import http.client
 import json
+import math
 import os
 import platform
 import re
 import shutil
+import sqlite3
 import stat
 import sys
 import sysconfig
@@ -25,11 +26,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 from platformdirs import user_cache_path
 
 from ._file_urls import file_url_to_path
-from .errors import CacheError, IntegrityError, redact
+from .errors import CacheError, IntegrityError, SpecifierError, redact
 from .models import Artifact, LockedGraph
 
 _IS_WINDOWS = os.name == "nt"
@@ -38,6 +41,7 @@ _DOWNLOAD_ATTEMPTS = 3
 _AUTOMATIC_CLEANUP_INTERVAL_SECONDS = 24 * 60 * 60
 _RESERVATION_GRACE_SECONDS = 60 * 60
 _USAGE_WRITE_INTERVAL_SECONDS = 60 * 60
+_USAGE_BUSY_TIMEOUT_SECONDS = 0.1
 _STALE_INTERMEDIATE_SECONDS = 60 * 60
 _LEGACY_STALE_INTERMEDIATE_SECONDS = 24 * 60 * 60
 
@@ -120,34 +124,52 @@ class CacheCleanupResult:
     skipped_active: tuple[CachedPackage, ...]
     reclaimed_bytes: int
     dry_run: bool = False
+    pending_candidates: tuple[CachedPackage, ...] = ()
+    eligible: tuple[CachedPackage, ...] = ()
 
 
-class CacheLease:
-    """Cross-process marker keeping active runtime artifacts out of cleanup."""
+@dataclass(frozen=True, slots=True)
+class UninstallSpecifierResult:
+    """Installed artifacts matched by one normalized uninstall request."""
 
-    def __init__(self, cache: Cache, artifact_hashes: set[str]) -> None:
-        self._cache = cache
-        self._paths: list[Path] = []
-        token = f"{os.getpid()}-{uuid.uuid4().hex}.lease"
-        try:
-            for digest in sorted(artifact_hashes):
-                with cache._artifact_lock(digest):
-                    path = cache._lease_root(digest) / token
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(str(os.getpid()) + "\n", encoding="ascii")
-                    self._paths.append(path)
-        except BaseException:
-            self.close()
-            raise
-        atexit.register(self.close)
+    requested: str
+    normalized: str
+    matched_artifacts: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class UninstallResult:
+    """Deterministic result of one explicit-specifier uninstall operation."""
+
+    specifiers: tuple[UninstallSpecifierResult, ...]
+    matched: tuple[CachedPackage, ...]
+    removed: tuple[CachedPackage, ...]
+    skipped_active: tuple[CachedPackage, ...]
+    reclaimed_bytes: int
+    dry_run: bool = False
+
+
+@dataclass(slots=True)
+class _UsageRegistration:
+    cache: Cache
+    artifact_hashes: frozenset[str]
+    interval_seconds: int
+    next_renewal: float
+    references: int = 1
+    has_renewed: bool = False
+    lease_paths: tuple[Path, ...] = ()
+
+
+class UsageHandle:
+    """A lightweight reference to process-wide active-graph renewal."""
+
+    def __init__(self, key: tuple[str, tuple[str, ...]]) -> None:
+        self._key = key
 
     def close(self) -> None:
-        paths, self._paths = self._paths, []
-        for path in paths:
-            with contextlib.suppress(OSError):
-                path.unlink()
-            with contextlib.suppress(OSError):
-                path.parent.rmdir()
+        key, self._key = self._key, ("", ())
+        if key[0]:
+            _unregister_usage(key)
 
 
 class Cache:
@@ -162,6 +184,7 @@ class Cache:
         self.root = (root or (Path(configured) if configured else user_cache_path("depfix"))) / "v1"
         self.max_artifact_size = max_artifact_size
         self.timeout = timeout
+        self.renewal_interval_seconds = _USAGE_WRITE_INTERVAL_SECONDS
         self._usage_updates: dict[str, float] = {}
         self._usage_guard = threading.Lock()
 
@@ -758,11 +781,9 @@ class Cache:
             previous = self._usage_updates.get(artifact.sha256)
             if previous is not None and now - previous < _USAGE_WRITE_INTERVAL_SECONDS:
                 return
+        self.record_usage({artifact.sha256}, used_at=now)
+        with self._usage_guard:
             self._usage_updates[artifact.sha256] = now
-        path = self._usage_path(artifact.sha256)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch(exist_ok=True)
-        os.utime(path, (now, now))
 
     def reserve_artifacts(self, artifact_hashes: set[str]) -> None:
         """Briefly protect a graph that is about to synchronize and activate."""
@@ -770,12 +791,56 @@ class Cache:
         root = self.root / "metadata" / "reservations"
         root.mkdir(parents=True, exist_ok=True)
         for digest in artifact_hashes:
-            path = root / f"{digest}.touch"
-            path.touch(exist_ok=True)
-            os.utime(path, (now, now))
+            with self._artifact_lock(digest):
+                path = root / f"{digest}.touch"
+                path.touch(exist_ok=True)
+                os.utime(path, (now, now))
+                self._candidate_path(digest).unlink(missing_ok=True)
 
-    def lease(self, artifact_hashes: set[str]) -> CacheLease:
-        return CacheLease(self, artifact_hashes)
+    def renew_usage(
+        self,
+        artifact_hashes: set[str],
+        *,
+        interval_seconds: int,
+        require_installed: bool = False,
+        manifest: str | Path | None = None,
+    ) -> UsageHandle:
+        """Register one active artifact closure with the process-wide renewer."""
+        if interval_seconds <= 0:
+            raise ValueError("usage renewal interval must be positive")
+        self.record_usage(artifact_hashes)
+        return _register_usage(
+            self,
+            artifact_hashes,
+            interval_seconds,
+            require_installed=require_installed,
+            manifest=manifest,
+        )
+
+    def record_usage(self, artifact_hashes: set[str] | frozenset[str], *, used_at: float | None = None) -> None:
+        """Atomically renew exact artifact timestamps in the shared usage store."""
+        hashes = tuple(sorted(artifact_hashes))
+        if not hashes:
+            return
+        now = time.time() if used_at is None else used_at
+        path = self._usage_store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        timeout = min(max(self.timeout, 0.0), _USAGE_BUSY_TIMEOUT_SECONDS)
+        try:
+            with sqlite3.connect(path, timeout=timeout, isolation_level=None) as connection:
+                connection.execute(f"PRAGMA busy_timeout = {round(timeout * 1000)}")
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS usage (artifact_hash TEXT PRIMARY KEY, used_at REAL NOT NULL)"
+                )
+                connection.execute("BEGIN IMMEDIATE")
+                connection.executemany(
+                    "INSERT INTO usage(artifact_hash, used_at) VALUES (?, ?) "
+                    "ON CONFLICT(artifact_hash) DO UPDATE SET used_at = MAX(usage.used_at, excluded.used_at)",
+                    ((digest, now) for digest in hashes),
+                )
+                connection.commit()
+        except sqlite3.Error as exc:
+            raise CacheError("Unable to renew cache usage metadata", remediation=str(exc)) from exc
 
     def list_packages(self) -> tuple[CachedPackage, ...]:
         """Return installed artifacts with lifecycle and total footprint data."""
@@ -836,7 +901,7 @@ class Cache:
         protected_hashes: set[str] | None = None,
         dry_run: bool = False,
     ) -> CacheCleanupResult:
-        """Remove artifacts unused for at least ``days`` while preserving active leases."""
+        """Remove unused artifacts under mutation locks while preserving active runtimes."""
         self.reconcile_intermediates(dry_run=dry_run)
         if isinstance(days, bool) or not isinstance(days, int) or days < 0:
             raise ValueError("cache cleanup days must be a non-negative integer")
@@ -853,6 +918,7 @@ class Cache:
             protected_hashes=protected,
             dry_run=dry_run,
             eligible_before=cutoff,
+            protect_live_runtimes=True,
         )
         if not dry_run:
             self._touch_cleanup_clock()
@@ -875,7 +941,54 @@ class Cache:
             and (version is None or entry.version == version)
             and (artifact_hash is None or entry.artifact_hash == artifact_hash.removeprefix("sha256:"))
         )
-        return self._remove_entries(entries, protected_hashes=set(), dry_run=dry_run)
+        return self._remove_entries(
+            entries,
+            protected_hashes=set(),
+            dry_run=dry_run,
+            protect_live_runtimes=True,
+        )
+
+    def uninstall(self, specifiers: tuple[str, ...], *, dry_run: bool = False) -> UninstallResult:
+        """Remove installed artifacts selected by PEP 508 name/specifier requests."""
+        requirements = tuple(_parse_uninstall_specifier(value) for value in specifiers)
+        if not requirements:
+            raise ValueError("uninstall requires at least one distribution specifier")
+        packages = self.list_packages()
+        selected: dict[str, CachedPackage] = {}
+        selections: list[UninstallSpecifierResult] = []
+        for requested, requirement in zip(specifiers, requirements, strict=True):
+            name = str(canonicalize_name(requirement.name))
+            matches = tuple(
+                package
+                for package in packages
+                if package.distribution == name and _installed_version_matches(package.version, requirement)
+            )
+            for package in matches:
+                selected[package.artifact_hash] = package
+            selections.append(
+                UninstallSpecifierResult(
+                    requested=requested,
+                    normalized=name + str(requirement.specifier),
+                    matched_artifacts=tuple(package.artifact_hash for package in matches),
+                )
+            )
+        matched = tuple(
+            sorted(selected.values(), key=lambda item: (item.distribution, item.version, item.artifact_hash))
+        )
+        result = self._remove_entries(
+            matched,
+            protected_hashes=set(),
+            dry_run=dry_run,
+            protect_live_runtimes=True,
+        )
+        return UninstallResult(
+            specifiers=tuple(selections),
+            matched=matched,
+            removed=result.removed,
+            skipped_active=result.skipped_active,
+            reclaimed_bytes=result.reclaimed_bytes,
+            dry_run=dry_run,
+        )
 
     def automatic_cleanup_due(self, *, interval_seconds: int = _AUTOMATIC_CLEANUP_INTERVAL_SECONDS) -> bool:
         """Cheaply report whether the background retention sweep is due."""
@@ -888,12 +1001,121 @@ class Cache:
         except OSError:
             return False
 
-    def automatic_cleanup(self, days: int, *, protected_hashes: set[str]) -> CacheCleanupResult | None:
+    def automatic_cleanup(
+        self,
+        days: int,
+        *,
+        protected_hashes: set[str],
+        grace_hours: int = 24,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> CacheCleanupResult | None:
         """Run one cross-process daily sweep, or return when another process already did."""
         with self.lock("automatic-cleanup"):
-            if not self.automatic_cleanup_due():
+            if not force and not self.automatic_cleanup_due():
                 return None
-            return self.cleanup(days, protected_hashes=protected_hashes)
+            return self._automatic_cleanup_two_phase(
+                days, protected_hashes=protected_hashes, grace_hours=grace_hours, dry_run=dry_run
+            )
+
+    def _automatic_cleanup_two_phase(
+        self, days: int, *, protected_hashes: set[str], grace_hours: int, dry_run: bool
+    ) -> CacheCleanupResult:
+        if days < 0 or grace_hours < 0:
+            raise ValueError("retention days and deletion grace hours must be non-negative")
+        now = time.time()
+        cutoff = now - days * 86400
+        pending: list[CachedPackage] = []
+        eligible: list[CachedPackage] = []
+        for entry in self.list_packages():
+            digest = entry.artifact_hash
+            with self._artifact_lock(digest):
+                current = self._package_entry(digest, reasons=entry.reasons)
+                if current is None:
+                    continue
+                relevant = self._last_relevant_time(current, now)
+                if digest in protected_hashes or relevant > cutoff:
+                    if not dry_run:
+                        self._candidate_path(digest).unlink(missing_ok=True)
+                    continue
+                candidate = self._read_candidate(digest)
+                candidate_relevant = _candidate_number(candidate, "last_relevant")
+                candidate_at = _candidate_number(candidate, "candidate_at")
+                if candidate_relevant != relevant or candidate_at is None:
+                    pending.append(current)
+                    if not dry_run:
+                        self._write_candidate(digest, now, relevant)
+                    continue
+                if now - candidate_at < grace_hours * 3600:
+                    pending.append(current)
+                else:
+                    eligible.append(current)
+        removed_result = self._remove_automatic_entries(
+            eligible, protected_hashes=protected_hashes, cutoff=cutoff, dry_run=dry_run
+        )
+        if not dry_run:
+            self._touch_cleanup_clock()
+        return CacheCleanupResult(
+            removed_result.removed,
+            removed_result.skipped_active,
+            removed_result.reclaimed_bytes,
+            dry_run,
+            tuple(pending),
+            tuple(eligible),
+        )
+
+    def _remove_automatic_entries(
+        self, entries: list[CachedPackage], *, protected_hashes: set[str], cutoff: float, dry_run: bool
+    ) -> CacheCleanupResult:
+        removed: list[CachedPackage] = []
+        skipped: list[CachedPackage] = []
+        reclaimed = 0
+        for entry in entries:
+            digest = entry.artifact_hash
+            with self.lock("target:sha256:" + digest), self._artifact_lock(digest):
+                current = self._package_entry(digest, reasons=entry.reasons)
+                candidate = self._read_candidate(digest)
+                if current is None:
+                    continue
+                if dry_run:
+                    relevant = self._last_relevant_time(current, time.time())
+                    if (
+                        digest in protected_hashes
+                        or relevant > cutoff
+                        or _candidate_number(candidate, "last_relevant") != relevant
+                        or self._has_live_reservation(digest, time.time())
+                    ):
+                        skipped.append(current)
+                    else:
+                        removed.append(current)
+                        reclaimed += current.size_bytes
+                    continue
+                try:
+                    with self._usage_transaction() as connection:
+                        used_at = self._usage_time_in_transaction(connection, digest)
+                        relevant = self._last_relevant_time(current, time.time())
+                        if used_at is not None:
+                            relevant = max(relevant, used_at)
+                        if (
+                            digest in protected_hashes
+                            or relevant > cutoff
+                            or _candidate_number(candidate, "last_relevant") != relevant
+                        ):
+                            skipped.append(current)
+                            self._candidate_path(digest).unlink(missing_ok=True)
+                            continue
+                        if self._has_live_reservation(digest, time.time()):
+                            skipped.append(current)
+                            continue
+                        removed.append(current)
+                        reclaimed += current.size_bytes
+                        self._delete_artifact(digest, delete_usage=False)
+                        connection.execute("DELETE FROM usage WHERE artifact_hash = ?", (digest,))
+                except sqlite3.Error as exc:
+                    raise CacheError("Unable to coordinate cache usage and deletion", remediation=str(exc)) from exc
+        if removed and not dry_run:
+            self._prune_empty_installation_records()
+        return CacheCleanupResult(tuple(removed), tuple(skipped), reclaimed, dry_run)
 
     @contextlib.contextmanager
     def lock(self, key: str):  # type: ignore[no-untyped-def]
@@ -945,11 +1167,13 @@ class Cache:
         installed = _positive_timestamp(data.get("installed_at"))
         if installed is None:
             installed = min(self._artifact_mtimes(digest), default=time.time())
-        usage = self._usage_path(digest)
+        usage = self._last_usage_time(digest)
         try:
-            last_used = usage.stat().st_mtime
+            legacy_used = self._legacy_usage_path(digest).stat().st_mtime
         except OSError:
-            last_used = None
+            legacy_used = None
+        values = tuple(value for value in (usage, legacy_used) if value is not None)
+        last_used = max(values) if values else None
         distribution = str(data.get("distribution") or "unknown")
         if distribution != "unknown":
             distribution = str(canonicalize_name(distribution))
@@ -972,7 +1196,7 @@ class Cache:
                 _directory_size(target)
                 + (source_blob.stat().st_size if source_blob is not None and source_blob.is_file() else 0)
             ),
-            active=self._has_live_lease(digest),
+            active=_locally_active(self, digest),
             reasons=reasons,
         )
 
@@ -1123,6 +1347,44 @@ class Cache:
             relevant = max(relevant, reserved_at)
         return relevant
 
+    def _last_usage_time(self, digest: str) -> float | None:
+        path = self._usage_store_path()
+        if not path.is_file():
+            return None
+        try:
+            with sqlite3.connect(path, timeout=self.timeout) as connection:
+                row = connection.execute("SELECT used_at FROM usage WHERE artifact_hash = ?", (digest,)).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table: usage" in str(exc) and _locally_active(self, digest):
+                return None
+            raise CacheError("Unable to read cache usage metadata", remediation=str(exc)) from exc
+        except sqlite3.Error as exc:
+            raise CacheError("Unable to read cache usage metadata", remediation=str(exc)) from exc
+        return float(row[0]) if row is not None else None
+
+    def _candidate_path(self, digest: str) -> Path:
+        return self.root / "metadata" / "deletion-candidates" / f"{digest}.json"
+
+    def _read_candidate(self, digest: str) -> dict[str, object] | None:
+        try:
+            data = json.loads(self._candidate_path(digest).read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else None
+        except (OSError, TypeError, json.JSONDecodeError):
+            return None
+
+    def _write_candidate(self, digest: str, candidate_at: float, last_relevant: float) -> None:
+        path = self._candidate_path(digest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps({"format_version": 1, "candidate_at": candidate_at, "last_relevant": last_relevant}) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _has_live_reservation(self, digest: str, now: float) -> bool:
         path = self.root / "metadata" / "reservations" / f"{digest}.touch"
         try:
@@ -1137,6 +1399,7 @@ class Cache:
         protected_hashes: set[str],
         dry_run: bool,
         eligible_before: float | None = None,
+        protect_live_runtimes: bool = False,
     ) -> CacheCleanupResult:
         removed: list[CachedPackage] = []
         skipped: list[CachedPackage] = []
@@ -1146,13 +1409,29 @@ class Cache:
             if digest in protected_hashes:
                 skipped.append(original)
                 continue
+            if dry_run:
+                current = self._package_entry(digest, reasons=original.reasons)
+                if current is None:
+                    continue
+                if eligible_before is not None and self._last_relevant_time(current, time.time()) > eligible_before:
+                    continue
+                if self._has_live_reservation(digest, time.time()) or (
+                    protect_live_runtimes and self._has_live_runtime(digest, cleanup_dead=False)
+                ):
+                    skipped.append(current)
+                    continue
+                removed.append(current)
+                reclaimed += current.size_bytes
+                continue
             with self.lock("target:sha256:" + digest), self._artifact_lock(digest):
                 current = self._package_entry(digest, reasons=original.reasons)
                 if current is None:
                     continue
                 if eligible_before is not None and self._last_relevant_time(current, time.time()) > eligible_before:
                     continue
-                if self._has_live_reservation(digest, time.time()) or self._has_live_lease(digest):
+                if self._has_live_reservation(digest, time.time()) or (
+                    protect_live_runtimes and self._has_live_runtime(digest, cleanup_dead=True)
+                ):
                     skipped.append(current)
                     continue
                 removed.append(current)
@@ -1163,26 +1442,8 @@ class Cache:
             self._prune_empty_installation_records()
         return CacheCleanupResult(tuple(removed), tuple(skipped), reclaimed, dry_run)
 
-    def _delete_artifact(self, digest: str) -> None:
-        source_digest = self._source_digest(digest)
-        _remove_path(self.blob_path(digest))
-        _remove_path(self.root / "targets" / digest)
-        _remove_path(self.root / "built-wheels" / digest)
-        for path in (
-            self._package_metadata_path(digest),
-            self._usage_path(digest),
-            self.root / "metadata" / "reservations" / f"{digest}.touch",
-            self.root / "metadata" / "origins" / f"{digest}.json",
-            self.root / "metadata" / "imports" / f"{digest}.json",
-        ):
-            _remove_path(path)
-        _remove_path(self._lease_root(digest))
-        if source_digest is not None and not self._source_is_referenced(source_digest):
-            _remove_path(self.blob_path(source_digest))
-            _remove_path(self.root / "metadata" / "origins" / f"{source_digest}.json")
-
-    def _has_live_lease(self, digest: str) -> bool:
-        root = self._lease_root(digest)
+    def _has_live_runtime(self, digest: str, *, cleanup_dead: bool) -> bool:
+        root = self.root / "metadata" / "runtime-leases" / digest
         if not root.is_dir():
             return False
         live = False
@@ -1190,16 +1451,49 @@ class Cache:
             try:
                 pid = int(path.name.split("-", 1)[0])
             except (ValueError, IndexError):
-                path.unlink(missing_ok=True)
+                if cleanup_dead:
+                    path.unlink(missing_ok=True)
                 continue
             if _pid_is_running(pid):
                 live = True
-            else:
+            elif cleanup_dead:
                 path.unlink(missing_ok=True)
-        if not live:
+        if cleanup_dead and not live:
             with contextlib.suppress(OSError):
                 root.rmdir()
         return live
+
+    def _delete_artifact(self, digest: str, *, delete_usage: bool = True) -> None:
+        source_digest = self._source_digest(digest)
+        _remove_path(self.blob_path(digest))
+        _remove_path(self.root / "targets" / digest)
+        _remove_path(self.root / "built-wheels" / digest)
+        for path in (
+            self._package_metadata_path(digest),
+            self._legacy_usage_path(digest),
+            self.root / "metadata" / "reservations" / f"{digest}.touch",
+            self.root / "metadata" / "origins" / f"{digest}.json",
+            self.root / "metadata" / "imports" / f"{digest}.json",
+            self._candidate_path(digest),
+        ):
+            _remove_path(path)
+        if delete_usage:
+            self._delete_usage(digest)
+        _remove_path(self.root / "metadata" / "leases" / digest)
+        _remove_path(self.root / "metadata" / "runtime-leases" / digest)
+        if source_digest is not None and not self._source_is_referenced(source_digest):
+            _remove_path(self.blob_path(source_digest))
+            _remove_path(self.root / "metadata" / "origins" / f"{source_digest}.json")
+
+    def _delete_usage(self, digest: str) -> None:
+        path = self._usage_store_path()
+        if not path.is_file():
+            return
+        try:
+            with sqlite3.connect(path, timeout=self.timeout) as connection:
+                connection.execute("DELETE FROM usage WHERE artifact_hash = ?", (digest,))
+        except sqlite3.Error:
+            pass
 
     def _artifact_mtimes(self, digest: str) -> list[float]:
         paths = (
@@ -1248,11 +1542,35 @@ class Cache:
     def _installation_metadata_path(self, identity: str) -> Path:
         return self.root / "metadata" / "installations" / f"{identity}.json"
 
-    def _usage_path(self, digest: str) -> Path:
+    def _legacy_usage_path(self, digest: str) -> Path:
         return self.root / "metadata" / "usage" / f"{digest}.touch"
 
-    def _lease_root(self, digest: str) -> Path:
-        return self.root / "metadata" / "leases" / digest
+    def _usage_store_path(self) -> Path:
+        return self.root / "metadata" / "usage.sqlite3"
+
+    @contextlib.contextmanager
+    def _usage_transaction(self):  # type: ignore[no-untyped-def]
+        path = self._usage_store_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        timeout = min(max(self.timeout, 0.0), _USAGE_BUSY_TIMEOUT_SECONDS)
+        with sqlite3.connect(path, timeout=timeout, isolation_level=None) as connection:
+            connection.execute(f"PRAGMA busy_timeout = {round(timeout * 1000)}")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS usage (artifact_hash TEXT PRIMARY KEY, used_at REAL NOT NULL)"
+            )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield connection
+            except BaseException:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+
+    @staticmethod
+    def _usage_time_in_transaction(connection: sqlite3.Connection, digest: str) -> float | None:
+        row = connection.execute("SELECT used_at FROM usage WHERE artifact_hash = ?", (digest,)).fetchone()
+        return float(row[0]) if row is not None else None
 
     def _cleanup_clock_path(self) -> Path:
         return self.root / "metadata" / "cleanup.touch"
@@ -1278,6 +1596,59 @@ def _positive_timestamp(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return timestamp if timestamp > 0 else None
+
+
+def _candidate_number(candidate: dict[str, object] | None, key: str) -> float | None:
+    if candidate is None:
+        return None
+    value = candidate.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    timestamp = float(value)
+    return timestamp if timestamp > 0 and math.isfinite(timestamp) else None
+
+
+def _parse_uninstall_specifier(value: str) -> Requirement:
+    requested = value.strip()
+    if not requested:
+        raise SpecifierError(
+            "Uninstall specifiers may not be empty",
+            remediation="use a distribution name such as 'openai' or a quoted constraint such as 'openai>=1'",
+        )
+    try:
+        requirement = Requirement(requested)
+    except InvalidRequirement as exc:
+        raise SpecifierError(
+            "Invalid uninstall specifier",
+            request=requested,
+            remediation="use only a distribution name and optional PEP 440 version clauses",
+        ) from exc
+    unsupported: list[str] = []
+    if requirement.url:
+        unsupported.append("URL or source reference")
+    if requirement.extras:
+        unsupported.append("extras")
+    if requirement.marker:
+        unsupported.append("environment marker")
+    if unsupported:
+        raise SpecifierError(
+            "Unsupported uninstall specifier",
+            request=requested,
+            remediation=(
+                "remove the " + ", ".join(unsupported) + " and use only the distribution name plus version clauses"
+            ),
+        )
+    return requirement
+
+
+def _installed_version_matches(version: str, requirement: Requirement) -> bool:
+    if not requirement.specifier:
+        return True
+    try:
+        parsed = Version(version)
+    except InvalidVersion:
+        return False
+    return requirement.specifier.contains(parsed)
 
 
 def _record_nodes(record: dict[str, object]) -> dict[str, dict[str, object]]:
@@ -1526,3 +1897,166 @@ def _environment_key() -> str:
         )
     )
     return hashlib.sha256(value.encode()).hexdigest()[:16]
+
+
+_usage_registrations: dict[tuple[str, tuple[str, ...]], _UsageRegistration] = {}
+_usage_lock = threading.RLock()
+_usage_wakeup = threading.Event()
+_usage_thread: threading.Thread | None = None
+
+
+def _register_usage(
+    cache: Cache,
+    artifact_hashes: set[str],
+    interval_seconds: int,
+    *,
+    require_installed: bool,
+    manifest: str | Path | None,
+) -> UsageHandle:
+    hashes = tuple(sorted(artifact_hashes))
+    key = (str(cache.root.resolve()), hashes)
+    global _usage_thread
+    lease_paths = _create_runtime_leases(
+        cache,
+        hashes,
+        require_installed=require_installed,
+        manifest=manifest,
+    )
+    try:
+        with _usage_lock:
+            existing = _usage_registrations.get(key)
+            if existing is not None:
+                existing.references += 1
+                existing.interval_seconds = min(existing.interval_seconds, interval_seconds)
+                existing.next_renewal = min(existing.next_renewal, time.time() + interval_seconds)
+                _remove_runtime_leases(lease_paths)
+            else:
+                registration = _UsageRegistration(
+                    cache,
+                    frozenset(hashes),
+                    interval_seconds,
+                    time.time() + interval_seconds,
+                    has_renewed=True,
+                    lease_paths=lease_paths,
+                )
+                _usage_registrations[key] = registration
+            if _usage_thread is None or not _usage_thread.is_alive():
+                _usage_thread = threading.Thread(target=_usage_loop, name="depfix-usage-renewal", daemon=True)
+                _usage_thread.start()
+            _usage_wakeup.set()
+    except BaseException:
+        _remove_runtime_leases(lease_paths)
+        raise
+    return UsageHandle(key)
+
+
+def _unregister_usage(key: tuple[str, tuple[str, ...]]) -> None:
+    with _usage_lock:
+        registration = _usage_registrations.get(key)
+        if registration is None:
+            return
+        registration.references -= 1
+        if registration.references <= 0 and registration.has_renewed:
+            _usage_registrations.pop(key, None)
+            _remove_runtime_leases(registration.lease_paths)
+        _usage_wakeup.set()
+
+
+def _usage_loop() -> None:
+    while True:
+        with _usage_lock:
+            registrations = tuple(_usage_registrations.values())
+        if not registrations:
+            _usage_wakeup.wait(60)
+            _usage_wakeup.clear()
+            continue
+        now = time.time()
+        due = [item for item in registrations if item.next_renewal <= now]
+        grouped: dict[str, list[_UsageRegistration]] = {}
+        for registration in due:
+            grouped.setdefault(str(registration.cache.root.resolve()), []).append(registration)
+        for group in grouped.values():
+            cache = group[0].cache
+            hashes = frozenset(digest for registration in group for digest in registration.artifact_hashes)
+            try:
+                cache.record_usage(hashes, used_at=now)
+            except (CacheError, OSError, ValueError):
+                with _usage_lock:
+                    for registration in group:
+                        registration.next_renewal = time.time() + min(registration.interval_seconds, 60)
+            else:
+                with _usage_lock:
+                    for registration in group:
+                        registration.has_renewed = True
+                        registration.next_renewal = now + registration.interval_seconds
+                        if registration.references <= 0:
+                            for key, current in tuple(_usage_registrations.items()):
+                                if current is registration:
+                                    _usage_registrations.pop(key, None)
+                                    _remove_runtime_leases(registration.lease_paths)
+                                    break
+        delay = max(0.1, min(item.next_renewal for item in registrations) - time.time())
+        _usage_wakeup.wait(min(delay, 60))
+        _usage_wakeup.clear()
+
+
+def _locally_active(cache: Cache, digest: str) -> bool:
+    root = str(cache.root.resolve())
+    with _usage_lock:
+        return any(
+            key_root == root and digest in hashes and registration.references > 0
+            for (key_root, hashes), registration in _usage_registrations.items()
+        )
+
+
+def _create_runtime_leases(
+    cache: Cache,
+    hashes: tuple[str, ...],
+    *,
+    require_installed: bool,
+    manifest: str | Path | None,
+) -> tuple[Path, ...]:
+    token = f"{os.getpid()}-{uuid.uuid4().hex}.lease"
+    paths: list[Path] = []
+    try:
+        for digest in hashes:
+            if not require_installed:
+                path = cache.root / "metadata" / "runtime-leases" / digest / token
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(str(os.getpid()) + "\n", encoding="ascii")
+                paths.append(path)
+                continue
+            with cache.lock("target:sha256:" + digest), cache._artifact_lock(digest):
+                path = cache.root / "metadata" / "runtime-leases" / digest / token
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(str(os.getpid()) + "\n", encoding="ascii")
+                paths.append(path)
+                if not cache.has_package(digest):
+                    raise CacheError(
+                        "Locked artifact has not been synchronized",
+                        manifest=manifest,
+                        artifact_hash=digest,
+                        remediation="run `depfix install <manifest> --frozen` before activating it",
+                    )
+    except BaseException:
+        _remove_runtime_leases(tuple(paths))
+        raise
+    return tuple(paths)
+
+
+def _remove_runtime_leases(paths: tuple[Path, ...]) -> None:
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        with contextlib.suppress(OSError):
+            path.parent.rmdir()
+
+
+def _reset_usage_after_fork() -> None:
+    global _usage_thread
+    _usage_registrations.clear()
+    _usage_thread = None
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_usage_after_fork)

@@ -15,9 +15,17 @@
 - Keep resolver and scope implementation imports lazy at the public package boundary so the import-only contract also
   holds on Windows.
 - `import_module` returns exactly one selected module; `load_package` returns a lazy package handle.
-- `default()` owns persistent ordinary-import selections; context-local `using()` scopes and decorators own temporary ones.
-- Install the narrow standard-import dispatcher only on the first `default()` or `using()` call, preserve caller realms
-  before application scopes/defaults, and delegate unmanaged imports to the prior importer.
+- `default()` and `default_requirements()` own persistent ordinary-import selections; context-local `using()` scopes and
+  decorators own temporary ones. Requirements-file activation uses the canonical CLI parser, filters inactive markers,
+  preserves nested constraints and scoped indexes, and registers the prepared group transactionally.
+- Install the narrow standard-import dispatcher only when a `default()`, `default_requirements()`, or `using()` selection
+  needs it, preserve caller realms before application scopes/defaults, and delegate unmanaged imports to the prior importer.
+- `patch_import()` explicitly enables a reversible, process-local fallback after ordinary import resolution. It uses only
+  complete compatible graphs already recorded in the shared store, never performs resolution or network installation,
+  keeps explicit scopes/defaults ahead of deterministic installed-store selection, and preserves an exact configured
+  manifest's provider before considering unrelated stored graphs.
+- `depfix run` enables the installed-store fallback after applying its process configuration and optional prepared state,
+  before executing either a script or module; the launched application does not need its own Depfix setup call.
 - Resolved artifacts are hash-pinned and materialized outside ambient `site-packages`.
 - Pinned downloads retry and resume bounded transient truncation, but exact size and SHA-256 verification remain mandatory
   before atomic target promotion. Downloads and build inputs are ephemeral, remain protected through materialization,
@@ -25,10 +33,15 @@
   installed payload rather than trusting a marker alone, while legacy targets retain a conservative file-count check.
 - Cross-process cache locks retry transient Windows permission races without masking permanent permission failures on
   other platforms.
-- Cache lifecycle metadata preserves first installation time and coalesces successful-import usage writes. Automatic
-  retention uses a daily background sweep, protects the graph before synchronization, and skips cross-process leases held
-  by active runtimes; explicit inventory, cleanup, dry-run, and removal APIs use the same artifact/target lock boundary and
-  repair owner write permissions before deleting read-only files or materialization trees.
+- Cache lifecycle metadata preserves first installation time and coalesces successful-import usage writes. Activated
+  runtimes share one process-wide daemon that renews complete closures into one transactional, artifact-keyed usage store
+  without process or runtime identities. Initial activation fails safely after a short bounded wait when another process
+  holds the usage writer, rather than activating without durable first-use evidence. Runtime lease establishment and target
+  validation serialize with removal under the target/artifact mutation locks, with filesystem locks acquired before the
+  process-global usage-registration lock. Automatic retention records candidates before a configurable deletion grace and
+  serializes final usage revalidation and removal with the usage transaction under artifact/target locks; explicit cleanup
+  and removal remain immediate under mutation locks while protecting preparation reservations and process-leased active
+  runtimes.
 - Install and cache-maintenance passes reconcile obsolete retained blobs, abandoned process-owned download parts, stale
   extraction targets, and stale built-wheel staging without deleting active work. Dry-run reconciliation is observational;
   offline reuse requires a complete target or an exact bundle-provided artifact.
@@ -40,6 +53,10 @@
 - Top-level `list` and `tree` inspect installed shared-store artifacts and provenance trees. Manifest inspection requires
   explicit `--manifest` syntax (with migration guidance for positional compatibility), while `cache resolutions` owns
   live-resolution record inspection and `cache list` remains only a deprecated compatibility alias.
+- Top-level `uninstall` parses one or more bare names or PEP 440 constraints, deduplicates physical artifacts, never
+  cascades into dependencies, and protects preparation reservations and process-leased active runtimes. Exact manifests
+  remain immutable while installed inventory filters removed targets; `cache remove` remains the advanced artifact-hash
+  compatibility path with the same protection.
 - Decode local `file:` URLs with platform-native rules, including Windows drive-letter and UNC path forms.
 - Realm imports preserve module identity and prevent undeclared cross-realm leakage.
 - `boundaries.py` owns opt-in provenance inspection, exact graph/node assertions, and sync/async boundary decorators.
@@ -83,7 +100,8 @@
 - Exact `install_manifest()` preparation never resolves or changes locked selections; online repair may rebuild a missing
   source-derived artifact only when its recorded provenance reproduces the locked size and SHA-256. Live grouped package
   installation may resolve and build before writing its exact stored manifest.
-- Public failures use typed, credential-redacted `DepfixError` subclasses.
+- Public failures use typed, credential-redacted `DepfixError` subclasses; requirements parse failures include their
+  resolved filename and logical starting line.
 
 ## Work Guidance
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from platformdirs import user_cache_path
+from platformdirs import user_cache_path, user_config_path
 
 from .errors import FrozenManifestError, SpecifierError
 
@@ -25,6 +25,8 @@ class Settings:
     cache_dir: Path = user_cache_path("depfix")
     cache_retention_days: int = 30
     cache_auto_cleanup: bool = True
+    cache_renewal_seconds: int = 60 * 60
+    cache_deletion_grace_hours: int = 24
     uv: Path | None = None
     index_url: str | None = None
     extra_index_url: tuple[str, ...] = ()
@@ -46,6 +48,8 @@ def configure(
     cache_dir: str | os.PathLike[str] | None = None,
     cache_retention_days: int | None = None,
     cache_auto_cleanup: bool | None = None,
+    cache_renewal_seconds: int | None = None,
+    cache_deletion_grace_hours: int | None = None,
     uv: str | os.PathLike[str] | None = None,
     index_url: str | None = None,
     extra_index_url: str | tuple[str, ...] | list[str] | None = None,
@@ -61,14 +65,25 @@ def configure(
         "cache_dir": Path(cache_dir).expanduser().resolve() if cache_dir is not None else None,
         "cache_retention_days": _validate_retention_days(cache_retention_days),
         "cache_auto_cleanup": cache_auto_cleanup,
+        "cache_renewal_seconds": _validate_positive_int("cache_renewal_seconds", cache_renewal_seconds),
+        "cache_deletion_grace_hours": _validate_nonnegative_int(
+            "cache_deletion_grace_hours", cache_deletion_grace_hours
+        ),
         "uv": Path(uv).expanduser().resolve() if uv is not None else None,
         "index_url": index_url,
         "extra_index_url": _split_indexes(extra_index_url) if extra_index_url is not None else None,
         "log_level": log_level,
     }
     with _lock:
+        previous = dict(_configured)
         _configured.update({key: value for key, value in values.items() if value is not None})
-    return resolve_settings(discover=False)
+    try:
+        return resolve_settings(discover=False)
+    except Exception:
+        with _lock:
+            _configured.clear()
+            _configured.update(previous)
+        raise
 
 
 def reset_configuration() -> None:
@@ -88,6 +103,8 @@ def resolve_settings(
     cache_dir: str | os.PathLike[str] | None = None,
     cache_retention_days: int | None = None,
     cache_auto_cleanup: bool | None = None,
+    cache_renewal_seconds: int | None = None,
+    cache_deletion_grace_hours: int | None = None,
     uv: str | os.PathLike[str] | None = None,
     index_url: str | None = None,
     extra_index_url: str | tuple[str, ...] | list[str] | None = None,
@@ -107,6 +124,8 @@ def resolve_settings(
         "cache_dir": _env_path("DEPFIX_CACHE_DIR"),
         "cache_retention_days": _env_nonnegative_int("DEPFIX_CACHE_RETENTION_DAYS"),
         "cache_auto_cleanup": _env_bool("DEPFIX_CACHE_AUTO_CLEANUP"),
+        "cache_renewal_seconds": _env_positive_int("DEPFIX_CACHE_RENEWAL_SECONDS"),
+        "cache_deletion_grace_hours": _env_nonnegative_int("DEPFIX_CACHE_DELETION_GRACE_HOURS"),
         "uv": _env_path("DEPFIX_UV"),
         "index_url": os.environ.get("DEPFIX_INDEX_URL"),
         "extra_index_url": _split_indexes(os.environ.get("DEPFIX_EXTRA_INDEX_URL")),
@@ -121,6 +140,10 @@ def resolve_settings(
         "cache_dir": Path(cache_dir).expanduser().resolve() if cache_dir is not None else None,
         "cache_retention_days": _validate_retention_days(cache_retention_days),
         "cache_auto_cleanup": cache_auto_cleanup,
+        "cache_renewal_seconds": _validate_positive_int("cache_renewal_seconds", cache_renewal_seconds),
+        "cache_deletion_grace_hours": _validate_nonnegative_int(
+            "cache_deletion_grace_hours", cache_deletion_grace_hours
+        ),
         "uv": Path(uv).expanduser().resolve() if uv is not None else None,
         "index_url": index_url,
         "extra_index_url": _split_indexes(extra_index_url) if extra_index_url is not None else None,
@@ -129,9 +152,10 @@ def resolve_settings(
     defaults = Settings()
     start = Path(discovery_start).resolve() if discovery_start is not None else None
     project_config = _project_config_values(start) if discover else {}
+    user_config = _user_config_values()
 
     def choose(name: str) -> Any:
-        for layer in (explicit, configured, environment, project_config):
+        for layer in (explicit, configured, environment, project_config, user_config):
             value = layer.get(name)
             if value is not None and value != ():
                 return value
@@ -140,6 +164,14 @@ def resolve_settings(
     selected_manifest = choose("manifest")
     if selected_manifest is None and discover:
         selected_manifest = discover_manifest(start)
+    renewal_seconds = int(choose("cache_renewal_seconds"))
+    deletion_grace_hours = int(choose("cache_deletion_grace_hours"))
+    if deletion_grace_hours * 3600 < renewal_seconds * 2:
+        raise SpecifierError(
+            "cache deletion grace must be at least twice the usage renewal interval",
+            source="cleanup configuration",
+            remediation="increase cache-deletion-grace-hours or decrease cache-renewal-seconds",
+        )
     return Settings(
         manifest=selected_manifest,
         frozen=bool(choose("frozen")),
@@ -149,6 +181,8 @@ def resolve_settings(
         cache_dir=Path(choose("cache_dir")),
         cache_retention_days=int(choose("cache_retention_days")),
         cache_auto_cleanup=bool(choose("cache_auto_cleanup")),
+        cache_renewal_seconds=renewal_seconds,
+        cache_deletion_grace_hours=deletion_grace_hours,
         uv=Path(choose("uv")) if choose("uv") is not None else None,
         index_url=choose("index_url"),
         extra_index_url=tuple(choose("extra_index_url")),
@@ -250,11 +284,33 @@ def _env_nonnegative_int(name: str) -> int | None:
     return parsed
 
 
+def _env_positive_int(name: str) -> int | None:
+    value = _env_nonnegative_int(name)
+    if value == 0:
+        raise SpecifierError(f"{name} must be a positive integer", source="environment")
+    return value
+
+
 def _validate_retention_days(value: int | None) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError("cache_retention_days must be a non-negative integer")
+    return value
+
+
+def _validate_nonnegative_int(name: str, value: int | None) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _validate_positive_int(name: str, value: int | None) -> int | None:
+    value = _validate_nonnegative_int(name, value)
+    if value == 0:
+        raise ValueError(f"{name} must be a positive integer")
     return value
 
 
@@ -270,12 +326,26 @@ def _project_config_values(start: Path | None = None) -> dict[str, Any]:
     path = _find_project_file(Path(".depfix/config.toml"), start=start)
     if path is None:
         return {}
+    return _config_file_values(path)
+
+
+def _user_config_values() -> dict[str, Any]:
+    path = user_config_path("depfix") / "config.toml"
+    return _config_file_values(path) if path.is_file() else {}
+
+
+def user_config_file() -> Path:
+    """Return the platform-native global Depfix configuration file."""
+    return user_config_path("depfix") / "config.toml"
+
+
+def _config_file_values(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as handle:
             raw = tomllib.load(handle)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise SpecifierError(
-            "Unable to read .depfix/config.toml",
+            "Unable to read Depfix configuration",
             source=str(path),
             remediation=str(exc),
         ) from exc
@@ -294,6 +364,8 @@ def _project_config_values(start: Path | None = None) -> dict[str, Any]:
         "cache-dir": "cache_dir",
         "cache-retention-days": "cache_retention_days",
         "cache-auto-cleanup": "cache_auto_cleanup",
+        "cache-renewal-seconds": "cache_renewal_seconds",
+        "cache-deletion-grace-hours": "cache_deletion_grace_hours",
         "log-level": "log_level",
     }
     values = {aliases.get(key, key.replace("-", "_")): value for key, value in selected.items()}
@@ -314,6 +386,17 @@ def _project_config_values(start: Path | None = None) -> dict[str, Any]:
                 source=str(path),
             )
         result["cache_retention_days"] = value
+    for key in ("cache_renewal_seconds", "cache_deletion_grace_hours"):
+        if key in values:
+            value = values[key]
+            minimum = 1 if key == "cache_renewal_seconds" else 0
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                qualifier = "positive" if minimum else "non-negative"
+                raise SpecifierError(
+                    f"{key.replace('_', '-')} in .depfix/config.toml must be a {qualifier} integer",
+                    source=str(path),
+                )
+            result[key] = value
     for key in ("index_url", "log_level"):
         if key in values:
             if not isinstance(values[key], str):

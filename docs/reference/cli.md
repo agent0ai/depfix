@@ -22,7 +22,8 @@ Inspection and operation:
 
 - `depfix list [--view packages|duplicates]` reports installed package artifacts in the shared store. The package view
   includes distribution, version, retained size, full artifact identity in JSON (a concise prefix in human output), UTC
-  installation and last-use timestamps, active-runtime state, and every recorded installation reason. Add `--sort
+  installation and last-use timestamps, a process-local `active` compatibility field, and every recorded installation
+  reason. The field is normally false in a standalone CLI and is not cross-process liveness. Add `--sort
   name|size|installed|used` to order the flat view.
 - `depfix tree` groups retained installed roots by installation reason and renders their dependency trees. It includes
   roots installed by the pip-compatible command, loading APIs, and exact manifest preparation.
@@ -31,7 +32,10 @@ Inspection and operation:
   forms remain compatibility aliases and emit migration guidance.
 - `scan`, `check`, `verify`, `show`, `why`, `doctor` provide the remaining inspection operations.
 - `fetch SPECIFIER` prepares a live request.
-- `run SCRIPT [ARGS...]` or `run -m MODULE [ARGS...]` activates optional prepared state before execution.
+- `run SCRIPT [ARGS...]` or `run -m MODULE [ARGS...]` activates optional prepared state and the installed-store-only
+  ordinary-import fallback before execution. Application code does not need to call `patch_import()`; ordinary modules
+  retain precedence, an explicit manifest's provider wins over unrelated stored graphs, and unknown imports do not trigger
+  network installation.
 - `migrate requirements.txt` or `migrate pyproject.toml` creates reviewable dynamic declarations.
 - `requirements export MANIFEST --realm NODE --output FILE` emits one realm with exact hashes.
 - `pip install PACKAGE...` and `pip install -r FILE` resolve roots as one Depfix group and populate the shared store. They
@@ -49,9 +53,19 @@ Inspection and operation:
 - `cache list [--view packages|duplicates|tree]` remains a deprecated compatibility alias and prints the corresponding
   `depfix list` or `depfix tree` migration command. Every installed and resolution view supports `--json` with equivalent
   structured data.
-- `cache cleanup [--days N] [--dry-run]` removes inactive artifacts older than the configured 30-day default.
-- `cache remove PACKAGE [--version VERSION] [--artifact SHA256] [--dry-run]` removes an exact package selection while
-  preserving artifacts being prepared or leased by active runtimes.
+- `cache cleanup [--days N] [--dry-run]` explicitly removes inactive artifacts older than the configured 30-day default.
+  Add `--automatic` to apply the candidate/grace policy; structured output distinguishes `pending_candidates`, `eligible`,
+  `removed`, and `skipped_active`.
+- `uninstall SPECIFIER... [--dry-run]` removes all installed artifacts matching each bare distribution name or PEP 440
+  constraint. Names are normalized, overlapping selections are deduplicated, and output identifies matches, removals,
+  protected active/preparing artifacts, and no-match specifiers. URLs, extras, markers, and source forms are rejected.
+  Quote shell constraints such as `'openai>=1,<2,!=1.5'`. Only explicitly named distributions are selected; dependencies
+  never cascade. Exact manifests remain immutable and can reacquire a removed artifact online or fail clearly offline.
+- `cache remove PACKAGE [--version VERSION] [--artifact SHA256] [--dry-run]` remains the advanced compatibility command
+  for artifact-hash selection and uses the same preparation/runtime protection as `uninstall`.
+- `config show|path` inspects global configuration. `config set --retention-days N --auto-cleanup true|false
+  --renewal-seconds N --deletion-grace-hours N` persists any supplied subset in the platform user configuration file.
+  Deletion grace must be at least twice the renewal interval.
 - `cache verify` validates retained package targets and reconciles obsolete download intermediates. `cache prune`
   removes unreferenced intermediates, and `cache clean` deliberately removes the complete cache root.
 

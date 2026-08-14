@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
+import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -18,10 +21,10 @@ from depfix import cache as cache_module
 from depfix.cache import Cache
 from depfix.cli import main as cli_main
 from depfix.config import ImportDeclaration, ProjectConfig
-from depfix.errors import CacheError
+from depfix.errors import CacheError, OfflineArtifactMissingError, SpecifierError
 from depfix.manager import reset_runtime_state
 from depfix.manifest import write_manifest
-from depfix.project import verify_manifest
+from depfix.project import install_manifest, verify_manifest
 from depfix.resolver import Resolver
 from depfix.runtime import DepfixRuntime
 from depfix.settings import reset_configuration, resolve_settings
@@ -57,6 +60,24 @@ def _age_installation(cache: Cache, digest: str, *, days: int) -> None:
     data = json.loads(path.read_text(encoding="utf-8"))
     data["installed_at"] = time.time() - days * 24 * 60 * 60
     path.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _install_versions(tmp_path: Path, wheel_factory, versions: tuple[str, ...]):  # type: ignore[no-untyped-def]
+    cache_dir = tmp_path / "cache"
+    cache = Cache(cache_dir)
+    graphs = []
+    for index, version in enumerate(versions):
+        wheel = wheel_factory("Range_Demo", version, {"range_demo.py": f"VALUE = {index}\n"})
+        graph = Resolver(cache).resolve(
+            ProjectConfig(
+                tmp_path / f"config-{index}.toml",
+                (ImportDeclaration(f"demo{index}", file_spec(wheel), "range_demo"),),
+                {},
+            )
+        )
+        sync_graph(graph, cache, offline=True)
+        graphs.append(graph)
+    return cache_dir, cache, tuple(graphs)
 
 
 def test_inventory_records_installation_size_and_successful_import_use(tmp_path: Path, wheel_factory) -> None:
@@ -151,42 +172,111 @@ def test_cleanup_skips_active_runtime_then_removes_after_release(tmp_path: Path,
     _age_installation(cache, artifact.sha256, days=31)
     runtime = DepfixRuntime(graph, cache).activate()
 
-    protected = cache.cleanup(30)
+    protected = cache.cleanup(0)
     assert protected.removed == ()
     assert [item.artifact_hash for item in protected.skipped_active] == [artifact.sha256]
 
     runtime.deactivate()
-    removed = cache.cleanup(30)
+    removed = cache.cleanup(0)
     assert [item.artifact_hash for item in removed.removed] == [artifact.sha256]
 
 
-def test_cleanup_honors_a_lease_from_another_process(tmp_path: Path, wheel_factory) -> None:
-    cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
-    artifact = graph.artifacts[0]
-    _age_installation(cache, artifact.sha256, days=31)
-    code = (
-        "from pathlib import Path; from depfix.cache import Cache; "
-        f"lease = Cache(Path({str(cache_dir)!r})).lease({{{artifact.sha256!r}}}); "
-        "print('ready', flush=True); input(); lease.close()"
+def test_concurrent_process_usage_transactions_merge_overlapping_artifacts(tmp_path: Path) -> None:
+    cache_dir = tmp_path / "cache"
+    hashes = ("a" * 64, "b" * 64, "c" * 64)
+    programs = [
+        (
+            "from pathlib import Path; from depfix.cache import Cache; "
+            f"cache=Cache(Path({str(cache_dir)!r})); "
+            f"[cache.record_usage(set({selected!r})) for _ in range(20)]"
+        )
+        for selected in ((hashes[0], hashes[1]), (hashes[1], hashes[2]))
+    ]
+    processes = [subprocess.Popen([sys.executable, "-c", program]) for program in programs]
+    assert all(process.wait(timeout=10) == 0 for process in processes)
+
+    store = Cache(cache_dir).root / "metadata" / "usage.sqlite3"
+    with sqlite3.connect(store) as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(usage)")]
+        rows = connection.execute("SELECT artifact_hash, used_at FROM usage").fetchall()
+    assert columns == ["artifact_hash", "used_at"]
+    assert {row[0] for row in rows} == set(hashes)
+    assert all(float(row[1]) > 0 for row in rows)
+
+
+def test_large_usage_renewal_is_one_database_operation_without_artifact_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = Cache(tmp_path / "cache")
+    hashes = {f"{value:064x}" for value in range(1000)}
+
+    def forbidden_lock(_digest: str):  # type: ignore[no-untyped-def]
+        raise AssertionError("usage renewal must not mutate per-artifact locks")
+
+    monkeypatch.setattr(cache, "_artifact_lock", forbidden_lock)
+    handle = cache.renew_usage(hashes, interval_seconds=3600)
+    handle.close()
+
+    with sqlite3.connect(cache.root / "metadata" / "usage.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM usage").fetchone() == (1000,)
+
+
+def test_activation_fails_quickly_while_another_process_holds_usage_writer(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    store = cache.root / "metadata" / "usage.sqlite3"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    program = (
+        "import sqlite3, sys; "
+        f"connection=sqlite3.connect({str(store)!r}, isolation_level=None); "
+        "connection.execute('CREATE TABLE IF NOT EXISTS usage "
+        "(artifact_hash TEXT PRIMARY KEY, used_at REAL NOT NULL)'); "
+        "connection.execute('BEGIN IMMEDIATE'); print('ready', flush=True); "
+        "sys.stdin.readline(); connection.rollback()"
     )
-    process = subprocess.Popen(
-        [sys.executable, "-c", code],
+    writer = subprocess.Popen(
+        [sys.executable, "-c", program],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
-    assert process.stdout is not None
-    assert process.stdout.readline().strip() == "ready"
     try:
-        protected = cache.cleanup(30)
-        assert [item.artifact_hash for item in protected.skipped_active] == [artifact.sha256]
+        assert writer.stdout is not None
+        assert writer.stdout.readline().strip() == "ready"
+        started = time.monotonic()
+        with pytest.raises(CacheError, match="Unable to renew cache usage metadata"):
+            DepfixRuntime(graph, cache).activate()
+        assert time.monotonic() - started < 1.0
+        assert cache.has_package(graph.artifacts[0].sha256)
     finally:
-        assert process.stdin is not None
-        process.stdin.write("\n")
-        process.stdin.flush()
-        assert process.wait(timeout=10) == 0
+        assert writer.stdin is not None
+        writer.stdin.write("release\n")
+        writer.stdin.flush()
+        assert writer.wait(timeout=5) == 0
 
-    assert [item.artifact_hash for item in cache.cleanup(30).removed] == [artifact.sha256]
+    runtime = DepfixRuntime(graph, cache).activate()
+    runtime.deactivate()
+
+
+def test_periodic_usage_loop_performs_a_second_coalesced_renewal(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache")
+    digest = "a" * 64
+    handle = cache.renew_usage({digest}, interval_seconds=1)
+    store = cache.root / "metadata" / "usage.sqlite3"
+    with sqlite3.connect(store) as connection:
+        first = float(connection.execute("SELECT used_at FROM usage WHERE artifact_hash = ?", (digest,)).fetchone()[0])
+
+    deadline = time.time() + 5
+    renewed = first
+    while renewed <= first and time.time() < deadline:
+        time.sleep(0.05)
+        with sqlite3.connect(store) as connection:
+            renewed = float(
+                connection.execute("SELECT used_at FROM usage WHERE artifact_hash = ?", (digest,)).fetchone()[0]
+            )
+    handle.close()
+
+    assert renewed > first
 
 
 def test_returning_graph_reservation_prevents_remove_then_reinstall(tmp_path: Path, wheel_factory) -> None:
@@ -204,6 +294,165 @@ def test_returning_graph_reservation_prevents_remove_then_reinstall(tmp_path: Pa
     stale = time.time() - 2 * 60 * 60
     os.utime(reservation, (stale, stale))
     assert [item.artifact_hash for item in cache.cleanup(30).removed] == [artifact.sha256]
+
+
+@pytest.mark.parametrize("first", ("installer", "uninstaller"))
+def test_concurrent_uninstall_and_install_preserve_complete_reserved_target_in_both_lock_orders(
+    tmp_path: Path,
+    wheel_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    first: str,
+) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    selected = cache.list_packages()
+    target_root = cache.root / "targets" / artifact.sha256
+    for path in sorted(target_root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        path.chmod(stat.S_IRWXU)
+    target_root.chmod(stat.S_IRWXU)
+    shutil.rmtree(target_root)
+    assert not cache.has_package(artifact.sha256)
+    target_key = "target:" + artifact.id
+    original_lock = cache.lock
+    first_has_target = threading.Event()
+    second_reached_target = threading.Event()
+    release_first = threading.Event()
+    failures: list[BaseException] = []
+    uninstall_results = []
+    materialized = threading.Event()
+
+    @contextlib.contextmanager
+    def coordinated_lock(key: str):
+        actor = threading.current_thread().name
+        if key == target_key and actor != first:
+            second_reached_target.set()
+        with original_lock(key):
+            if key == target_key and actor == first:
+                first_has_target.set()
+                assert release_first.wait(timeout=5)
+            yield
+
+    monkeypatch.setattr(cache, "lock", coordinated_lock)
+    original_target_is_complete = cache._target_is_complete
+
+    def observe_materialization(target: Path, digest: str) -> bool:
+        complete = original_target_is_complete(target, digest)
+        if complete and threading.current_thread().name == "installer":
+            materialized.set()
+        return complete
+
+    monkeypatch.setattr(cache, "_target_is_complete", observe_materialization)
+
+    def install() -> None:
+        try:
+            cache.reserve_artifacts({artifact.sha256})
+            sync_graph(graph, cache, offline=False)
+        except BaseException as exc:
+            failures.append(exc)
+
+    def uninstall() -> None:
+        try:
+            uninstall_results.append(
+                cache._remove_entries(
+                    selected,
+                    protected_hashes=set(),
+                    dry_run=False,
+                    protect_live_runtimes=True,
+                )
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = {
+        "installer": threading.Thread(target=install, name="installer"),
+        "uninstaller": threading.Thread(target=uninstall, name="uninstaller"),
+    }
+    threads[first].start()
+    assert first_has_target.wait(timeout=5)
+    second = "uninstaller" if first == "installer" else "installer"
+    threads[second].start()
+    assert second_reached_target.wait(timeout=5)
+    release_first.set()
+    for thread in threads.values():
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert failures == []
+    assert materialized.is_set()
+    assert len(uninstall_results) == 1
+    assert uninstall_results[0].removed == ()
+    assert all(item.artifact_hash == artifact.sha256 for item in uninstall_results[0].skipped_active)
+    assert cache.has_package(artifact.sha256)
+    cache.verify_packages()
+
+
+@pytest.mark.parametrize("first", ("activator", "uninstaller"))
+def test_runtime_activation_and_uninstall_serialize_lease_validation_with_deletion(
+    tmp_path: Path,
+    wheel_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    first: str,
+) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    target_key = "target:" + artifact.id
+    original_lock = cache.lock
+    first_has_target = threading.Event()
+    second_reached_target = threading.Event()
+    release_first = threading.Event()
+    runtime = DepfixRuntime(graph, cache)
+    activation_errors: list[BaseException] = []
+    uninstall_results = []
+
+    @contextlib.contextmanager
+    def coordinated_lock(key: str):
+        actor = threading.current_thread().name
+        if key == target_key and actor != first:
+            second_reached_target.set()
+        with original_lock(key):
+            if key == target_key and actor == first:
+                first_has_target.set()
+                assert release_first.wait(timeout=5)
+            yield
+
+    monkeypatch.setattr(cache, "lock", coordinated_lock)
+
+    def activate() -> None:
+        try:
+            runtime.activate()
+        except BaseException as exc:
+            activation_errors.append(exc)
+
+    def uninstall() -> None:
+        uninstall_results.append(cache.uninstall(("cache-demo",)))
+
+    threads = {
+        "activator": threading.Thread(target=activate, name="activator"),
+        "uninstaller": threading.Thread(target=uninstall, name="uninstaller"),
+    }
+    threads[first].start()
+    assert first_has_target.wait(timeout=5)
+    second = "uninstaller" if first == "activator" else "activator"
+    threads[second].start()
+    second_reached = second_reached_target.wait(timeout=5)
+    release_first.set()
+    assert second_reached
+    for thread in threads.values():
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert len(uninstall_results) == 1
+    if first == "activator":
+        assert activation_errors == []
+        assert uninstall_results[0].removed == ()
+        assert [item.artifact_hash for item in uninstall_results[0].skipped_active] == [artifact.sha256]
+        assert cache.has_package(artifact.sha256)
+        runtime.deactivate()
+    else:
+        assert [item.artifact_hash for item in uninstall_results[0].removed] == [artifact.sha256]
+        assert len(activation_errors) == 1
+        assert isinstance(activation_errors[0], CacheError)
+        assert not cache.has_package(artifact.sha256)
 
 
 def test_python_and_cli_cache_inventory_cleanup_and_removal(
@@ -249,6 +498,143 @@ def test_python_and_cli_cache_inventory_cleanup_and_removal(
     assert exit_code == 0
     assert payload["removed"][0]["artifact_hash"] == artifact.sha256
     assert depfix.list_cached_packages(cache_dir=cache_dir) == ()
+
+
+def test_uninstall_supports_bare_exact_range_compound_and_normalized_names(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, _graphs = _install_versions(tmp_path, wheel_factory, ("0.9.0", "1.0.0", "1.2.3", "2.0.0"))
+
+    result = cache.uninstall(("range_demo>=1.0,!=1.2.3,<2", "Range.Demo==2.0.0"))
+
+    assert [package.version for package in result.matched] == ["1.0.0", "2.0.0"]
+    assert [package.version for package in result.removed] == ["1.0.0", "2.0.0"]
+    assert [package.version for package in cache.list_packages()] == ["0.9.0", "1.2.3"]
+    assert [selection.normalized for selection in result.specifiers] == [
+        "range-demo!=1.2.3,<2,>=1.0",
+        "range-demo==2.0.0",
+    ]
+
+    bare = cache.uninstall(("range-demo",))
+    assert [package.version for package in bare.removed] == ["0.9.0", "1.2.3"]
+    assert cache.list_packages() == ()
+
+
+def test_uninstall_deduplicates_overlapping_specifiers_and_reports_json_no_match_and_dry_run(
+    tmp_path: Path,
+    wheel_factory,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cache_dir, cache, _graphs = _install_versions(tmp_path, wheel_factory, ("1.0.0", "1.5.0", "2.0.0"))
+    before = {str(path.relative_to(cache.root)): path.read_bytes() for path in cache.root.rglob("*") if path.is_file()}
+
+    exit_code = cli_main(
+        [
+            "--json",
+            "--cache-dir",
+            str(cache_dir),
+            "uninstall",
+            "range-demo>=1",
+            "range-demo==1.5.0",
+            "missing-demo",
+            "--dry-run",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert len(payload["matched"]) == 3
+    assert len(payload["removed"]) == 3
+    assert payload["dry_run"] is True
+    assert payload["specifiers"][2]["matched_artifacts"] == []
+    assert cache.list_packages() and len(cache.list_packages()) == 3
+    after = {str(path.relative_to(cache.root)): path.read_bytes() for path in cache.root.rglob("*") if path.is_file()}
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    "specifier",
+    ("range-demo[extra]", "range-demo; python_version > '3'", "range-demo @ https://example.test/a.whl", "not a req"),
+)
+def test_uninstall_rejects_non_distribution_selectors_with_guidance(
+    tmp_path: Path, wheel_factory, capsys: pytest.CaptureFixture[str], specifier: str
+) -> None:
+    cache_dir, _cache, _graphs = _install_versions(tmp_path, wheel_factory, ("1.0.0",))
+
+    assert cli_main(["--cache-dir", str(cache_dir), "uninstall", specifier]) == 2
+    assert "use only" in capsys.readouterr().err.lower()
+
+
+def test_uninstall_protects_active_runtime_and_preserves_shared_dependencies(tmp_path: Path, wheel_factory) -> None:
+    dependency = wheel_factory("shared-dependency", "1.0.0", {"shared_dependency.py": "VALUE = 1\n"})
+    root = wheel_factory(
+        "uninstall-root",
+        "1.0.0",
+        {"uninstall_root.py": "VALUE = 1\n"},
+        requires=["shared-dependency==1.0.0"],
+    )
+    cache_dir = tmp_path / "cache"
+    cache = Cache(cache_dir)
+    index = build_index(tmp_path / "index", [dependency])
+    graph = Resolver(cache, index_url=index).resolve(
+        ProjectConfig(
+            tmp_path / "config.toml",
+            (ImportDeclaration("root", file_spec(root), "uninstall_root"),),
+            {},
+        )
+    )
+    sync_graph(graph, cache, offline=False)
+    runtime = DepfixRuntime(graph, cache).activate()
+    try:
+        protected = cache.uninstall(("uninstall-root",))
+        assert protected.removed == ()
+        assert [package.distribution for package in protected.skipped_active] == ["uninstall-root"]
+    finally:
+        runtime.deactivate()
+
+    removed = cache.uninstall(("uninstall-root",))
+    assert [package.distribution for package in removed.removed] == ["uninstall-root"]
+    assert [package.distribution for package in cache.list_packages()] == ["shared-dependency"]
+    assert cache.inventory().installations == ()
+
+
+def test_uninstall_honors_a_runtime_lease_from_another_process(tmp_path: Path, wheel_factory) -> None:
+    cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    digest = graph.artifacts[0].sha256
+    program = (
+        "from pathlib import Path; from depfix.cache import Cache; "
+        f"handle=Cache(Path({str(cache_dir)!r})).renew_usage({{{digest!r}}}, interval_seconds=3600); "
+        "print('ready', flush=True); input(); handle.close()"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", program],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "ready"
+    try:
+        result = cache.uninstall(("cache-demo",))
+        assert result.removed == ()
+        assert [package.artifact_hash for package in result.skipped_active] == [digest]
+    finally:
+        assert process.stdin is not None
+        process.stdin.write("\n")
+        process.stdin.flush()
+        assert process.wait(timeout=10) == 0
+
+    assert [package.artifact_hash for package in cache.uninstall(("cache-demo",)).removed] == [digest]
+
+
+def test_uninstall_preserves_exact_manifest_and_offline_reuse_fails_clearly(tmp_path: Path, wheel_factory) -> None:
+    cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    manifest = tmp_path / "imports.lock"
+    write_manifest(graph, manifest)
+    manifest_before = manifest.read_bytes()
+
+    assert cache.uninstall(("cache-demo",)).removed
+    assert manifest.read_bytes() == manifest_before
+    with pytest.raises(OfflineArtifactMissingError, match="unavailable offline"):
+        install_manifest(manifest, frozen=True, offline=True, cache_dir=cache_dir)
 
 
 def test_inventory_exposes_command_provenance_and_dependency_trees(
@@ -334,6 +720,7 @@ def test_inventory_reports_code_locations_and_same_version_artifact_variants(
     first = build_wheel(first_dir, "variant-demo", "1.0.0", {"variant_demo.py": "BUILD = 1\n"})
     second = build_wheel(second_dir, "variant-demo", "1.0.0", {"variant_demo.py": "BUILD = 2\n"})
     cache_dir = tmp_path / "cache"
+    cache = Cache(cache_dir)
     depfix.configure(cache_dir=cache_dir, log_level="WARNING")
 
     first_line = sys._getframe().f_lineno + 1
@@ -361,6 +748,16 @@ def test_inventory_reports_code_locations_and_same_version_artifact_variants(
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "same-version variants: 1.0.0" in output
+
+    protected = cache.uninstall(("variant-demo==1.0.0",))
+    assert len(protected.skipped_active) == 2
+    reset_runtime_state()
+    stale = time.time() - 2 * 60 * 60
+    for reservation in (cache.root / "metadata" / "reservations").glob("*.touch"):
+        os.utime(reservation, (stale, stale))
+    removed = cache.uninstall(("variant-demo==1.0.0",))
+    assert len(removed.removed) == 2
+    assert cache.list_packages() == ()
     assert "variant-demo — 2 artifacts" in output
 
 
@@ -397,7 +794,7 @@ def test_cached_resolutions_and_explicit_manifest_inspection(
     assert "positional manifest inspection is deprecated" in captured.err
 
 
-def test_explicit_and_daily_cleanup_use_the_same_retention_contract(
+def test_explicit_cleanup_is_immediate_and_automatic_cleanup_is_two_phase(
     tmp_path: Path,
     wheel_factory,
     capsys: pytest.CaptureFixture[str],
@@ -425,7 +822,100 @@ def test_explicit_and_daily_cleanup_use_the_same_retention_contract(
 
     automatic = cache.automatic_cleanup(30, protected_hashes=set())
     assert automatic is not None
+    assert automatic.removed == ()
+    assert [item.artifact_hash for item in automatic.pending_candidates] == [artifact.sha256]
+    candidate = cache.root / "metadata" / "deletion-candidates" / f"{artifact.sha256}.json"
+    data = json.loads(candidate.read_text(encoding="utf-8"))
+    data["candidate_at"] = time.time() - 25 * 60 * 60
+    candidate.write_text(json.dumps(data), encoding="utf-8")
+    automatic = cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+    assert automatic is not None
     assert [item.artifact_hash for item in automatic.removed] == [artifact.sha256]
+
+
+@pytest.mark.parametrize("candidate_at", [0, float("nan"), float("-inf"), float("inf")])
+def test_automatic_cleanup_treats_invalid_candidate_clocks_conservatively(
+    tmp_path: Path, wheel_factory, candidate_at: float
+) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    _age_installation(cache, artifact.sha256, days=31)
+    candidate = cache.root / "metadata" / "deletion-candidates" / f"{artifact.sha256}.json"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "candidate_at": candidate_at,
+                "last_relevant": cache.list_packages()[0].installed_at.timestamp(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+
+    assert result is not None and result.removed == ()
+    assert [item.artifact_hash for item in result.pending_candidates] == [artifact.sha256]
+    assert cache.has_package(artifact.sha256)
+
+
+def test_automatic_cleanup_treats_corrupt_and_future_candidates_conservatively(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    _age_installation(cache, artifact.sha256, days=31)
+    candidate = cache.root / "metadata" / "deletion-candidates" / f"{artifact.sha256}.json"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("{interrupted", encoding="utf-8")
+
+    result = cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+    assert result is not None and result.removed == ()
+    assert [item.artifact_hash for item in result.pending_candidates] == [artifact.sha256]
+    data = json.loads(candidate.read_text(encoding="utf-8"))
+    data["candidate_at"] = time.time() + 86400
+    candidate.write_text(json.dumps(data), encoding="utf-8")
+
+    result = cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+    assert result is not None and result.removed == ()
+    assert [item.artifact_hash for item in result.pending_candidates] == [artifact.sha256]
+
+
+def test_interrupted_candidate_persistence_leaves_artifact_and_recovers(
+    tmp_path: Path, wheel_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    _age_installation(cache, artifact.sha256, days=31)
+    real_replace = cache_module.os.replace
+
+    def interrupt_candidate(source, destination):  # type: ignore[no-untyped-def]
+        if "deletion-candidates" in str(destination):
+            raise OSError("simulated interrupted candidate write")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(cache_module.os, "replace", interrupt_candidate)
+    with pytest.raises(OSError, match="interrupted candidate write"):
+        cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+    assert cache.has_package(artifact.sha256)
+    assert not any((cache.root / "metadata" / "deletion-candidates").glob(".*.tmp"))
+
+    monkeypatch.setattr(cache_module.os, "replace", real_replace)
+    result = cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+    assert result is not None and len(result.pending_candidates) == 1
+    assert cache.has_package(artifact.sha256)
+
+
+def test_automatic_cleanup_fails_closed_for_a_corrupt_usage_store(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    _age_installation(cache, artifact.sha256, days=31)
+    cache.record_usage({artifact.sha256}, used_at=time.time() - 31 * 86400)
+    store = cache.root / "metadata" / "usage.sqlite3"
+    store.write_bytes(b"interrupted database")
+
+    with pytest.raises(CacheError, match="Unable to read cache usage metadata"):
+        cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+    assert cache.has_package(artifact.sha256)
 
 
 def test_cache_retention_configuration_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -454,7 +944,128 @@ def test_cache_retention_configuration_precedence(tmp_path: Path, monkeypatch: p
         depfix.configure(cache_retention_days=-1)
 
 
-def test_windows_lease_probe_never_uses_terminating_os_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_active_graph_renews_complete_transitive_closure_and_cancels_candidates(tmp_path: Path, wheel_factory) -> None:
+    dependency = wheel_factory("renew-dependency", "1.0.0", {"renew_dependency.py": "VALUE = 1\n"})
+    root = wheel_factory(
+        "renew-root",
+        "1.0.0",
+        {"renew_root.py": "VALUE = 2\n"},
+        requires=["renew-dependency==1.0.0"],
+    )
+    cache_dir = tmp_path / "cache"
+    cache = Cache(cache_dir)
+    index = build_index(tmp_path / "index", [dependency])
+    graph = Resolver(cache, settings=resolve_settings(index_url=index, discover=False)).resolve(
+        ProjectConfig(
+            tmp_path / ".depfix" / "config.toml",
+            (ImportDeclaration("root", file_spec(root), "renew_root"),),
+            {},
+        )
+    )
+    sync_graph(graph, cache)
+    for artifact in graph.artifacts:
+        _age_installation(cache, artifact.sha256, days=31)
+    first = cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+    assert first is not None and len(first.pending_candidates) == 2
+
+    runtime = DepfixRuntime(graph, cache).activate()
+    store = cache.root / "metadata" / "usage.sqlite3"
+    deadline = time.time() + 5
+    recorded: set[str] = set()
+    while time.time() < deadline:
+        try:
+            with sqlite3.connect(store) as connection:
+                recorded = {row[0] for row in connection.execute("SELECT artifact_hash FROM usage")}
+        except sqlite3.Error:
+            pass
+        if recorded == {artifact.sha256 for artifact in graph.artifacts}:
+            break
+        time.sleep(0.01)
+    assert recorded == {artifact.sha256 for artifact in graph.artifacts}
+    second = cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+    assert second is not None and second.removed == () and second.pending_candidates == ()
+    assert not any((cache.root / "metadata" / "deletion-candidates").glob("*.json"))
+    runtime.deactivate()
+
+
+def test_renewal_wins_race_between_candidate_scan_and_eligible_deletion(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    _age_installation(cache, artifact.sha256, days=31)
+    first = cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+    assert first is not None and len(first.pending_candidates) == 1
+    candidate = cache._candidate_path(artifact.sha256)
+    data = json.loads(candidate.read_text(encoding="utf-8"))
+    data["candidate_at"] = time.time() - 25 * 60 * 60
+    candidate.write_text(json.dumps(data), encoding="utf-8")
+
+    original_remove = cache._remove_automatic_entries
+
+    def renew_then_remove(entries, **kwargs):  # type: ignore[no-untyped-def]
+        cache.record_usage({artifact.sha256})
+        return original_remove(entries, **kwargs)
+
+    cache._remove_automatic_entries = renew_then_remove  # type: ignore[method-assign]
+    result = cache.automatic_cleanup(30, protected_hashes=set(), force=True)
+
+    assert result is not None and result.removed == ()
+    assert [item.artifact_hash for item in result.skipped_active] == [artifact.sha256]
+    assert cache.has_package(artifact.sha256)
+
+
+def test_usage_renewal_does_not_mutate_read_only_image_origin_tree(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    target = cache.unpacked_path(artifact.id)
+    original_modes = {path: path.stat().st_mode for path in (target, *target.rglob("*"))}
+    for path in sorted(original_modes, key=lambda item: len(item.parts), reverse=True):
+        path.chmod(stat.S_IRUSR | (stat.S_IXUSR if path.is_dir() else 0))
+
+    cache.record_usage({artifact.sha256})
+
+    assert cache.has_package(artifact.sha256)
+    assert all(not (path.stat().st_mode & stat.S_IWUSR) for path in original_modes)
+
+
+def test_global_cleanup_configuration_cli_and_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    assert (
+        cli_main(
+            [
+                "--json",
+                "config",
+                "set",
+                "--retention-days",
+                "12",
+                "--auto-cleanup",
+                "false",
+                "--renewal-seconds",
+                "90",
+                "--deletion-grace-hours",
+                "6",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cache_retention_days"] == 12
+    assert payload["cache_auto_cleanup"] is False
+    assert payload["cache_renewal_seconds"] == 90
+    assert payload["cache_deletion_grace_hours"] == 6
+    monkeypatch.setenv("DEPFIX_CACHE_RENEWAL_SECONDS", "30")
+    assert resolve_settings(discover=False).cache_renewal_seconds == 30
+    depfix.configure(cache_renewal_seconds=15)
+    assert resolve_settings(discover=False).cache_renewal_seconds == 15
+    with pytest.raises(SpecifierError, match="at least twice"):
+        depfix.configure(cache_renewal_seconds=3600, cache_deletion_grace_hours=1)
+    assert resolve_settings(discover=False).cache_renewal_seconds == 15
+    assert cli_main(["config", "set", "--renewal-seconds", "3600", "--deletion-grace-hours", "1"]) == 2
+    assert "at least twice" in capsys.readouterr().err
+
+
+def test_windows_owner_probe_never_uses_terminating_os_kill(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cache_module, "_IS_WINDOWS", True)
     monkeypatch.setattr(cache_module, "_windows_pid_is_running", lambda _pid: True)
 

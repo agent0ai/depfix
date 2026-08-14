@@ -30,6 +30,7 @@ from ._version import __version__
 from .cache import Cache, _host_matches, _open_url
 from .config import ImportDeclaration, ProjectConfig
 from .errors import (
+    DepfixError,
     HashMismatchError,
     ModuleNotProvidedError,
     MultipleImportModulesError,
@@ -171,14 +172,19 @@ class Resolver:
                 raise ResolutionError(f"prefer-newest for alias {declaration.name!r} must be boolean")
             source = parse_source(declaration.specifier, base_dir=declaration.base_dir or config.path.parent)
             self.progress.emit("resolve", source.normalized)
-            node = self._resolve_declaration(
-                declaration,
-                source,
-                path=f"request:{declaration.name}",
-                ancestors={},
-                prefer_newest=prefer_newest,
-            )
-            selected_module = self._select_module(declaration, source, node)
+            try:
+                node = self._resolve_declaration(
+                    declaration,
+                    source,
+                    path=f"request:{declaration.name}",
+                    ancestors={},
+                    prefer_newest=prefer_newest,
+                )
+                selected_module = self._select_module(declaration, source, node)
+            except DepfixError as exc:
+                if declaration.source_file and exc.referrer is None:
+                    exc.referrer = f"{declaration.source_file}:{declaration.source_line}"
+                raise
             aliases.append(
                 Alias(
                     declaration.name,
@@ -487,10 +493,13 @@ class Resolver:
                 module=module,
                 remediation="package related files as a wheel",
             )
+        distribution = str(canonicalize_name(source.distribution or module))
+        version = f"0+{digest[:12]}"
+        self._validate_constraint(distribution, version, source)
         artifact = Artifact(
             id=f"sha256:{digest}",
-            distribution=str(canonicalize_name(source.distribution or module)),
-            version=f"0+{digest[:12]}",
+            distribution=distribution,
+            version=version,
             url=redact(origin),
             filename=filename,
             size=blob.stat().st_size,
@@ -551,6 +560,7 @@ class Resolver:
                     f"wheel={inspection.distribution} {inspection.version}"
                 ),
             )
+        self._validate_constraint(candidate.distribution, candidate.version, candidate.source)
         source = candidate.source
         artifact = Artifact(
             id=f"sha256:{candidate.sha256}",
@@ -672,6 +682,16 @@ class Resolver:
             return specifier
         values = [value for value in (str(specifier), str(constrained)) if value]
         return SpecifierSet(",".join(values))
+
+    def _validate_constraint(self, distribution: str, version: str, source: SourceInfo | None) -> None:
+        constraint = self._constraints.get(str(canonicalize_name(distribution)))
+        if constraint is not None and Version(version) not in constraint:
+            raise ResolutionError(
+                "Selected source does not satisfy the requirements constraint",
+                request=source.original if source else distribution,
+                candidates=(f"{distribution}=={version}",),
+                remediation=f"select a source version matching {distribution}{constraint}",
+            )
 
     def _inspect_artifact(self, blob: Path, candidate: _Candidate) -> WheelInspection:
         metadata_path = self.cache.root / "metadata" / "imports" / f"{candidate.sha256}.json"

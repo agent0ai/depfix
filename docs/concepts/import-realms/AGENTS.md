@@ -15,6 +15,8 @@
 - Realm code resolves third-party imports only through declared parent-specific edges.
 - Package-specific compatibility fallbacks stay inside the selected artifact and never override declared dependency edges.
 - Standard-import dispatch prioritizes a loaded caller's realm, then context-local scopes, then persistent defaults.
+- The opt-in installed-store fallback runs only after ordinary resolution misses a root and preserves exact graph,
+  configured-manifest priority, compatibility, native ownership, and no-network boundaries.
 - Pure managed versions stay under synthetic identities; the dispatcher delegates unrelated imports unchanged.
 - Native request closures use logical process-global identities in `auto` mode, with one compatible public owner per root;
   private helpers follow conventional best-effort import behavior.

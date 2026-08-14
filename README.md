@@ -87,10 +87,37 @@ depfix pip install -r requirements.txt
 
 This is Depfix installation, not an alias for `pip` or `uv pip`. The listed packages are resolved as one group, exact
 artifacts are materialized in the Depfix store, and incompatible transitive versions can coexist. Requirement files may
-include nested `-r` files, `-c` constraints, indexes, hashes, and local `-e` paths. Add `--prefer-newest` or `-U` when
-newest-first selection matters more than compatible cache reuse.
+include nested `-r` files, `-c` constraints, indexes, hash-pinned direct URLs, and local `-e` paths. Add `--prefer-newest`
+or `-U` when newest-first selection matters more than compatible cache reuse.
 
 Then choose whichever import style fits your code.
+
+### Use the installed store as an import fallback
+
+Use `patch_import()` when packages are already in Depfix's shared store and you want unresolved ordinary imports to use
+them without a declaration for each distribution:
+
+```python
+import depfix
+
+depfix.patch_import()
+
+import requests
+import yaml
+```
+
+The opt-in is process-local and never installs from the network. Python's builtins, standard library, project files,
+active environment, and existing import hooks resolve first. Depfix consults exact recorded import-module metadata only
+after normal resolution cannot find the requested root, then selects the newest compatible installed version with its
+recorded dependency graph. It raises `StoreImportError` instead of guessing when the newest version has competing
+artifacts or graphs. Compatible namespace contributors are co-selected only when they belong to one exact recorded graph;
+unrelated distributions exposing the same root remain ambiguous. Explicit `using()` and `default()` selections still take
+priority. When an exact manifest is configured and provides the root, its pinned graph takes priority over unrelated store
+records. Call `depfix.unpatch_import()` to remove the fallback hook; already imported modules retain normal `sys.modules`
+lifetime. Each subprocess must opt in separately.
+
+Applications launched with `depfix run application.py` or `depfix run -m application` get this installed-store fallback
+automatically; application code does not need to import Depfix or call `patch_import()` itself.
 
 ### Set a default version
 
@@ -111,6 +138,19 @@ import yaml
 response = requests.get("https://raw.githubusercontent.com/pypa/pip/main/.pre-commit-config.yaml")
 workflow = yaml.safe_load(response.text)
 ```
+
+An existing requirements file can define the same coherent default group:
+
+```python
+import depfix
+
+depfix.default_requirements("requirements.txt")
+```
+
+Nested requirements and constraints resolve relative to their containing file. Blank lines, comments, continuations,
+PEP 508 requirements, applicable environment markers, local/editable paths, direct URLs, VCS references, and primary or
+extra index declarations use the same parser as `depfix pip install`. Unsupported pip directives fail with file and line
+context; use a direct URL `#sha256=` fragment or a prepared Depfix manifest instead of pip `--hash` entries.
 
 There is no separate install step. The first `default()` call prepares the requested packages, and later runs reuse the
 cache. When dependency ranges overlap, Depfix prefers the newest compatible version already in that shared cache, so
@@ -282,19 +322,33 @@ Inspect installed packages or clean the store explicitly from the CLI:
 depfix list
 depfix list --view duplicates
 depfix tree
+depfix uninstall requests
+depfix uninstall 'requests>=2.30,<3'
 depfix cache cleanup --days 30
-depfix cache remove requests --version 2.31.0
 depfix cache resolutions
 ```
 
 The package view includes size, installation/last-use dates, artifact identity, and why the package was installed. The
 duplicate view ranks distributions with multiple retained artifacts; the tree view starts at each installed root and
 indents its dependencies. Python exposes the same snapshot through `depfix.inspect_cache()`, alongside
-`depfix.list_cached_packages()`, `depfix.cleanup_cache()`, and `depfix.remove_cached_package()`. Change the retention
-window or disable automatic cleanup centrally:
+`depfix.list_cached_packages()`, `depfix.cleanup_cache()`, and `depfix.remove_cached_package()`.
+
+`depfix uninstall NAME` removes every installed version of that distribution. Add an exact pin or any PEP 440 range to
+select only matching versions; quote shell arguments containing `<`, `>`, `!`, or commas. Multiple specifiers are
+deduplicated, `--dry-run` makes no store changes, and active preparation/runtime artifacts are reported as protected.
+Uninstall never cascades into dependencies: only explicitly named distributions are selected, and automatic retention
+later owns unused shared dependency cleanup. `depfix cache remove` remains the advanced compatibility interface for an
+optional exact artifact hash.
+
+Change the retention window or disable automatic cleanup centrally:
 
 ```python
-depfix.configure(cache_retention_days=60, cache_auto_cleanup=False)
+depfix.configure(
+    cache_retention_days=60,
+    cache_auto_cleanup=True,
+    cache_renewal_seconds=3600,
+    cache_deletion_grace_hours=24,
+)
 ```
 
 ## Good to know

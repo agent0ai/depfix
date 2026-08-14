@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import importlib.abc
 import importlib.machinery
 import importlib.util
 import sys
@@ -69,13 +70,34 @@ class ImportSelection:
 
 
 _scope_stack: ContextVar[tuple[ImportSelection, ...]] = ContextVar("depfix_using_scopes", default=())
+_ordinary_misses: ContextVar[set[str] | None] = ContextVar("depfix_ordinary_misses", default=None)
 _defaults: dict[str, ModuleBinding] = {}
 _managed_roots: set[str] = set()
 _lock = RLock()
 _installed = False
+_fallback_enabled = False
+_fallback_bindings: dict[str, ModuleBinding] = {}
 _previous_import: Any = None
 _previous_import_module: Any = None
 _previous_find_spec: Any = None
+
+
+class _OrdinaryMissProbe(importlib.abc.MetaPathFinder):
+    """Record lookups that exhausted the ordinary finder chain."""
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None,
+        target: ModuleType | None = None,
+    ) -> None:
+        misses = _ordinary_misses.get()
+        if misses is not None:
+            misses.add(fullname)
+        return None
+
+
+_ordinary_miss_probe = _OrdinaryMissProbe()
 
 
 def ensure_dispatcher() -> None:
@@ -99,7 +121,6 @@ def ensure_dispatcher() -> None:
 
 
 def register_default(selection: ImportSelection) -> None:
-    ensure_dispatcher()
     with _lock:
         conflicts: list[str] = []
         for root, binding in selection.bindings.items():
@@ -115,6 +136,7 @@ def register_default(selection: ImportSelection) -> None:
                 candidates=tuple(conflicts),
                 remediation="keep one default selection or use depfix.using(...) for the temporary version",
             )
+        ensure_dispatcher()
         for root, binding in selection.bindings.items():
             _defaults.setdefault(root, binding)
             _managed_roots.add(root)
@@ -139,13 +161,53 @@ def dispatcher_installed() -> bool:
     return _installed and builtins.__import__ is _dispatch_import
 
 
+def patch_import() -> None:
+    """Enable installed-store fallback for otherwise unresolved imports."""
+    global _fallback_enabled
+    ensure_dispatcher()
+    with _lock:
+        _fallback_enabled = True
+        _ensure_ordinary_miss_probe_last()
+
+
+def unpatch_import() -> None:
+    """Disable installed-store fallback without disturbing other import hooks."""
+    global _fallback_enabled, _installed, _previous_find_spec, _previous_import, _previous_import_module
+    with _lock:
+        _fallback_enabled = False
+        _fallback_bindings.clear()
+        _remove_ordinary_miss_probe()
+        if _defaults or _managed_roots or _scope_stack.get() or not _installed:
+            return
+        if (
+            builtins.__import__ is not _dispatch_import
+            or importlib.import_module is not _dispatch_import_module
+            or importlib.util.find_spec is not _dispatch_find_spec
+        ):
+            return
+        if builtins.__import__ is _dispatch_import:
+            builtins.__import__ = cast(Any, _previous_import)
+        if importlib.import_module is _dispatch_import_module:
+            importlib.import_module = cast(Any, _previous_import_module)
+        if importlib.util.find_spec is _dispatch_find_spec:
+            importlib.util.find_spec = cast(Any, _previous_find_spec)
+        _installed = False
+        _previous_import = None
+        _previous_import_module = None
+        _previous_find_spec = None
+
+
 def reset_dispatcher_state() -> None:
     """Restore interpreter globals for deterministic tests."""
-    global _installed, _previous_find_spec, _previous_import, _previous_import_module
+    global _fallback_enabled, _installed, _previous_find_spec, _previous_import, _previous_import_module
     with _lock:
         _defaults.clear()
         _managed_roots.clear()
+        _fallback_bindings.clear()
+        _fallback_enabled = False
         _scope_stack.set(())
+        _ordinary_misses.set(None)
+        _remove_ordinary_miss_probe()
         if _installed and builtins.__import__ is _dispatch_import:
             builtins.__import__ = cast(Any, _previous_import)
         if _installed and importlib.import_module is _dispatch_import_module:
@@ -165,6 +227,44 @@ def _binding(root: str) -> ModuleBinding | None:
             return selected
     with _lock:
         return _defaults.get(root)
+
+
+def _fallback_binding(root: str) -> ModuleBinding | None:
+    with _lock:
+        if not _fallback_enabled:
+            return None
+        cached = _fallback_bindings.get(root)
+        if cached is not None:
+            return cached
+        from .manager import prepare_store_import
+
+        selected = prepare_store_import(root)
+        if selected is not None:
+            _fallback_bindings[root] = selected
+        return selected
+
+
+def _ordinary_root_missing(error: ModuleNotFoundError, name: str, misses: set[str]) -> bool:
+    """Return whether ordinary resolution failed before executing the requested root."""
+    root = name.split(".", 1)[0]
+    return error.name == root and root in misses
+
+
+def _ensure_ordinary_miss_probe_last() -> None:
+    """Keep the non-loading probe after every ordinary meta-path finder."""
+    with _lock:
+        sys.meta_path[:] = [finder for finder in sys.meta_path if finder is not _ordinary_miss_probe]
+        sys.meta_path.append(_ordinary_miss_probe)
+
+
+def _remove_ordinary_miss_probe() -> None:
+    with _lock:
+        sys.meta_path[:] = [finder for finder in sys.meta_path if finder is not _ordinary_miss_probe]
+
+
+def _store_fallback_enabled() -> bool:
+    with _lock:
+        return _fallback_enabled
 
 
 def _realm_importer(globals: dict[str, Any] | None) -> BoundImporter | None:
@@ -211,7 +311,22 @@ def _dispatch_import(
         active = scopes[-1] if scopes else None
         if (active is not None and not _is_application_module(root)) or root in _managed_roots:
             _raise_scope_not_provided(name, active)
-        return cast(ModuleType, _previous_import(name, globals, locals, fromlist, level))
+        misses: set[str] = set()
+        token: Token[set[str] | None] | None = None
+        if _store_fallback_enabled():
+            _ensure_ordinary_miss_probe_last()
+            token = _ordinary_misses.set(misses)
+        try:
+            return cast(ModuleType, _previous_import(name, globals, locals, fromlist, level))
+        except ModuleNotFoundError as exc:
+            if not _ordinary_root_missing(exc, name, misses):
+                raise
+            selected = _fallback_binding(root)
+            if selected is None:
+                raise
+        finally:
+            if token is not None:
+                _ordinary_misses.reset(token)
     importer = BoundImporter(selected.runtime, selected.node_id, "")
     return importer(name, globals, locals, list(fromlist or ()), level)
 
@@ -226,7 +341,22 @@ def _dispatch_import_module(name: str, package: str | None = None) -> ModuleType
         active = scopes[-1] if scopes else None
         if (active is not None and not _is_application_module(root)) or root in _managed_roots:
             _raise_scope_not_provided(name, active)
-        return cast(ModuleType, _previous_import_module(name, package))
+        misses: set[str] = set()
+        token: Token[set[str] | None] | None = None
+        if _store_fallback_enabled():
+            _ensure_ordinary_miss_probe_last()
+            token = _ordinary_misses.set(misses)
+        try:
+            return cast(ModuleType, _previous_import_module(name, package))
+        except ModuleNotFoundError as exc:
+            if not _ordinary_root_missing(exc, name, misses):
+                raise
+            selected = _fallback_binding(root)
+            if selected is None:
+                raise
+        finally:
+            if token is not None:
+                _ordinary_misses.reset(token)
     return selected.runtime.import_for_node(selected.node_id, name)
 
 
@@ -236,7 +366,14 @@ def _dispatch_find_spec(name: str, package: str | None = None) -> importlib.mach
     root = name.split(".", 1)[0]
     selected = _binding(root)
     if selected is None:
-        return cast(importlib.machinery.ModuleSpec | None, _previous_find_spec(name, package))
+        ordinary = cast(importlib.machinery.ModuleSpec | None, _previous_find_spec(name, package))
+        if ordinary is not None:
+            return ordinary
+        if "." in name and _previous_find_spec(root) is not None:
+            return None
+        selected = _fallback_binding(root)
+        if selected is None:
+            return None
     return selected.runtime.import_for_node(selected.node_id, name).__spec__
 
 
