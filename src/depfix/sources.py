@@ -247,6 +247,8 @@ def _file_source(original: str, value: str, base: Path) -> SourceInfo:
             if os.name != "nt":
                 raise SourceError("UNC file URLs are supported only on Windows", request=original)
         path = file_url_to_path(clean)
+    elif clean.startswith("file:"):
+        path = Path(unquote(clean[5:]))
     elif _WINDOWS_DRIVE.match(clean):
         path = Path(PureWindowsPath(clean))
     else:

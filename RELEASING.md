@@ -43,6 +43,13 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.10.0 — 2026-08-14 (superseded before PyPI publication)
+
+- Tag: `https://github.com/agent0ai/depfix/tree/v0.10.0`
+- Hosted Windows validation exposed direct `file:C:/...` requirements-path parsing and concurrent SQLite usage-write
+  failures. Validation failed before distribution staging, OIDC, or PyPI publication; the corrections are released as
+  `0.10.1` without moving the immutable tag.
+
 ### 0.9.2 — 2026-08-13 (superseded before PyPI publication)
 
 - Tag: `https://github.com/agent0ai/depfix/tree/v0.9.2`

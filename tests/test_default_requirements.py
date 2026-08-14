@@ -195,7 +195,7 @@ def test_parser_preserves_pep508_sources_editables_and_indexes(tmp_path: Path) -
     assert parsed.requirements[0] == "demo[fast]>=1,<2 ; python_version >= '3'"
     assert parsed.requirements[1].startswith("archive @ https://files.example/archive.whl#sha256=")
     assert parsed.requirements[2].startswith("source @ git+https://example.invalid/source.git@")
-    assert parsed.requirements[3] == f"file:{project.resolve()}"
+    assert parsed.requirements[3] == f"file:{project.resolve().as_posix()}"
 
 
 def test_default_requirements_conflict_rolls_back_new_bindings(tmp_path: Path, wheel_factory) -> None:

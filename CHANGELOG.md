@@ -2,7 +2,7 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
-## 0.10.0 - 2026-08-14
+## 0.10.1 - 2026-08-14
 
 - Added `depfix.default_requirements(path)` for transactional grouped activation of requirements files, including nested
   requirements and constraints, environment markers, file-relative sources, scoped indexes, explicit contextual parser
@@ -15,6 +15,14 @@ All notable changes use this file. The project follows semantic versioning after
 
 - Added `depfix uninstall` and the matching Python API for normalized names, exact versions, and PEP 440 ranges, with
   dry-run and JSON reporting, non-cascading removal, and lock-safe protection for preparation and active runtimes.
+
+- Preserved absolute Windows drive paths in named `file:` requirements and allowed a bounded half-second wait for
+  concurrent cross-process usage-store writes on slower Windows filesystems.
+
+## 0.10.0 - 2026-08-14 (superseded before PyPI publication)
+
+- The hosted Windows matrix exposed direct `file:C:/...` requirements-path parsing and concurrent SQLite usage-write
+  failures. Validation failed before draft staging, OIDC, or PyPI publication; the immutable tag is superseded by 0.10.1.
 
 ## 0.9.5 - 2026-08-13
 
