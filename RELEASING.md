@@ -43,6 +43,21 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.10.2 — 2026-08-14
+
+- PyPI: `https://pypi.org/project/depfix/0.10.2/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.10.2`
+- Wheel SHA-256: `d23b5d98467e3cf9729d63a116280b3f72a04c54d57c9a836be59d0fb0a36f66`
+- Sdist SHA-256: `443604260efb3ad8594d880da2015a1a8ce1a2950453cdda22ca2866fa6d2805`
+- Published from commit `5534ddf12ebb2379eb459edc6f02af06ae0037bc` by protected workflow run
+  `https://github.com/agent0ai/depfix/actions/runs/31795984090` after the complete quality, Linux, macOS, Windows,
+  x64, arm64, Python 3.11–3.13, uv, distribution, draft-staging, OIDC publication, public-index, and finalization gates
+  passed.
+- PyPI and GitHub expose the exact same wheel and source archive byte for byte. Their inventories exclude tests, caches,
+  credentials, uv binaries, and DOX files. A clean credential-free public-index installation verified version/help,
+  requirements-file defaults from outside a project, patch/unpatch, automatic `depfix run` fallback, PEP 440 uninstall,
+  and installed list/tree behavior. Release notes explicitly leave the uv compile/resolver optimization as research-only.
+
 ### 0.10.1 — 2026-08-14 (superseded before PyPI publication)
 
 - Tag: `https://github.com/agent0ai/depfix/tree/v0.10.1`
