@@ -43,6 +43,20 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.10.3 — 2026-08-17
+
+- PyPI: `https://pypi.org/project/depfix/0.10.3/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.10.3`
+- Wheel SHA-256: `5f876399873bac31d0649bc5f3e28748c4e2df86169cc34876b16b4ea0b87887`
+- Sdist SHA-256: `3ddc5c30757a8ea5c77075ab67d2233c6ad9593ea94a27a150060b22375618fc`
+- Published from commit `4626a894bb25d8942ab3cd9ac71d1a1fd3a3efaa` by protected workflow run
+  `https://github.com/agent0ai/depfix/actions/runs/32042472924` after its request, complete quality and platform matrix,
+  distribution, hidden-draft staging, OIDC publication, public-index verification, and release finalization gates passed.
+- PyPI and GitHub expose the protected run's retained wheel and source archive byte for byte. Their inventories exclude
+  tests, caches, credentials, uv binaries, and DOX files. A clean credential-free public-index installation verified
+  version/help, canonical normalization of the historical `>3.4.*, <4` metadata form, and preparation of the complete
+  70-artifact `fastmcp==3.2.4` graph. The unrelated build-progress limitation remains unchanged.
+
 ### 0.10.2 — 2026-08-14
 
 - PyPI: `https://pypi.org/project/depfix/0.10.2/`
