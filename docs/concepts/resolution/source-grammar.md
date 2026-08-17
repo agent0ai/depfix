@@ -26,6 +26,12 @@ without credentials. Single-file sources cannot fetch siblings; use a wheel for 
 Index credentials do not belong in specifiers. Configure indices through Python, CLI, environment, `.depfix/config.toml`,
 and uv-compatible authentication. Manifests retain sanitized index/source provenance only.
 
+Depfix keeps valid PEP 440 `Requires-Python` metadata unchanged. For legacy index or wheel metadata only, it repairs a
+numeric release-prefix wildcard used with an ordering operator by translating the prefix interval to its exact bound:
+`>3.4.*` becomes `>=3.5`, `>=3.4.*` becomes `>=3.4`, `<3.4.*` becomes `<3.4`, and `<=3.4.*` becomes `<3.5`.
+Valid `==3.4.*` and `!=3.4.*` remain unchanged. Non-numeric, compatible-release, local-version, or otherwise ambiguous
+malformed specifiers remain errors.
+
 Optional export policy is configured in `.depfix/config.toml`:
 
 ```toml

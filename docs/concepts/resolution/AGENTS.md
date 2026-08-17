@@ -21,6 +21,8 @@
   one environment-wide dependency version.
 - Per-loading-request index policies use first-index selection, participate in resolution identity, and remain isolated
   from process configuration and concurrent requests. Prefer one scoped primary index over extra indexes when possible.
+- Legacy numeric ordering wildcards in index or wheel `Requires-Python` metadata normalize to exact release-prefix
+  interval bounds; valid PEP 440 and unrelated malformed syntax retain strict behavior.
 
 ## Work Guidance
 

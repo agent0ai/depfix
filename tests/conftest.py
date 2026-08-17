@@ -25,6 +25,7 @@ def build_wheel(
     requires: Iterable[str] = (),
     tag: str = "py3-none-any",
     metadata_version: str = "2.3",
+    requires_python: str = "",
     import_names: Iterable[str] | None = None,
     import_namespaces: Iterable[str] = (),
 ) -> Path:
@@ -36,6 +37,7 @@ def build_wheel(
         f"Metadata-Version: {metadata_version}\n"
         f"Name: {distribution}\n"
         f"Version: {version}\n"
+        + (f"Requires-Python: {requires_python}\n" if requires_python else "")
         + "".join(f"Requires-Dist: {requirement}\n" for requirement in requires)
         + ("".join(f"Import-Name: {name}\n" for name in import_names) if import_names is not None else "")
         + "".join(f"Import-Namespace: {name}\n" for name in import_namespaces)

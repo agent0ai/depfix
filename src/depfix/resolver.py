@@ -21,7 +21,7 @@ from urllib.parse import unquote, urldefrag, urljoin, urlsplit
 
 from packaging.markers import default_environment
 from packaging.requirements import InvalidRequirement, Requirement
-from packaging.specifiers import SpecifierSet
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.tags import sys_tags
 from packaging.utils import canonicalize_name, parse_sdist_filename, parse_wheel_filename
 from packaging.version import InvalidVersion, Version
@@ -50,6 +50,7 @@ from .wheel import WheelInspection, inspect_wheel
 _SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
 _SIMPLE_HTML = {"application/vnd.pypi.simple.v1+html", "text/html"}
 _SIMPLE_ACCEPT = "application/vnd.pypi.simple.v1+json, application/vnd.pypi.simple.v1+html;q=0.9, text/html;q=0.8"
+_WILDCARD_COMPARISON = re.compile(r"^(?P<operator><=|>=|<|>)(?P<release>\d+(?:\.\d+)*)\.\*$")
 
 
 class _SimpleHTMLParser(HTMLParser):
@@ -728,8 +729,15 @@ class Resolver:
                 for name in names
             ):
                 raise ValueError("invalid import name in metadata cache")
+            normalized_requires_python = _normalize_requires_python(inspection.requires_python)
+            if normalized_requires_python != inspection.requires_python:
+                raise ValueError("noncanonical Requires-Python in metadata cache")
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             inspection = inspect_wheel(blob, filename=candidate.filename)
+            inspection = replace(
+                inspection,
+                requires_python=_normalize_requires_python(inspection.requires_python),
+            )
             metadata_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "format_version": 1,
@@ -1025,7 +1033,7 @@ class Resolver:
                 if item.get("yanked", False) and not self.allow_yanked:
                     rejections.append(f"{filename}: yanked ({item.get('yanked_reason') or 'no reason'})")
                     continue
-                requires_python = item.get("requires_python") or ""
+                requires_python = _normalize_requires_python(str(item.get("requires_python") or ""))
                 current_python = Version(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
                 if requires_python and current_python not in SpecifierSet(requires_python):
                     rejections.append(f"{filename}: Requires-Python {requires_python}")
@@ -1232,6 +1240,32 @@ class Resolver:
 
 def _node_id(path: str, artifact_id: str) -> str:
     return "node_" + hashlib.sha256(f"{path}\0{artifact_id}".encode()).hexdigest()[:24]
+
+
+def _normalize_requires_python(value: str) -> str:
+    """Canonicalize safely inferable comparison wildcards in Requires-Python."""
+    try:
+        SpecifierSet(value)
+    except InvalidSpecifier as original_error:
+        normalized: list[str] = []
+        changed = False
+        for raw_part in value.split(","):
+            part = raw_part.strip()
+            match = _WILDCARD_COMPARISON.fullmatch(part)
+            if match is None:
+                normalized.append(part)
+                continue
+            operator = match.group("operator")
+            release = [int(component) for component in match.group("release").split(".")]
+            if operator in {">", "<="}:
+                release[-1] += 1
+            boundary = ".".join(str(component) for component in release)
+            normalized.append((">=" if operator == ">" else "<" if operator == "<=" else operator) + boundary)
+            changed = True
+        if not changed:
+            raise original_error
+        return str(SpecifierSet(",".join(normalized)))
+    return value
 
 
 def _versions_equivalent(left: str, right: str) -> bool:

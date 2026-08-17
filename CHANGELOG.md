@@ -2,6 +2,12 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.10.3 - 2026-08-17
+
+- Accepted historical numeric ordering wildcards in index and wheel `Requires-Python` metadata when their release-prefix
+  bounds are unambiguous, including `>3.4.*` as `>=3.5`. Valid PEP 440 behavior remains unchanged, unrelated malformed
+  specifiers still fail closed, and canonical repaired bounds remain stable across graph and metadata-cache reuse.
+
 ## 0.10.2 - 2026-08-14
 
 - Added `depfix.default_requirements(path)` for transactional grouped activation of requirements files, including nested

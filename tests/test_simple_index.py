@@ -8,7 +8,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from packaging.specifiers import SpecifierSet
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
 import depfix.cache as cache_module
 import depfix.resolver as resolver_module
@@ -16,7 +16,7 @@ from depfix._file_urls import file_url_to_path
 from depfix.cache import Cache
 from depfix.config import ImportDeclaration, ProjectConfig
 from depfix.errors import IntegrityError, ResolutionError
-from depfix.resolver import Resolver
+from depfix.resolver import Resolver, _normalize_requires_python
 from depfix.sync import sync_graph
 
 
@@ -40,6 +40,94 @@ class _Response(io.BytesIO):
 
 def _resolver(tmp_path: Path, index: str = "https://packages.example/simple") -> Resolver:
     return Resolver(Cache(tmp_path / "cache"), index_url=index)
+
+
+@pytest.mark.parametrize(
+    ("value", "normalized"),
+    [
+        (">3.4.*", ">=3.5"),
+        (">=3.4.*", ">=3.4"),
+        ("<3.4.*", "<3.4"),
+        ("<=3.4.*", "<3.5"),
+        (">3.4.*, <4", "<4,>=3.5"),
+        ("==3.4.*", "==3.4.*"),
+        ("!=3.4.*", "!=3.4.*"),
+        (">=3.4,<4", ">=3.4,<4"),
+    ],
+)
+def test_requires_python_normalizes_only_safe_wildcard_comparisons(value: str, normalized: str) -> None:
+    assert _normalize_requires_python(value) == normalized
+
+
+@pytest.mark.parametrize("value", ["~=3.4.*", ">3.4.*.1", ">release.*", ">3.4.*+local"])
+def test_requires_python_rejects_ambiguous_or_unrelated_malformed_specifiers(value: str) -> None:
+    with pytest.raises(InvalidSpecifier):
+        _normalize_requires_python(value)
+
+
+def test_historical_malformed_requires_python_does_not_abort_candidate_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = _resolver(tmp_path)
+    monkeypatch.setattr(
+        resolver,
+        "_project_artifact_payload",
+        lambda *_args: {
+            "releases": {
+                "3.5.0": [
+                    {
+                        "filename": "aiofile-3.5.0-py3-none-any.whl",
+                        "packagetype": "bdist_wheel",
+                        "url": "https://packages.example/aiofile-3.5.0.whl",
+                        "size": 10,
+                        "digests": {"sha256": "a" * 64},
+                        "requires_python": ">3.4.*, <4",
+                        "yanked": False,
+                    }
+                ],
+                "12.0.0": [
+                    {
+                        "filename": "aiofile-12.0.0-py3-none-any.whl",
+                        "packagetype": "bdist_wheel",
+                        "url": "https://packages.example/aiofile-12.0.0.whl",
+                        "size": 10,
+                        "digests": {"sha256": "b" * 64},
+                        "requires_python": ">=3.9",
+                        "yanked": False,
+                    }
+                ],
+            }
+        },
+    )
+
+    candidate = resolver._select_pypi("aiofile", SpecifierSet(">=3.5"), prefer_newest=True)
+
+    assert candidate.version == "12.0.0"
+
+
+def test_wheel_requires_python_is_canonical_in_graph_and_metadata_cache(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "wildcard-python",
+        "1.0.0",
+        {"wildcard_python.py": "VALUE = 1\n"},
+        requires_python=">3.4.*, <4",
+    )
+    cache = Cache(tmp_path / "cache")
+    config = ProjectConfig(
+        tmp_path / "config.toml",
+        (ImportDeclaration("wildcard_python", wheel.resolve().as_uri(), "wildcard_python"),),
+        {},
+    )
+
+    first = Resolver(cache).resolve(config)
+    second = Resolver(cache).resolve(config)
+
+    artifact = first.artifacts[0]
+    cached = json.loads((cache.root / "metadata" / "imports" / f"{artifact.sha256}.json").read_text())
+    assert artifact.requires_python == "<4,>=3.5"
+    assert cached["requires_python"] == "<4,>=3.5"
+    assert second.graph_id == first.graph_id
 
 
 @pytest.mark.parametrize(
