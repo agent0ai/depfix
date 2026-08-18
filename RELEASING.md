@@ -43,6 +43,23 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.11.4 — 2026-08-18
+
+- PyPI: `https://pypi.org/project/depfix/0.11.4/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.11.4`
+- Wheel SHA-256: `3db10454ea7a5b81773986d70b9f6d6bb119e89862e40861d90561b380bd4731`
+- Sdist SHA-256: `f0fba8d84aaf1a1ddd0ae4c0496d1347c660de45babf1ab22ea2df95b221db0b`
+- Published from commit `c83d4f9a5fa1809310bd6a2903a39f35e30544ac` by protected workflow run
+  `https://github.com/agent0ai/depfix/actions/runs/32181142178` after its tag-bound request, complete quality and platform
+  matrix, distribution, hidden-draft staging, OIDC publication, public-index verification, and release finalization gates
+  passed on attempt 1.
+- PyPI and GitHub expose exactly the wheel and source archive byte for byte. Both PyPI attestations bind their artifact
+  subjects and digests to `agent0ai/depfix`, `publish-pypi.yml`, annotated `v0.11.4`, the release commit, the protected
+  `pypi` environment, and workflow attempt 1. A credential-free no-cache public-index installation verified 0.11.4,
+  fetched the exact `liteparse==2.0.3` AArch64 wheel with SHA-256
+  `1dd3816c7fadd20f77a7697e8511707033caadceb13d9452cf784e9b0626a2cc`, materialized its omitted 7,644,440-byte
+  `liteparse/libpdfium.so`, and reverified the complete 12-file Depfix-owned payload manifest.
+
 ### 0.11.3 — 2026-08-18
 
 - PyPI: `https://pypi.org/project/depfix/0.11.3/`
