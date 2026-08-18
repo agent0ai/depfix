@@ -40,7 +40,7 @@ from depfix.scanner import scan_project
 from depfix.settings import Settings, reset_configuration, resolve_settings
 from depfix.sources import hash_local_source, parse_source
 from depfix.sync import sync_graph
-from depfix.uv_backend import UvBackend, UvExecutable
+from depfix.uv_backend import PlanPreference, UvBackend, UvExecutable
 from depfix.wheel import extract_wheel, inspect_wheel
 
 
@@ -634,6 +634,57 @@ def test_uv_invocation_uses_and_removes_depfix_owned_ephemeral_cache(
 
     assert observed is not None and not observed.exists()
     assert user_file.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_uv_bulk_plan_compiles_exact_versions_without_installing_a_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = Cache(tmp_path / "cache")
+    backend = UvBackend(Settings(cache_dir=tmp_path / "cache"), cache)
+    observed: list[str] = []
+
+    def compile_plan(arguments, **_kwargs):  # type: ignore[no-untyped-def]
+        observed.extend(arguments)
+        output = Path(arguments[arguments.index("--output-file") + 1])
+        output.write_text("bulk-alpha==1.0.0\nbulk-beta==2.0.0\n", encoding="utf-8")
+        return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(backend, "run", compile_plan)
+    plan = backend.resolve_requirements_plan(
+        ("bulk-alpha>=1", "bulk-beta<3"),
+        constraints=("bulk-beta>=2",),
+        preferences=(PlanPreference("custom-variant", "1.1.0+cpu", ">=3.11", ("leaf>=1",), ("speed",)),),
+    )
+
+    assert plan.distributions == {"bulk-alpha": "1.0.0", "bulk-beta": "2.0.0"}
+    assert observed[:2] == ["pip", "compile"]
+    assert "--target" not in observed and "install" not in observed
+    assert Path(observed[observed.index("--find-links") + 1]).name == "installed"
+    assert not tuple((cache.root / "tmp").glob("uv-plan-*"))
+
+
+def test_uv_bulk_plan_uses_installed_metadata_override_offline(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache")
+    backend = UvBackend(Settings(cache_dir=tmp_path / "cache", offline=True), cache)
+
+    plan = backend.resolve_requirements_plan(
+        ("custom-variant[speed]>=1",),
+        constraints=("custom-variant==1.1.0+cpu", "custom-leaf==2.0.0"),
+        preferences=(
+            PlanPreference(
+                "custom-variant",
+                "1.1.0+cpu",
+                ">=3.11",
+                ('custom-leaf>=2; extra == "speed"',),
+                ("speed",),
+            ),
+            PlanPreference("custom-leaf", "2.0.0", ">=3.11", ()),
+        ),
+    )
+
+    assert plan.distributions == {"custom-variant": "1.1.0+cpu", "custom-leaf": "2.0.0"}
+    assert not tuple((cache.root / "tmp").glob("uv-plan-*"))
 
 
 def test_json_cli_suppresses_progress(tmp_path: Path, wheel_factory, capsys: pytest.CaptureFixture[str]) -> None:

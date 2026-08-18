@@ -12,6 +12,8 @@
 
 - Artifact identity is SHA-256 content identity; downloaded blobs are ephemeral, while completed extracted targets are
   environment-specific, read-only, and reusable across projects.
+- Installed distribution equivalence is source-agnostic by canonical name, version/specifier, and target compatibility;
+  recorded hashes and provenance still own physical identity, integrity, audit, and exact-manifest reproducibility.
 - Cache mutation uses bounded input, locks, temporary construction, verification, and atomic promotion.
 - Staging roots remain owner-writable only through promotion for Darwin compatibility; completed roots are hardened.
 - Lifecycle metadata is mutable and separate from package content: preserve the first installation time, mark successful

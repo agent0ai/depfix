@@ -13,12 +13,14 @@ import sysconfig
 import tempfile
 import time
 import venv
+import zipfile
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from email.parser import BytesParser
 from email.policy import compat32
 from pathlib import Path
 
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
@@ -49,6 +51,24 @@ class UvExecutable:
 class PreparedEnvironment:
     target: Path
     distributions: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolutionPlan:
+    """One conventional single-version plan produced without installing a closure."""
+
+    distributions: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class PlanPreference:
+    """Verified installed metadata exposed to uv only for dependency planning."""
+
+    distribution: str
+    version: str
+    requires_python: str
+    requires_dist: tuple[str, ...]
+    provides_extra: tuple[str, ...] = ()
 
 
 class UvBackend:
@@ -195,6 +215,96 @@ class UvBackend:
         finally:
             shutil.rmtree(target, ignore_errors=True)
 
+    def resolve_requirements_plan(
+        self,
+        requirements: Sequence[str],
+        *,
+        constraints: Sequence[str] = (),
+        preferences: Sequence[PlanPreference] = (),
+    ) -> ResolutionPlan:
+        """Compile a requirements group into exact versions without materializing it."""
+        if not requirements:
+            raise ValueError("a bulk resolution plan requires at least one requirement")
+        temporary_root = self.cache.root / "tmp"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix=f"uv-plan-{os.getpid()}-", dir=temporary_root))
+        source = work / "requirements.in"
+        output = work / "requirements.txt"
+        constraint_path = work / "constraints.txt"
+        preference_root = work / "installed"
+        override_path = work / "installed-overrides.txt"
+        source.write_text("\n".join(requirements) + "\n", encoding="utf-8")
+        arguments = [
+            "pip",
+            "compile",
+            str(source),
+            "--output-file",
+            str(output),
+            "--python",
+            sys.executable,
+            "--no-python-downloads",
+            "--no-config",
+            "--color",
+            "never",
+            "--no-header",
+            "--no-annotate",
+        ]
+        if constraints:
+            constraint_path.write_text("\n".join(constraints) + "\n", encoding="utf-8")
+            arguments.extend(["--constraint", str(constraint_path)])
+        if preferences:
+            preference_root.mkdir()
+            override_path.write_text(
+                "\n".join(
+                    f"{_preference_requirement_name(preference)} @ "
+                    f"{_write_plan_preference(preference_root, preference).as_uri()}"
+                    for preference in preferences
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            arguments.extend(["--find-links", str(preference_root)])
+            arguments.extend(["--override", str(override_path)])
+        if self.settings.offline:
+            arguments.append("--offline")
+        if self.settings.index_url:
+            arguments.extend(["--default-index", self.settings.index_url])
+        for index in self.settings.extra_index_url:
+            arguments.extend(["--index", index])
+        try:
+            self.run(arguments)
+            distributions: dict[str, str] = {}
+            logical = ""
+            for raw in output.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                logical += line.removesuffix("\\").strip()
+                if line.endswith("\\"):
+                    continue
+                requirement_text = logical.split("--hash=", 1)[0].strip()
+                logical = ""
+                try:
+                    requirement = Requirement(requirement_text)
+                except InvalidRequirement:
+                    continue
+                normalized = str(canonicalize_name(requirement.name))
+                exact = [item.version for item in requirement.specifier if item.operator in {"==", "==="}]
+                if len(exact) == 1:
+                    distributions[normalized] = exact[0]
+                elif requirement.url:
+                    preference = next(
+                        (item for item in preferences if item.distribution == normalized),
+                        None,
+                    )
+                    if preference is not None:
+                        distributions[normalized] = preference.version
+            if not distributions:
+                raise UvBackendError("uv bulk resolution produced no exact package versions")
+            return ResolutionPlan(distributions)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
     def build_wheel(self, source: Path, *, output: Path, offline: bool | None = None) -> Path:
         output.mkdir(parents=True, exist_ok=True)
         arguments = ["build", "--wheel", "--out-dir", str(output), "--no-python-downloads", str(source)]
@@ -310,6 +420,45 @@ class UvBackend:
                 shutil.rmtree(temporary, ignore_errors=True)
                 raise
         return self._validate(executable, "Depfix private bootstrap")
+
+
+def _write_plan_preference(root: Path, preference: PlanPreference) -> Path:
+    """Write a metadata-only wheel that uv may inspect but Depfix never installs."""
+    wheel_distribution = preference.distribution.replace("-", "_")
+    wheel_version = preference.version.replace("-", "_")
+    filename = f"{wheel_distribution}-{wheel_version}-py3-none-any.whl"
+    metadata_dir = f"{wheel_distribution}-{wheel_version}.dist-info"
+    metadata = [
+        "Metadata-Version: 2.1",
+        f"Name: {preference.distribution}",
+        f"Version: {preference.version}",
+    ]
+    if preference.requires_python:
+        metadata.append(f"Requires-Python: {preference.requires_python}")
+    metadata.extend(f"Provides-Extra: {extra}" for extra in preference.provides_extra)
+    metadata.extend(f"Requires-Dist: {requirement}" for requirement in preference.requires_dist)
+    metadata.append("")
+    wheel = "\n".join(
+        (
+            "Wheel-Version: 1.0",
+            "Generator: depfix-plan",
+            "Root-Is-Purelib: true",
+            "Tag: py3-none-any",
+            "",
+        )
+    )
+    path = root / filename
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(f"{metadata_dir}/METADATA", "\n".join(metadata) + "\n")
+        archive.writestr(f"{metadata_dir}/WHEEL", wheel)
+        archive.writestr(f"{metadata_dir}/RECORD", "")
+    return path
+
+
+def _preference_requirement_name(preference: PlanPreference) -> str:
+    if not preference.provides_extra:
+        return preference.distribution
+    return f"{preference.distribution}[{','.join(preference.provides_extra)}]"
 
 
 def _installed_distributions(target: Path) -> dict[str, str]:

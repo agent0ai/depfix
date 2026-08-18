@@ -83,8 +83,11 @@
   Every loading API accepts a per-request `allow_unsafe` override; its effective default is false, and enabling it may
   relax only unsafe-classification and strict in-process native-loading guards.
 - Resolver candidate ranking defaults to the newest compatible artifact already present in the shared cache, including
+  complete source-agnostic custom-index and VCS artifacts even when the active index does not advertise their hashes, and
   artifacts selected earlier in a grouped resolution. Every loading API accepts `prefer_newest`; process, environment,
   project, export, and CLI configuration inherit through `settings.py`, and resolution identities separate both modes.
+  Each resolution verifies the installed inventory once and uses that deterministic snapshot for direct roots, transitive
+  edges, and bulk-plan preferences; repeated dependency edges must not rehash every installed target.
 - Every loading API accepts request-scoped primary and extra index overrides. A scoped primary suppresses inherited extra
   indexes unless the same call explicitly supplies them; index policy is part of request and graph identity, never mutates
   process configuration, and is rejected when an exact prepared manifest is active.
@@ -100,6 +103,20 @@
   persist an exact cache manifest, materialize verified targets, and never invoke environment installation or import
   activation. Requirement constraints apply to matching roots and dependency edges across every selected graph. The CLI
   renders one compact, identity-deduplicated store summary by default and retains the complete result under `--json`.
+- Compatible multi-root registry groups use one `uv pip compile` exact-version plan without installing a duplicate closure;
+  Depfix seeds cache-first planning with verified installed metadata, ingests artifacts through its own verified store, and
+  recursively bisects a conflicting group in stable order. Every successful half keeps its own exact plan and may retain
+  dependency versions different from another successful half; only failed singleton roots use isolated resolution. The
+  split tree is linear in the root count and does not search for a mathematically largest cross-half cohort. Before
+  splitting, verified installed root metadata may stably move roots with locally proven installed-version mismatches to
+  the split boundary; this hint performs no network lookup or dependency pre-resolution and leaves unscored roots in
+  input order. Optional
+  installed constraints are removed and the full group is retried before splitting when those cache preferences make the
+  initial plan unsatisfiable. Graph reconstruction treats each successful exact plan as authoritative: installed reuse is
+  eligible only at the version selected by that cohort, and inspected metadata that contradicts the plan fails explicitly.
+- Package-install and standard-import consumers share an exact canonical group plan when normalized roots, constraints,
+  effective candidate-eligibility policy, indexes, and target environment match; refresh replaces the canonical plan,
+  while consumer mode and isolation remain runtime bindings.
 - Exact `install_manifest()` preparation never resolves or changes locked selections; online repair may rebuild a missing
   source-derived artifact only when its recorded provenance reproduces the locked size and SHA-256. Live grouped package
   installation may resolve and build before writing its exact stored manifest.

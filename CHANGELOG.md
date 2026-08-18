@@ -2,6 +2,18 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.11.0 - 2026-08-18
+
+- Reused verified compatible installed distributions by canonical name and version before index discovery, regardless of
+  whether their immutable artifact came from PyPI, a custom index, or a supported VCS source. Exact hashes and recorded
+  provenance continue to verify physical identity, integrity, and reproducible prepared manifests.
+- Added bulk-first uv planning for compatible multi-package operations, with deterministic recursive bisection of failed
+  cohorts and isolated fallback only for irreducible roots. Successful cohorts retain independent exact dependency plans
+  instead of forcing one globally compatible graph.
+- Reused canonical stored graphs across semantically equivalent package-install and runtime preparation paths, snapshot
+  verified installed inventory once per resolution, and added prompt phase-specific planning, acquisition, inspection,
+  fallback, and materialization progress.
+
 ## 0.10.3 - 2026-08-17
 
 - Accepted historical numeric ordering wildcards in index and wheel `Requires-Python` metadata when their release-prefix

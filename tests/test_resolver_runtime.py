@@ -7,16 +7,19 @@ from pathlib import Path
 
 import pytest
 from conftest import build_index, file_spec
+from packaging.specifiers import SpecifierSet
 
 import depfix
 from depfix.aliases import generate_aliases
 from depfix.cache import Cache
 from depfix.config import ImportDeclaration, ProjectConfig, load_config
-from depfix.errors import NativeIsolationRequired, UndeclaredImportError
+from depfix.errors import NativeIsolationRequired, UndeclaredImportError, UvBackendError
 from depfix.manifest import write
 from depfix.resolver import Resolver
 from depfix.runtime import DepfixRuntime
+from depfix.sources import SourceInfo
 from depfix.sync import sync_graph
+from depfix.uv_backend import PlanPreference, ResolutionPlan
 
 
 def _project(tmp_path: Path, wheel_factory):
@@ -269,6 +272,542 @@ def test_compatible_cached_root_bypasses_new_resolution_but_force_newest_uses_ba
     assert _dependency_versions(reused, "compatible-dependency") == {"1.0.0"}
     assert _dependency_versions(newest, "compatible-dependency") == {"2.0.0"}
     assert backend.calls == 1
+
+
+def test_installed_custom_variant_is_reused_before_default_index_for_root_and_dependency(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    installed = wheel_factory(
+        "source-agnostic",
+        "1.1.0",
+        {"source_agnostic.py": "VARIANT = 'custom'\n"},
+    )
+    installed_bytes = installed.read_bytes()
+    replacement = wheel_factory(
+        "source-agnostic",
+        "1.1.0",
+        {"source_agnostic.py": "VARIANT = 'default'\n"},
+    )
+    custom_wheel = tmp_path / "custom-artifacts" / installed.name
+    custom_wheel.parent.mkdir()
+    custom_wheel.write_bytes(installed_bytes)
+    consumer = wheel_factory(
+        "variant-consumer",
+        "1.0.0",
+        {"variant_consumer.py": "VALUE = 1\n"},
+        requires=["source-agnostic>=1,<2"],
+    )
+    cache = Cache(tmp_path / "cache")
+    custom_index = build_index(tmp_path / "custom-index", [custom_wheel])
+    default_index = build_index(tmp_path / "default-index", [replacement])
+
+    class PrimeBackend:
+        def version(self) -> str:
+            return "test"
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            del requirement, distribution
+            return "1.1.0"
+
+    primed = Resolver(cache, index_url=custom_index, backend=PrimeBackend()).resolve(
+        ProjectConfig(
+            tmp_path / "prime.toml",
+            (ImportDeclaration("variant", "source-agnostic==1.1.0", "source_agnostic"),),
+            {},
+        )
+    )
+    sync_graph(primed, cache, offline=True)
+    installed_hash = primed.artifacts[0].sha256
+
+    class RejectBackend:
+        def version(self) -> str:
+            raise AssertionError("compatible installed roots must not invoke uv")
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            del requirement, distribution
+            raise AssertionError("compatible installed roots must not invoke uv")
+
+    reused_root = Resolver(cache, index_url=default_index, backend=RejectBackend()).resolve(
+        ProjectConfig(
+            tmp_path / "root.toml",
+            (ImportDeclaration("variant", "source-agnostic>=1", "source_agnostic"),),
+            {},
+        )
+    )
+    reused_edge = Resolver(cache, index_url=default_index).resolve(
+        ProjectConfig(
+            tmp_path / "edge.toml",
+            (ImportDeclaration("consumer", file_spec(consumer), "variant_consumer"),),
+            {},
+        )
+    )
+
+    assert {artifact.sha256 for artifact in reused_root.artifacts} == {installed_hash}
+    selected_edge = next(artifact for artifact in reused_edge.artifacts if artifact.distribution == "source-agnostic")
+    assert selected_edge.sha256 == installed_hash
+    assert selected_edge.sha256 != __import__("hashlib").sha256(replacement.read_bytes()).hexdigest()
+
+
+def test_verified_vcs_artifact_is_source_agnostic_after_installation(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory("vcs-reusable", "2.0.0", {"vcs_reusable.py": "VALUE = 'git'\n"})
+    cache = Cache(tmp_path / "cache")
+    resolver = Resolver(cache)
+    source = SourceInfo(
+        original="vcs-reusable @ git+https://github.example/repo.git@abc123",
+        normalized="vcs-reusable @ git+https://github.example/repo.git@abc123",
+        kind="git",
+        distribution="vcs-reusable",
+        url="https://github.example/repo.git",
+        commit="abc123",
+        mutable=False,
+    )
+    candidate = resolver._candidate_from_local_wheel(wheel, source)
+    node = resolver._resolve_candidate(candidate, extras=(), path="request:vcs", ancestors={}, prefer_newest=False)
+    graph = resolver.resolve(ProjectConfig(tmp_path / "empty.toml", (), {}))
+    graph = __import__("dataclasses").replace(
+        graph,
+        artifacts=tuple(resolver._artifacts.values()),
+        nodes=(node,),
+    )
+    sync_graph(graph, cache, offline=True)
+
+    class RejectBackend:
+        def version(self) -> str:
+            raise AssertionError("installed VCS artifacts must not invoke uv")
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            del requirement, distribution
+            raise AssertionError("installed VCS artifacts must not invoke uv")
+
+    reused = Resolver(cache, backend=RejectBackend()).resolve(
+        ProjectConfig(
+            tmp_path / "reuse.toml",
+            (ImportDeclaration("vcs", "vcs-reusable>=2", "vcs_reusable"),),
+            {},
+        )
+    )
+    assert reused.artifacts[0].source_kind == "git"
+    assert reused.artifacts[0].vcs_commit == "abc123"
+
+
+def test_installed_selection_rejects_inconsistent_nested_artifact_identity(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory("identity-demo", "1.0.0", {"identity_demo.py": "VALUE = 1\n"})
+    cache = Cache(tmp_path / "cache")
+    graph = Resolver(cache).resolve(
+        ProjectConfig(
+            tmp_path / "identity.toml",
+            (ImportDeclaration("identity", file_spec(wheel), "identity_demo"),),
+            {},
+        )
+    )
+    sync_graph(graph, cache, offline=True)
+    artifact = graph.artifacts[0]
+    metadata_path = cache.root / "metadata" / "packages" / f"{artifact.sha256}.json"
+    metadata = __import__("json").loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["artifact"]["sha256"] = "0" * 64
+    metadata_path.write_text(__import__("json").dumps(metadata) + "\n", encoding="utf-8")
+
+    assert Resolver(cache)._select_installed("identity-demo", SpecifierSet(">=1")) is None
+
+
+def test_resolver_verifies_installed_inventory_once_per_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = Cache(tmp_path / "cache")
+    calls = 0
+    original = cache.list_packages
+
+    def counted_inventory():  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return original()
+
+    monkeypatch.setattr(cache, "list_packages", counted_inventory)
+    resolver = Resolver(cache)
+
+    assert resolver._select_installed("first-missing", SpecifierSet()) is None
+    assert resolver._select_installed("second-missing", SpecifierSet()) is None
+    assert calls == 1
+
+
+def test_registry_group_uses_one_bulk_plan_and_isolates_only_conflicting_root(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    alpha = wheel_factory("bulk-alpha", "1.0.0", {"bulk_alpha.py": "VALUE = 1\n"})
+    beta = wheel_factory("bulk-beta", "1.0.0", {"bulk_beta.py": "VALUE = 1\n"})
+    conflict = wheel_factory("bulk-conflict", "1.0.0", {"bulk_conflict.py": "VALUE = 1\n"})
+    index = build_index(tmp_path / "index", [alpha, beta, conflict])
+
+    class Backend:
+        plans: list[tuple[str, ...]] = []
+        isolated: list[str] = []
+
+        def version(self) -> str:
+            return "test"
+
+        def resolve_requirements_plan(  # type: ignore[no-untyped-def]
+            self, requirements, *, constraints=(), preferences=()
+        ):
+            del constraints, preferences
+            cohort = tuple(requirements)
+            self.plans.append(cohort)
+            if any(item.startswith("bulk-conflict") for item in cohort):
+                raise UvBackendError("conventional plan conflicts")
+            return ResolutionPlan({"bulk-alpha": "1.0.0", "bulk-beta": "1.0.0"})
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            del requirement
+            self.isolated.append(distribution)
+            return "1.0.0"
+
+    backend = Backend()
+    graph = Resolver(Cache(tmp_path / "cache"), index_url=index, backend=backend).resolve(
+        ProjectConfig(
+            tmp_path / "bulk.toml",
+            (
+                ImportDeclaration("conflict", "bulk-conflict", api="load_package"),
+                ImportDeclaration("alpha", "bulk-alpha", api="load_package"),
+                ImportDeclaration("beta", "bulk-beta", api="load_package"),
+            ),
+            {},
+        )
+    )
+
+    assert {node.distribution for node in graph.nodes} == {"bulk-alpha", "bulk-beta", "bulk-conflict"}
+    assert backend.isolated == ["bulk-conflict"]
+    assert len(backend.plans) <= 4
+    assert ("bulk-alpha", "bulk-beta") in backend.plans
+
+
+def test_conflicting_group_keeps_successful_halves_as_independent_plans(tmp_path: Path) -> None:
+    names = ("left-alpha", "left-beta", "right-alpha", "right-beta")
+
+    class Backend:
+        plans: list[tuple[str, ...]] = []
+
+        def version(self) -> str:
+            return "test"
+
+        def resolve_requirements_plan(  # type: ignore[no-untyped-def]
+            self, requirements, *, constraints=(), preferences=()
+        ):
+            del constraints, preferences
+            cohort = tuple(requirements)
+            self.plans.append(cohort)
+            if len(cohort) == 4:
+                raise UvBackendError("the halves need different shared dependency versions")
+            shared_version = "1.0.0" if cohort[0].startswith("left-") else "2.0.0"
+            return ResolutionPlan(
+                {
+                    **{item: "1.0.0" for item in cohort},
+                    "shared-dependency": shared_version,
+                }
+            )
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            del requirement, distribution
+            raise AssertionError("successful split cohorts must not use isolated resolution")
+
+    backend = Backend()
+    plans = Resolver(Cache(tmp_path / "cache"), backend=backend)._bulk_plan(
+        ProjectConfig(
+            tmp_path / "split.toml",
+            tuple(ImportDeclaration(name, name, api="load_package") for name in names),
+            {},
+        )
+    )
+
+    assert set(plans) == set(names)
+    assert plans["left-alpha"]["shared-dependency"] == "1.0.0"
+    assert plans["left-beta"] is plans["left-alpha"]
+    assert plans["right-alpha"]["shared-dependency"] == "2.0.0"
+    assert plans["right-beta"] is plans["right-alpha"]
+    assert backend.plans == [names, names[:2], names[2:]]
+
+
+def test_binary_conflict_isolation_plans_each_singleton_before_fallback(tmp_path: Path) -> None:
+    names = ("alpha", "beta", "broken")
+
+    class Backend:
+        plans: list[tuple[str, ...]] = []
+
+        def version(self) -> str:
+            return "test"
+
+        def resolve_requirements_plan(  # type: ignore[no-untyped-def]
+            self, requirements, *, constraints=(), preferences=()
+        ):
+            del constraints, preferences
+            cohort = tuple(requirements)
+            self.plans.append(cohort)
+            if "broken" in cohort:
+                raise UvBackendError("broken is irreducible")
+            return ResolutionPlan({item: "1.0.0" for item in cohort})
+
+    backend = Backend()
+    plans = Resolver(Cache(tmp_path / "cache"), backend=backend)._bulk_plan(
+        ProjectConfig(
+            tmp_path / "singletons.toml",
+            tuple(ImportDeclaration(name, name, api="load_package") for name in names),
+            {},
+        )
+    )
+
+    assert set(plans) == {"alpha", "beta"}
+    assert backend.plans == [names, ("alpha",), ("beta", "broken"), ("beta",), ("broken",)]
+
+
+def test_bulk_split_uses_only_local_installed_mismatch_signals(tmp_path: Path) -> None:
+    names = (
+        "strict-one",
+        "major-a",
+        "major-b",
+        "major-c",
+        "strict-two",
+        "major-d",
+        "major-e",
+        "major-f",
+    )
+    preferences = (
+        PlanPreference("shared", "1.0.0", "", ()),
+        *(PlanPreference(name, "1.0.0", "", ("shared>=2",)) for name in names if name.startswith("strict")),
+        *(PlanPreference(name, "1.0.0", "", ("shared<2",)) for name in names if name.startswith("major")),
+    )
+
+    class Backend:
+        plans: list[tuple[str, ...]] = []
+
+        def version(self) -> str:
+            return "test"
+
+        def resolve_requirements_plan(  # type: ignore[no-untyped-def]
+            self, requirements, *, constraints=(), preferences=()
+        ):
+            del constraints, preferences
+            cohort = tuple(requirements)
+            self.plans.append(cohort)
+            kinds = {"strict" if item.startswith("strict") else "major" for item in cohort}
+            if len(kinds) > 1:
+                raise UvBackendError("the root classes require different shared versions")
+            return ResolutionPlan({item: "1.0.0" for item in cohort})
+
+    backend = Backend()
+    resolver = Resolver(Cache(tmp_path / "cache"), backend=backend)
+    resolver._bulk_plan_preferences = lambda registry: preferences  # type: ignore[method-assign]
+    plans = resolver._bulk_plan(
+        ProjectConfig(
+            tmp_path / "locally-sorted.toml",
+            tuple(ImportDeclaration(name, name, api="load_package") for name in names),
+            {},
+        )
+    )
+
+    assert set(plans) == set(names)
+    assert backend.plans == [
+        names,
+        names,
+        ("major-a", "major-b", "major-c", "major-d"),
+        ("major-e", "major-f", "strict-one", "strict-two"),
+        ("major-e", "major-f"),
+        ("strict-one", "strict-two"),
+    ]
+
+
+def test_bulk_plan_is_seeded_with_verified_installed_selection(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    installed = wheel_factory(
+        "seeded-variant",
+        "1.1.0+cpu",
+        {"seeded_variant.py": "VALUE = 'cpu'\n"},
+        requires=["seed-leaf>=2"],
+    )
+    leaf = wheel_factory("seed-leaf", "2.0.0", {"seed_leaf.py": "VALUE = 2\n"})
+    cache = Cache(tmp_path / "cache")
+    index = build_index(tmp_path / "index", [leaf])
+    primed = Resolver(cache, index_url=index).resolve(
+        ProjectConfig(
+            tmp_path / "prime.toml",
+            (ImportDeclaration("seeded", file_spec(installed), "seeded_variant"),),
+            {},
+        )
+    )
+    sync_graph(primed, cache, offline=True)
+
+    class Backend:
+        observed_constraints: tuple[str, ...] = ()
+        observed_preferences: tuple[PlanPreference, ...] = ()
+
+        def version(self) -> str:
+            return "test"
+
+        def resolve_requirements_plan(  # type: ignore[no-untyped-def]
+            self, requirements, *, constraints=(), preferences=()
+        ):
+            del requirements
+            self.observed_constraints = tuple(constraints)
+            self.observed_preferences = tuple(preferences)
+            return ResolutionPlan({"bulk-alpha": "1.0.0", "bulk-beta": "1.0.0"})
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            del requirement, distribution
+            return "1.0.0"
+
+    backend = Backend()
+    resolver = Resolver(cache, backend=backend)
+    plans = resolver._bulk_plan(
+        ProjectConfig(
+            tmp_path / "bulk-seeded.toml",
+            (
+                ImportDeclaration("alpha", "bulk-alpha", api="load_package"),
+                ImportDeclaration("beta", "bulk-beta", api="load_package"),
+            ),
+            {},
+        )
+    )
+
+    assert set(plans) == {"alpha", "beta"}
+    assert plans["alpha"] == {"bulk-alpha": "1.0.0", "bulk-beta": "1.0.0"}
+    assert plans["beta"] is plans["alpha"]
+    assert "seeded-variant==1.1.0+cpu" in backend.observed_constraints
+    assert PlanPreference("seeded-variant", "1.1.0+cpu", "", ("seed-leaf>=2",)) in backend.observed_preferences
+
+
+def test_incompatible_installed_transitive_preference_does_not_isolate_compatible_roots(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    installed = wheel_factory("shared-dep", "1.0.0", {"shared_dep.py": "VALUE = 1\n"})
+    cache = Cache(tmp_path / "cache")
+    primed = Resolver(cache).resolve(
+        ProjectConfig(
+            tmp_path / "prime-stale.toml",
+            (ImportDeclaration("shared", file_spec(installed), "shared_dep"),),
+            {},
+        )
+    )
+    sync_graph(primed, cache, offline=True)
+
+    class Backend:
+        calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+
+        def version(self) -> str:
+            return "test"
+
+        def resolve_requirements_plan(  # type: ignore[no-untyped-def]
+            self, requirements, *, constraints=(), preferences=()
+        ):
+            del preferences
+            observed = (tuple(requirements), tuple(constraints))
+            self.calls.append(observed)
+            if "shared-dep==1.0.0" in constraints:
+                raise UvBackendError("installed shared-dep does not satisfy the roots")
+            return ResolutionPlan(
+                {
+                    "bulk-alpha": "1.0.0",
+                    "bulk-beta": "1.0.0",
+                    "shared-dep": "2.0.0",
+                }
+            )
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            del requirement, distribution
+            raise AssertionError("compatible roots must not use isolated resolution")
+
+    backend = Backend()
+    plans = Resolver(cache, backend=backend)._bulk_plan(
+        ProjectConfig(
+            tmp_path / "bulk-stale-preference.toml",
+            (
+                ImportDeclaration("alpha", "bulk-alpha", api="load_package"),
+                ImportDeclaration("beta", "bulk-beta", api="load_package"),
+            ),
+            {},
+        )
+    )
+
+    assert set(plans) == {"alpha", "beta"}
+    assert plans["alpha"]["shared-dep"] == "2.0.0"
+    assert plans["beta"] is plans["alpha"]
+    assert len(backend.calls) == 2
+    assert "shared-dep==1.0.0" in backend.calls[0][1]
+    assert "shared-dep==1.0.0" not in backend.calls[1][1]
+
+
+def test_bulk_retry_plan_overrides_an_older_compatible_installed_dependency(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    installed = wheel_factory("shared-plan", "1.0.0", {"shared_plan.py": "VALUE = 1\n"})
+    selected = wheel_factory("shared-plan", "2.0.0", {"shared_plan.py": "VALUE = 2\n"})
+    root_one = wheel_factory(
+        "plan-root-one",
+        "1.0.0",
+        {"plan_root_one.py": "VALUE = 1\n"},
+        requires=["shared-plan>=1"],
+    )
+    root_two = wheel_factory(
+        "plan-root-two",
+        "1.0.0",
+        {"plan_root_two.py": "VALUE = 2\n"},
+        requires=["shared-plan>=2"],
+    )
+    cache = Cache(tmp_path / "cache")
+    primed = Resolver(cache).resolve(
+        ProjectConfig(
+            tmp_path / "prime-plan.toml",
+            (ImportDeclaration("shared", file_spec(installed), "shared_plan"),),
+            {},
+        )
+    )
+    sync_graph(primed, cache, offline=True)
+    index = build_index(tmp_path / "index", [selected, root_one, root_two])
+
+    class Backend:
+        calls: list[tuple[str, ...]] = []
+
+        def version(self) -> str:
+            return "test"
+
+        def resolve_requirements_plan(  # type: ignore[no-untyped-def]
+            self, requirements, *, constraints=(), preferences=()
+        ):
+            del preferences
+            self.calls.append(tuple(constraints))
+            if "shared-plan==1.0.0" in constraints:
+                raise UvBackendError("the installed preference conflicts with plan-root-two")
+            return ResolutionPlan(
+                {
+                    "plan-root-one": "1.0.0",
+                    "plan-root-two": "1.0.0",
+                    "shared-plan": "2.0.0",
+                }
+            )
+
+        def resolve_root_version(self, requirement: str, distribution: str) -> str:
+            del requirement, distribution
+            raise AssertionError("the successful bulk retry must remain authoritative")
+
+    backend = Backend()
+    graph = Resolver(cache, index_url=index, backend=backend).resolve(
+        ProjectConfig(
+            tmp_path / "bulk-plan-retry.toml",
+            (
+                ImportDeclaration("one", "plan-root-one", api="load_package"),
+                ImportDeclaration("two", "plan-root-two", api="load_package"),
+            ),
+            {},
+        )
+    )
+
+    assert len(backend.calls) == 2
+    assert "shared-plan==1.0.0" in backend.calls[0]
+    assert "shared-plan==1.0.0" not in backend.calls[1]
+    assert {node.version for node in graph.nodes if node.distribution == "shared-plan"} == {"2.0.0"}
 
 
 def test_install_constraints_apply_to_top_level_package_selection(tmp_path: Path, wheel_factory) -> None:

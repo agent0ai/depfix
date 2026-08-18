@@ -12,7 +12,7 @@ import sys
 import sysconfig
 import tempfile
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,38 @@ def current_environment() -> Environment:
         platform=sys.platform,
         machine=platform.machine().lower(),
     )
+
+
+def canonical_resolution_identity(
+    requirements: tuple[str, ...],
+    constraints: tuple[str, ...],
+    *,
+    index_url: str | None,
+    extra_index_url: tuple[str, ...],
+    prefer_newest: bool,
+    allow_unsafe: bool,
+    resolution_policy: Mapping[str, object] | None = None,
+) -> str:
+    """Identify a reusable exact group independently of its consuming API."""
+    environment = current_environment()
+    payload = {
+        "requirements": tuple(sorted(requirements)),
+        "constraints": tuple(sorted(constraints)),
+        "index": index_url,
+        "extra_indexes": extra_index_url,
+        "prefer_newest": prefer_newest,
+        "allow_unsafe": allow_unsafe,
+        "resolution_policy": dict(sorted((resolution_policy or {}).items())),
+        "environment": {
+            "implementation": environment.python_implementation,
+            "python": environment.python_version,
+            "abi": environment.abi,
+            "platform": environment.platform,
+            "machine": environment.machine,
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def graph_digest(payload: dict[str, Any]) -> str:

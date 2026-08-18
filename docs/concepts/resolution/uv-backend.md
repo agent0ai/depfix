@@ -19,3 +19,14 @@ process-owned directory beneath Depfix's temporary cache root and removes it whe
 killed, a later install or cache-cleanup pass reclaims that directory only after its owner process is gone and the age
 grace has elapsed. Depfix never cleans or writes the global cache used by direct user invocations of uv. CI tests the
 minimum and a current compatible release.
+
+Multi-root registry operations use `uv pip compile` as an exact-version planning boundary. Compilation does not install
+the resolved closure. Depfix downloads, verifies, inspects, and materializes selected artifacts once through its own store,
+and preserves isolated fallback for roots that cannot share a conventional single-version plan. In ordinary cache-first
+mode, verified installed inventory is supplied as exact constraints and short-lived metadata-only wheel overrides, so a
+custom-index or VCS local version can participate without being rediscovered on the active index. These stubs contain only
+the stored Core Metadata needed by uv, are removed with the planning directory, and are never materialization inputs. A
+failure caused by the optional installed preference set retries all roots without those preferences. If the root group
+still conflicts, Depfix recursively splits it in stable order, keeps each successful half as its own exact plan, and sends
+only failed singleton roots to isolated resolution. The split tree needs at most linear planning calls and preserves
+different dependency versions across successful cohorts without a global maximum-subset search.

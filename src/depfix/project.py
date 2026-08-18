@@ -34,6 +34,7 @@ from .errors import (
 )
 from .manifest import (
     assert_compatible_environment,
+    canonical_resolution_identity,
     computed_graph_id,
     current_environment,
     dumps_manifest,
@@ -357,19 +358,33 @@ def install_packages(
     progress = ProgressReporter(settings.log_level)
     identity = _package_install_identity(tuple(sorted(selected)), normalized_constraints, policy, settings)
     manifest = cache.root / "installs" / identity / "imports.lock"
+    canonical_identity = canonical_resolution_identity(
+        tuple(sorted(selected)),
+        normalized_constraints,
+        index_url=settings.index_url,
+        extra_index_url=settings.extra_index_url,
+        prefer_newest=settings.prefer_newest,
+        allow_unsafe=settings.allow_unsafe,
+        resolution_policy=_canonical_resolution_policy(policy),
+    )
+    canonical_manifest = cache.root / "plans" / canonical_identity / "imports.lock"
     with cache.lock("package-install:" + identity):
-        warm = manifest.is_file() and not refresh
+        reusable_manifest = manifest if manifest.is_file() else canonical_manifest
+        warm = reusable_manifest.is_file() and not refresh
         if warm:
-            graph = load_manifest(manifest)
-            assert_compatible_environment(graph, manifest)
+            graph = load_manifest(reusable_manifest)
+            assert_compatible_environment(graph, reusable_manifest)
         else:
             graph = Resolver(cache, settings=settings, progress=progress).resolve(
                 ProjectConfig(config_path, declarations, policy)
             )
         cache.reserve_artifacts({artifact.sha256 for artifact in graph.artifacts})
         sync_graph(graph, cache, offline=settings.offline, progress=progress)
-        if not warm:
+        if not manifest.is_file() or refresh:
             write_manifest(graph, manifest)
+        with cache.lock("canonical-resolution:" + canonical_identity):
+            if not canonical_manifest.is_file() or refresh:
+                write_manifest(graph, canonical_manifest)
         command = reason or ""
         cache.record_installation(
             graph,
@@ -943,6 +958,21 @@ def _policy_strings(value: object) -> tuple[str, ...]:
     if isinstance(value, (tuple, list)) and all(isinstance(item, str) for item in value):
         return tuple(value)
     raise ManifestError("Network policy values must be strings or arrays of strings")
+
+
+def _canonical_resolution_policy(policy: dict[str, object]) -> dict[str, object]:
+    """Return project policy fields that can change candidate eligibility."""
+    consumer_fields = {
+        "mode",
+        "isolation",
+        "constraints",
+        "index",
+        "extra-indexes",
+        "allow-unsafe",
+        "prefer-newest",
+        "frozen",
+    }
+    return {key: value for key, value in policy.items() if key not in consumer_fields}
 
 
 def _config_policy(path: Path) -> dict[str, object]:

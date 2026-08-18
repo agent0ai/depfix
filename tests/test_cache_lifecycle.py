@@ -105,6 +105,26 @@ def test_inventory_records_installation_size_and_successful_import_use(tmp_path:
     assert cache.list_packages()[0].active is False
 
 
+def test_record_artifact_upgrades_legacy_identity_without_resetting_installation_age(
+    tmp_path: Path,
+    wheel_factory,
+) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    path = cache.root / "metadata" / "packages" / f"{artifact.sha256}.json"
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    legacy.pop("artifact")
+    legacy["installed_at"] = 1234.5
+    path.write_text(json.dumps(legacy, sort_keys=True) + "\n", encoding="utf-8")
+
+    cache.record_artifact(artifact)
+
+    upgraded = json.loads(path.read_text(encoding="utf-8"))
+    assert upgraded["installed_at"] == 1234.5
+    assert upgraded["artifact"]["sha256"] == artifact.sha256
+    assert upgraded["artifact"]["source_kind"] == artifact.source_kind
+
+
 def test_cleanup_reclaims_stale_artifact_and_all_targets(tmp_path: Path, wheel_factory) -> None:
     _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
     artifact = graph.artifacts[0]

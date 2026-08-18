@@ -28,8 +28,8 @@ from depfix.errors import (
 )
 from depfix.manager import reset_runtime_state
 from depfix.manifest import load_manifest
-from depfix.project import create_bundle, export_project, install_manifest
-from depfix.resolver import _index_policy_identity
+from depfix.project import create_bundle, export_project, install_manifest, install_packages
+from depfix.resolver import Resolver, _index_policy_identity
 from depfix.scanner import scan_project
 from depfix.settings import reset_configuration
 from depfix.uv_backend import UvBackend
@@ -74,6 +74,55 @@ def test_importing_depfix_alone_does_not_install_dispatcher() -> None:
     assert "activate" not in depfix.__all__
 
 
+def test_package_install_graph_is_reused_by_equivalent_default_without_resolution(
+    tmp_path: Path,
+    wheel_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wheel = wheel_factory("cross-mode-plan", "1.0.0", {"cross_mode_plan.py": "VALUE = 7\n"})
+    specifier = file_spec(wheel)
+    cache_dir = tmp_path / "cache"
+    installed = install_packages((specifier,), cache_dir=cache_dir, base_dir=tmp_path)
+    depfix.configure(cache_dir=cache_dir, log_level="WARNING")
+
+    def reject_resolution(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("an equivalent package-install graph must be reused")
+
+    monkeypatch.setattr(Resolver, "resolve", reject_resolution)
+    depfix.default(specifier)
+
+    assert importlib.import_module("cross_mode_plan").VALUE == 7
+    assert tuple((installed.store / "plans").glob("*/imports.lock"))
+
+
+def test_canonical_plan_separates_project_policy_and_refresh_replaces_it(
+    tmp_path: Path,
+    wheel_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wheel = wheel_factory("canonical-policy", "1.0.0", {"canonical_policy.py": "VALUE = 7\n"})
+    specifier = file_spec(wheel)
+    cache_dir = tmp_path / "cache"
+    state = tmp_path / ".depfix"
+    state.mkdir()
+    (state / "config.toml").write_text("[policy]\nallow-build = false\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    install_packages((specifier,), cache_dir=cache_dir, base_dir=tmp_path)
+    depfix.configure(cache_dir=cache_dir, log_level="WARNING")
+    depfix.default(specifier)
+
+    plans = tuple((cache_dir / "v1" / "plans").glob("*/imports.lock"))
+    assert len(plans) == 2
+    unrestricted = next(path for path in plans if not bool(load_manifest(path).policy.get("allow-build") is False))
+    with unrestricted.open("a", encoding="utf-8") as handle:
+        handle.write("# stale canonical plan\n")
+
+    depfix.default(specifier, refresh=True)
+
+    assert "# stale canonical plan" not in unrestricted.read_text(encoding="utf-8")
+
+
 def test_scoped_primary_index_does_not_leak_or_inherit_global_extras(
     tmp_path: Path, wheel_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -103,9 +152,11 @@ def test_scoped_primary_index_does_not_leak_or_inherit_global_extras(
 
     scoped = depfix.import_module("scoped-index-demo", index_url=scoped_index)
     later = depfix.import_module("scoped-index-demo")
+    newest = depfix.import_module("scoped-index-demo", prefer_newest=True)
 
     assert scoped.VALUE == "scoped"
-    assert later.VALUE == "global"
+    assert later.VALUE == "scoped"
+    assert newest.VALUE == "global"
     assert scoped.__depfix_graph_id__ != later.__depfix_graph_id__
 
 

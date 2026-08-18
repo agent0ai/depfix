@@ -30,7 +30,7 @@ from .errors import (
     StoreImportError,
     UnsafePackageError,
 )
-from .manifest import assert_compatible_environment, load_manifest, write_manifest
+from .manifest import assert_compatible_environment, canonical_resolution_identity, load_manifest, write_manifest
 from .models import Alias, LockedGraph, resolved_realm_id
 from .progress import ProgressReporter
 from .resolver import Resolver
@@ -289,16 +289,23 @@ def prepare_import_selection(
             )
         else:
             resolution_path = cache.root / "groups" / identity / "imports.lock"
-            record_manifest = resolution_path
-            if not refresh and resolution_path.is_file():
-                graph = load_manifest(resolution_path)
-                assert_compatible_environment(graph, resolution_path)
-                aliases = graph.aliases
+            canonical_path = (
+                cache.root
+                / "plans"
+                / _canonical_group_identity(normalized, normalized_constraints, settings)
+                / "imports.lock"
+            )
+            record_manifest = canonical_path
+            reusable_path = resolution_path if resolution_path.is_file() else canonical_path
+            if not refresh and reusable_path.is_file():
+                graph = load_manifest(reusable_path)
+                assert_compatible_environment(graph, reusable_path)
+                aliases = _canonical_group_aliases(graph, normalized)
                 _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
                 runtime = _runtime(
                     graph,
                     cache,
-                    resolution_path,
+                    reusable_path,
                     selected_isolation,
                     allow_unsafe=settings.allow_unsafe,
                     root_nodes=tuple(alias.node for alias in aliases),
@@ -343,6 +350,8 @@ def prepare_import_selection(
                 _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
                 resolution_path.parent.mkdir(parents=True, exist_ok=True)
                 write_manifest(graph, resolution_path)
+                with cache.lock("canonical-resolution:" + canonical_path.parent.name):
+                    write_manifest(graph, canonical_path)
                 runtime = _runtime(
                     graph,
                     cache,
@@ -554,7 +563,7 @@ def _store_manifest_paths(cache: Cache, configured: Path | None) -> tuple[Path, 
     paths: set[Path] = set()
     if configured is not None and configured.is_file():
         paths.add(configured.resolve())
-    for directory in ("installs", "groups", "resolutions"):
+    for directory in ("installs", "groups", "plans", "resolutions"):
         root = cache.root / directory
         if root.is_dir():
             paths.update(path.resolve() for path in root.rglob("imports.lock") if path.is_file())
@@ -931,6 +940,35 @@ def _group_identity(
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _canonical_group_identity(
+    normalized: tuple[str, ...],
+    constraints: tuple[str, ...],
+    settings: Settings,
+) -> str:
+    return canonical_resolution_identity(
+        normalized,
+        constraints,
+        index_url=settings.index_url,
+        extra_index_url=settings.extra_index_url,
+        prefer_newest=settings.prefer_newest,
+        allow_unsafe=settings.allow_unsafe,
+        resolution_policy={},
+    )
+
+
+def _canonical_group_aliases(graph: LockedGraph, normalized: tuple[str, ...]) -> tuple[Alias, ...]:
+    by_specifier: dict[str, Alias] = {}
+    for alias in graph.aliases:
+        if alias.normalized_specifier in normalized:
+            by_specifier.setdefault(alias.normalized_specifier, alias)
+    if set(by_specifier) != set(normalized):
+        raise ManifestMismatchError(
+            "The canonical stored graph does not contain the exact requirement group",
+            normalized_request=", ".join(normalized),
+        )
+    return tuple(by_specifier[item] for item in normalized)
 
 
 def _selection_from_aliases(

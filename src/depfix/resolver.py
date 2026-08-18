@@ -13,7 +13,7 @@ import tarfile
 import tempfile
 import urllib.request
 import zipfile
-from dataclasses import replace
+from dataclasses import fields, replace
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -27,7 +27,7 @@ from packaging.utils import canonicalize_name, parse_sdist_filename, parse_wheel
 from packaging.version import InvalidVersion, Version
 
 from ._version import __version__
-from .cache import Cache, _host_matches, _open_url
+from .cache import Cache, CachedPackage, _host_matches, _open_url
 from .config import ImportDeclaration, ProjectConfig
 from .errors import (
     DepfixError,
@@ -44,7 +44,7 @@ from .models import Alias, Artifact, LockedGraph, Node
 from .progress import ProgressReporter
 from .settings import Settings, resolve_settings
 from .sources import SourceInfo, hash_local_source, parse_source
-from .uv_backend import UvBackend
+from .uv_backend import PlanPreference, ResolutionPlan, UvBackend
 from .wheel import WheelInspection, inspect_wheel
 
 _SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
@@ -94,6 +94,7 @@ class _Candidate:
         source_final_url: str = "",
         source_sha256: str = "",
         source_size: int = 0,
+        installed_artifact: Artifact | None = None,
     ) -> None:
         self.distribution = distribution
         self.version = version
@@ -110,6 +111,7 @@ class _Candidate:
         self.source_final_url = source_final_url
         self.source_sha256 = source_sha256
         self.source_size = source_size
+        self.installed_artifact = installed_artifact
 
 
 class Resolver:
@@ -149,6 +151,8 @@ class Resolver:
         self._allow_insecure = False
         self._prefer_newest = self.settings.prefer_newest
         self._constraints: dict[str, SpecifierSet] = {}
+        self._active_plan: dict[str, str] = {}
+        self._installed_inventory: tuple[CachedPackage, ...] | None = None
 
     def resolve(self, config: ProjectConfig) -> LockedGraph:
         self._policy = dict(config.policy)
@@ -165,8 +169,10 @@ class Resolver:
         self._allowed_hosts = _policy_strings(self._policy.get("allowed-hosts"))
         self._allow_insecure = bool(self._policy.get("allow-insecure-transport", False))
         self._validate_index_policy()
+        bulk_plans = self._bulk_plan(config)
         aliases: list[Alias] = []
         for declaration in config.imports:
+            self._active_plan = bulk_plans.get(declaration.name, {})
             self._apply_declaration_indexes(declaration)
             prefer_newest = self._prefer_newest if declaration.prefer_newest is None else declaration.prefer_newest
             if not isinstance(prefer_newest, bool):
@@ -226,6 +232,182 @@ class Resolver:
             resolver_version=self._uv_version,
         )
         return replace(graph, graph_id=computed_graph_id(graph))
+
+    def _bulk_plan(self, config: ProjectConfig) -> dict[str, dict[str, str]]:
+        """Plan registry roots together, recursively splitting failed cohorts."""
+        registry: list[tuple[ImportDeclaration, SourceInfo, str]] = []
+        for declaration in config.imports:
+            source = parse_source(declaration.specifier, base_dir=declaration.base_dir or config.path.parent)
+            if source.kind != "pypi" or source.requirement is None:
+                continue
+            if declaration.index_url is not None or declaration.extra_index_url is not None:
+                continue
+            requested = Requirement(source.requirement)
+            constraint = self._constrained_specifier(source.distribution or requested.name, requested.specifier)
+            extras = f"[{','.join(sorted(requested.extras))}]" if requested.extras else ""
+            registry.append((declaration, source, f"{source.distribution}{extras}{constraint}"))
+        if len(registry) < 2 or not hasattr(self.backend, "resolve_requirements_plan"):
+            return {}
+
+        preferences = self._bulk_plan_preferences(registry)
+        explicit_constraints = tuple(f"{name}{value}" for name, value in sorted(self._constraints.items()))
+        preferred_constraints = explicit_constraints + tuple(
+            f"{item.distribution}=={item.version}" for item in preferences
+        )
+        requirements = tuple(item[2] for item in registry)
+        self.progress.emit("plan", f"bulk resolving {len(requirements)} package roots")
+
+        plans: dict[str, dict[str, str]] = {}
+
+        def record(indexes: tuple[int, ...], plan: ResolutionPlan) -> None:
+            for index in indexes:
+                plans[registry[index][0].name] = plan.distributions
+
+        all_indexes = tuple(range(len(registry)))
+        try:
+            plan = self.backend.resolve_requirements_plan(
+                requirements,
+                constraints=preferred_constraints,
+                preferences=preferences,
+            )
+        except DepfixError:
+            if preferences:
+                self.progress.emit(
+                    "plan",
+                    "installed preferences conflict with the bulk plan; retrying the full root group",
+                )
+                try:
+                    plan = self.backend.resolve_requirements_plan(
+                        requirements,
+                        constraints=explicit_constraints,
+                        preferences=(),
+                    )
+                except DepfixError:
+                    plan = None
+            else:
+                plan = None
+        if plan is not None:
+            record(all_indexes, plan)
+            self._uv_version = self.backend.version()
+            return plans
+
+        split_indexes = self._bulk_split_order(registry, preferences)
+        cohorts: list[tuple[int, ...]] = [split_indexes]
+        successful_cohorts = 0
+        while cohorts:
+            indexes = cohorts.pop()
+            if len(indexes) < 2:
+                continue
+            midpoint = len(indexes) // 2
+            for part in (indexes[:midpoint], indexes[midpoint:]):
+                try:
+                    cohort_plan = self.backend.resolve_requirements_plan(
+                        tuple(registry[index][2] for index in part),
+                        constraints=explicit_constraints,
+                        preferences=(),
+                    )
+                except DepfixError:
+                    if len(part) > 1:
+                        self.progress.emit("plan", f"splitting conflicting cohort of {len(part)} roots")
+                        cohorts.append(part)
+                    continue
+                record(part, cohort_plan)
+                successful_cohorts += 1
+
+        isolated = [source for declaration, source, _requirement in registry if declaration.name not in plans]
+        if plans:
+            self._uv_version = self.backend.version()
+            self.progress.emit("plan", f"retained {successful_cohorts} compatible bulk cohorts")
+        if isolated:
+            self.progress.emit(
+                "fallback",
+                f"isolating {len(isolated)} conflicting roots: {', '.join(item.normalized for item in isolated)}",
+            )
+        return plans
+
+    def _bulk_split_order(
+        self,
+        registry: list[tuple[ImportDeclaration, SourceInfo, str]],
+        preferences: tuple[PlanPreference, ...],
+    ) -> tuple[int, ...]:
+        """Move roots with locally proven installed-version mismatches to the split boundary."""
+        by_distribution = {item.distribution: item for item in preferences}
+        scored: list[tuple[int, int, int]] = []
+        signaled = 0
+        for index, (_declaration, source, requirement_text) in enumerate(registry):
+            requested = Requirement(requirement_text)
+            preference = by_distribution.get(source.distribution or "")
+            mismatches = 0
+            strictness = sum(item.operator in {"==", "===", "~=", "<", "<="} for item in requested.specifier)
+            if preference is not None:
+                try:
+                    if Version(preference.version) not in requested.specifier:
+                        mismatches += 1
+                except InvalidVersion:
+                    pass
+                for raw_dependency in preference.requires_dist:
+                    try:
+                        dependency = Requirement(raw_dependency)
+                    except InvalidRequirement:
+                        continue
+                    # Marker and extra evaluation can depend on the selected
+                    # plan. Use only unconditional local metadata as a safe
+                    # ordering hint rather than pre-resolving dependency trees.
+                    if dependency.marker is not None:
+                        continue
+                    installed_dependency = by_distribution.get(str(canonicalize_name(dependency.name)))
+                    if installed_dependency is None:
+                        continue
+                    constraint = self._constrained_specifier(dependency.name, dependency.specifier)
+                    try:
+                        if Version(installed_dependency.version) not in constraint:
+                            mismatches += 1
+                    except InvalidVersion:
+                        continue
+            if mismatches:
+                signaled += 1
+            scored.append((mismatches, strictness if mismatches else 0, index))
+        if not signaled:
+            return tuple(range(len(registry)))
+        ordered = tuple(item[2] for item in sorted(scored))
+        if ordered != tuple(range(len(registry))):
+            self.progress.emit("plan", f"moving {signaled} locally signaled roots to the split boundary")
+        return ordered
+
+    def _bulk_plan_preferences(
+        self,
+        registry: list[tuple[ImportDeclaration, SourceInfo, str]],
+    ) -> tuple[PlanPreference, ...]:
+        """Return verified installed selections for a uniformly cache-first group."""
+        if any(
+            self._prefer_newest if declaration.prefer_newest is None else declaration.prefer_newest
+            for declaration, _source, _requirement in registry
+        ):
+            return ()
+        preferences: list[PlanPreference] = []
+        distributions = sorted({package.distribution for package in self._installed_packages()})
+        for distribution in distributions:
+            constraint = self._constraints.get(distribution, SpecifierSet())
+            candidate = self._select_installed(distribution, constraint, emit_progress=False)
+            if candidate is None:
+                continue
+            inspection = self._inspect_installed(candidate)
+            extras: set[str] = set()
+            for requirement in inspection.requires_dist:
+                extras.update(re.findall(r"\bextra\s*==\s*['\"]([^'\"]+)['\"]", requirement))
+                extras.update(re.findall(r"['\"]([^'\"]+)['\"]\s*==\s*extra\b", requirement))
+            preferences.append(
+                PlanPreference(
+                    candidate.distribution,
+                    candidate.version,
+                    inspection.requires_python,
+                    inspection.requires_dist,
+                    tuple(sorted(extras)),
+                )
+            )
+        if preferences:
+            self.progress.emit("reuse", f"seeding bulk plan with {len(preferences)} installed selections")
+        return tuple(preferences)
 
     def reacquire_built_artifact(
         self,
@@ -380,24 +562,19 @@ class Resolver:
             return self._resolve_single_file(declaration, source, path=path)
         if source.kind == "pypi":
             assert source.distribution is not None and source.requirement is not None
-            self._uv_version = self.backend.version()
             requested = Requirement(source.requirement)
             requested_constraint = self._constrained_specifier(source.distribution, requested.specifier)
             extras = f"[{','.join(sorted(requested.extras))}]" if requested.extras else ""
             constrained_requirement = f"{source.distribution}{extras}{requested_constraint}"
-            cached_candidate = None
-            if not prefer_newest:
-                preferred = self._select_pypi(
-                    source.distribution,
-                    requested_constraint,
-                    prefer_newest=False,
-                )
-                if self.cache.has_package(preferred.sha256) or f"sha256:{preferred.sha256}" in self._artifacts:
-                    cached_candidate = preferred
+            planned = self._planned_version(source.distribution, requested_constraint)
+            selection_constraint = SpecifierSet(f"=={planned}") if planned is not None else requested_constraint
+            cached_candidate = (
+                self._select_installed(source.distribution, selection_constraint) if not prefer_newest else None
+            )
             exact_version = (
-                cached_candidate.version
-                if cached_candidate is not None
-                else self.backend.resolve_root_version(constrained_requirement, source.distribution)
+                planned
+                or (cached_candidate.version if cached_candidate is not None else None)
+                or self.backend.resolve_root_version(constrained_requirement, source.distribution)
             )
             self.progress.emit("fetch", f"{source.distribution}=={exact_version} dependency graph")
             candidate = cached_candidate or self._select_pypi(
@@ -535,12 +712,19 @@ class Resolver:
         ancestors: dict[str, Node],
         prefer_newest: bool,
     ) -> Node:
-        if self.cache.has_package(candidate.sha256):
+        if candidate.installed_artifact is not None:
+            self.progress.emit("inspect", f"{candidate.distribution}=={candidate.version} installed metadata")
+            inspection = self._inspect_installed(candidate)
+            final_url = candidate.installed_artifact.final_url or candidate.url
+        elif self.cache.has_package(candidate.sha256):
             blob = self.cache.blob_path(candidate.sha256)
             final_url = candidate.url
+            self.progress.emit("inspect", f"{candidate.distribution}=={candidate.version} stored metadata")
             inspection = self._inspect_artifact(blob, candidate)
         else:
             with self.cache._artifact_lock(candidate.sha256):
+                if not self.cache.has_blob(candidate.sha256):
+                    self.progress.emit("acquire", f"{candidate.distribution}=={candidate.version}")
                 blob, final_url = self.cache.fetch_url_with_final(
                     candidate.url,
                     candidate.sha256,
@@ -549,6 +733,7 @@ class Resolver:
                     allow_insecure=self._allow_insecure,
                     _lock_held=True,
                 )
+                self.progress.emit("inspect", f"{candidate.distribution}=={candidate.version} artifact metadata")
                 inspection = self._inspect_artifact(blob, candidate)
         if inspection.distribution != candidate.distribution or not _versions_equivalent(
             inspection.version, candidate.version
@@ -563,7 +748,7 @@ class Resolver:
             )
         self._validate_constraint(candidate.distribution, candidate.version, candidate.source)
         source = candidate.source
-        artifact = Artifact(
+        artifact = candidate.installed_artifact or Artifact(
             id=f"sha256:{candidate.sha256}",
             distribution=candidate.distribution,
             version=candidate.version,
@@ -635,7 +820,15 @@ class Resolver:
                 dependencies[name] = ancestor.id
                 continue
             selected_extras = tuple(sorted({extra for req in requirements for extra in req.extras}))
-            child_candidate = self._select_pypi(name, constraints, prefer_newest=prefer_newest)
+            planned = self._planned_version(name, constraints)
+            selection_constraint = SpecifierSet(f"=={planned}") if planned is not None else constraints
+            child_candidate = self._select_installed(name, selection_constraint) if not prefer_newest else None
+            if child_candidate is None:
+                child_candidate = self._select_pypi(
+                    name,
+                    selection_constraint,
+                    prefer_newest=prefer_newest,
+                )
             child_candidate.source = SourceInfo(
                 original=str(requirements[0]),
                 normalized=f"{name}{constraints}",
@@ -656,6 +849,135 @@ class Resolver:
         node = replace(provisional, dependencies=dependencies, evaluated_markers=tuple(sorted(evaluated)))
         self._nodes[node.id] = node
         return node
+
+    def _planned_version(self, distribution: str, constraint: SpecifierSet) -> str | None:
+        """Return the active cohort's exact compatible version, if one exists."""
+        planned = self._active_plan.get(distribution)
+        if planned is None:
+            return None
+        try:
+            compatible = Version(planned) in constraint
+        except InvalidVersion as exc:
+            raise ResolutionError(
+                "Bulk resolution plan contains an invalid version",
+                request=f"{distribution}=={planned}",
+            ) from exc
+        if not compatible:
+            raise ResolutionError(
+                "Bulk resolution plan conflicts with inspected dependency metadata",
+                request=f"{distribution}{constraint}",
+                remediation=f"planned {distribution}=={planned}",
+            )
+        return planned
+
+    def _select_installed(
+        self,
+        distribution: str,
+        constraint: SpecifierSet,
+        *,
+        emit_progress: bool = True,
+    ) -> _Candidate | None:
+        """Select a complete compatible installed artifact without consulting an index."""
+        normalized = str(canonicalize_name(distribution))
+        compatible: list[tuple[Version, str, _Candidate]] = []
+        artifact_fields = {item.name for item in fields(Artifact)}
+        current_python = Version(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+        for package in self._installed_packages():
+            if package.distribution != normalized:
+                continue
+            try:
+                version = Version(package.version)
+            except InvalidVersion:
+                continue
+            if version not in constraint:
+                continue
+            metadata_path = self.cache.root / "metadata" / "packages" / f"{package.artifact_hash}.json"
+            imports_path = self.cache.root / "metadata" / "imports" / f"{package.artifact_hash}.json"
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                inspection = json.loads(imports_path.read_text(encoding="utf-8"))
+                filename = str(metadata["filename"])
+                requires_python = _normalize_requires_python(str(inspection.get("requires_python") or ""))
+                if requires_python and current_python not in SpecifierSet(requires_python):
+                    continue
+                if filename.endswith(".whl"):
+                    _name, _version, _build, tags = parse_wheel_filename(filename)
+                    if not tags & set(sys_tags()):
+                        continue
+                raw_artifact = metadata.get("artifact")
+                if not isinstance(raw_artifact, dict):
+                    # Legacy entries become reusable after any exact graph
+                    # synchronizes them through Cache.record_artifact. Until
+                    # then, their source identity is insufficient for safe
+                    # reacquisition after target eviction.
+                    continue
+                values = {key: value for key, value in raw_artifact.items() if key in artifact_fields}
+                artifact = Artifact(**values)
+                if (
+                    artifact.id != f"sha256:{package.artifact_hash}"
+                    or artifact.sha256 != package.artifact_hash
+                    or str(canonicalize_name(artifact.distribution)) != normalized
+                    or not _versions_equivalent(artifact.version, package.version)
+                    or artifact.filename != filename
+                    or not isinstance(artifact.size, int)
+                    or isinstance(artifact.size, bool)
+                    or artifact.size < 0
+                ):
+                    continue
+            except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            candidate = _Candidate(
+                normalized,
+                package.version,
+                artifact.url,
+                artifact.filename,
+                artifact.size,
+                artifact.sha256,
+                requires_python=artifact.requires_python,
+                installed_artifact=artifact,
+            )
+            compatible.append((version, package.artifact_hash, candidate))
+        if not compatible:
+            return None
+        compatible.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected = compatible[0][2]
+        if emit_progress:
+            self.progress.emit("reuse", f"{selected.distribution}=={selected.version} from shared store")
+        return selected
+
+    def _installed_packages(self) -> tuple[CachedPackage, ...]:
+        """Return one verified installed-inventory snapshot for this resolution."""
+        if self._installed_inventory is None:
+            self._installed_inventory = self.cache.list_packages()
+        return self._installed_inventory
+
+    def _inspect_installed(self, candidate: _Candidate) -> WheelInspection:
+        metadata_path = self.cache.root / "metadata" / "imports" / f"{candidate.sha256}.json"
+        try:
+            raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+            return WheelInspection(
+                distribution=raw["distribution"],
+                version=raw["version"],
+                build_tag=raw["build_tag"],
+                python_tag=raw["python_tag"],
+                abi_tag=raw["abi_tag"],
+                platform_tag=raw["platform_tag"],
+                requires_python=raw["requires_python"],
+                requires_dist=tuple(raw["requires_dist"]),
+                provided_modules=tuple(raw["provided_modules"]),
+                public_modules=tuple(raw["public_modules"]),
+                private_modules=tuple(raw["private_modules"]),
+                all_importable_modules=tuple(raw["all_importable_modules"]),
+                namespace_contributions=tuple(raw["namespace_contributions"]),
+                native_classification=raw["native_classification"],
+                metadata_dir=raw["metadata_dir"],
+            )
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ResolutionError(
+                "Installed artifact metadata is incomplete",
+                artifact_hash=candidate.sha256,
+                remediation="repair the artifact from an exact manifest or refresh the request",
+            ) from exc
 
     def _parse_constraints(self, value: object) -> dict[str, SpecifierSet]:
         raw_constraints = _policy_strings(value)

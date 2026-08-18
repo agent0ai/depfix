@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import http.client
 import json
@@ -671,11 +672,64 @@ class Cache:
     def record_artifact(self, artifact: Artifact) -> None:
         """Persist immutable installation identity without resetting its age."""
         path = self._package_metadata_path(artifact.sha256)
-        if path.is_file():
-            return
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._artifact_lock("metadata-" + artifact.sha256):
-            if not path.is_file():
+            data: dict[str, object]
+            if path.is_file():
+                try:
+                    loaded = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, TypeError, json.JSONDecodeError) as exc:
+                    raise IntegrityError(
+                        "Installed artifact identity metadata is unreadable",
+                        artifact_hash=artifact.sha256,
+                    ) from exc
+                if not isinstance(loaded, dict):
+                    raise IntegrityError(
+                        "Installed artifact identity metadata is invalid",
+                        artifact_hash=artifact.sha256,
+                    )
+                data = loaded
+                recorded_identity = (
+                    str(data.get("sha256") or artifact.sha256),
+                    str(canonicalize_name(str(data.get("distribution") or ""))),
+                    str(data.get("version") or ""),
+                    str(data.get("filename") or ""),
+                )
+                exact_identity = (
+                    artifact.sha256,
+                    str(canonicalize_name(artifact.distribution)),
+                    artifact.version,
+                    artifact.filename,
+                )
+                if recorded_identity != exact_identity:
+                    raise IntegrityError(
+                        "Installed artifact identity metadata disagrees with the exact artifact",
+                        artifact_hash=artifact.sha256,
+                    )
+                recorded_artifact = data.get("artifact")
+                if recorded_artifact is not None:
+                    if not isinstance(recorded_artifact, dict):
+                        raise IntegrityError(
+                            "Installed artifact provenance metadata is invalid",
+                            artifact_hash=artifact.sha256,
+                        )
+                    nested_identity = (
+                        str(recorded_artifact.get("sha256") or ""),
+                        str(canonicalize_name(str(recorded_artifact.get("distribution") or ""))),
+                        str(recorded_artifact.get("version") or ""),
+                        str(recorded_artifact.get("filename") or ""),
+                    )
+                    if nested_identity != exact_identity:
+                        raise IntegrityError(
+                            "Installed artifact provenance metadata disagrees with the exact artifact",
+                            artifact_hash=artifact.sha256,
+                        )
+                    return
+                # Upgrade legacy metadata in place while retaining its original
+                # installation age and lifecycle identity.
+                data["artifact"] = dataclasses.asdict(artifact)
+                data["source_sha256"] = artifact.source_sha256
+            else:
                 data = {
                     "format_version": 1,
                     "sha256": artifact.sha256,
@@ -684,13 +738,14 @@ class Cache:
                     "filename": artifact.filename,
                     "installed_at": time.time(),
                     "source_sha256": artifact.source_sha256,
+                    "artifact": dataclasses.asdict(artifact),
                 }
-                temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-                try:
-                    temporary.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
-                    os.replace(temporary, path)
-                finally:
-                    temporary.unlink(missing_ok=True)
+            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_text(json.dumps(data, sort_keys=True) + "\n", encoding="utf-8")
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
         self._initialize_cleanup_clock()
 
     def record_installation(
