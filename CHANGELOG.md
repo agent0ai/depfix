@@ -4,14 +4,20 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
-## 0.11.2 - 2026-08-18
+## 0.11.3 - 2026-08-18
 
 - Restored pip/uv-compatible source builds for archives such as `tinysegmenter==0.3` by validating contained tar and ZIP
   links against the complete archive namespace and materializing their resolved regular-file contents without creating
-  filesystem links. Unsafe paths, targets, collisions, special files, and extraction-limit violations remain rejected.
+  filesystem links. Unsafe paths, targets, collisions, special files, and extraction-limit violations remain rejected,
+  including raw ZIP backslash paths before Python's Windows-specific name normalization.
 - Accepted omitted Simple API artifact sizes through bounded hash-verified streaming, exact yanked selections already
   chosen by uv, wheel link mode bits as ordinary RECORD-verified ZIP payloads, and strong SHA-2/SHA-3/BLAKE2 wheel RECORD
   hashes while retaining immutable whole-artifact SHA-256 identity and complete installed-payload verification.
+
+## 0.11.2 - 2026-08-18 (superseded before PyPI publication)
+
+- Hosted Windows validation exposed ZIP backslash-name normalization and a POSIX-only executable-bit assertion. The
+  corrected archive validation and portable regression are released as 0.11.3 without moving the immutable tag.
 
 ## 0.11.1 - 2026-08-18
 

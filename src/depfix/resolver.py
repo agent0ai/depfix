@@ -1666,8 +1666,9 @@ def _extract_source_archive(path: Path, destination: Path) -> None:
             info_by_path: dict[PurePosixPath, zipfile.ZipInfo] = {}
             seen_paths: set[str] = set()
             for info in infos:
-                relative = _safe_archive_path(info.filename, path)
-                _reject_archive_path_collision(relative, info.filename, seen_paths)
+                raw_name = info.orig_filename
+                relative = _safe_archive_path(raw_name, path)
+                _reject_archive_path_collision(relative, raw_name, seen_paths)
                 mode = info.external_attr >> 16
                 if info.is_dir():
                     entry = _SourceArchiveEntry(relative, "directory")

@@ -1196,7 +1196,8 @@ def test_tar_source_archive_materializes_safe_forward_links_as_regular_files(tmp
         assert materialized.read_bytes() == data
         assert materialized.is_file()
         assert not materialized.is_symlink()
-        assert materialized.stat().st_mode & stat.S_IXUSR
+        if sys.platform != "win32":
+            assert materialized.stat().st_mode & stat.S_IXUSR
 
 
 def test_zip_source_archive_materializes_safe_forward_symlink_as_regular_file(tmp_path: Path) -> None:
@@ -1246,7 +1247,9 @@ def test_source_archives_reject_unsafe_or_dangling_link_targets_before_extractio
 def test_source_archives_reject_nonportable_member_paths_without_external_writes(tmp_path: Path, name: str) -> None:
     source = tmp_path / "unsafe.zip"
     with zipfile.ZipFile(source, "w") as archive:
-        archive.writestr(name, "content")
+        info = zipfile.ZipInfo(name)
+        info.filename = name
+        archive.writestr(info, "content")
 
     with pytest.raises(SourceError, match="Unsafe path"):
         _extract_source_archive(source, tmp_path / "out")
