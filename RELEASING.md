@@ -43,6 +43,22 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.11.0 — 2026-08-18
+
+- PyPI: `https://pypi.org/project/depfix/0.11.0/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.11.0`
+- Wheel SHA-256: `8e5dbabf441dc7b58198d99f89cf260b930a5005c2ae044a9ca4c95ef01d6df6`
+- Sdist SHA-256: `5a0dc2c20289c1c0241d29767cb1909f2205b747555dccc74bb1970eecbd494d`
+- Published from commit `52e7644bc25b336565c1e184c50b3709eff99607` by protected workflow run
+  `https://github.com/agent0ai/depfix/actions/runs/32126539524` after its tag-bound request, complete quality and platform
+  matrix, distribution, hidden-draft staging, OIDC publication, public-index verification, and release finalization gates
+  passed. One Windows 3.11 concurrency-test timeout was rerun successfully before distribution staging; no publication
+  state existed during that retry.
+- PyPI and GitHub expose the protected run's wheel and source archive byte for byte. Their PyPI attestations bind both
+  artifact digests to the release workflow, annotated `v0.11.0` tag, and published commit. A clean credential-free,
+  no-cache public-index installation verified version/help and a live `idna==3.10` Depfix import after regional Simple
+  API propagation completed.
+
 ### 0.10.3 — 2026-08-17
 
 - PyPI: `https://pypi.org/project/depfix/0.10.3/`
