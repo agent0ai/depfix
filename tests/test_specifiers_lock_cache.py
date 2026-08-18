@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
 import io
 import json
@@ -213,6 +215,75 @@ def test_malicious_wheel_path_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(CacheError, match="Unsafe path"):
         extract_wheel(wheel, tmp_path / "out")
     assert not (tmp_path / "escape.py").exists()
+
+
+def test_wheel_sha512_record_hashes_are_verified(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory("sha512-demo", "1.0", {"sha512_demo.py": "VALUE = 1\n"})
+    with zipfile.ZipFile(wheel) as archive:
+        members = {info.filename: archive.read(info) for info in archive.infolist()}
+        record_name = "sha512_demo-1.0.dist-info/RECORD"
+        rows = list(csv.reader(members[record_name].decode("utf-8").splitlines()))
+    for row in rows:
+        if not row[1]:
+            continue
+        digest = hashlib.sha512(members[row[0]]).digest()
+        row[1] = "sha512=" + base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    stream = io.StringIO()
+    csv.writer(stream, lineterminator="\n").writerows(rows)
+    members[record_name] = stream.getvalue().encode()
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+    extract_wheel(wheel, tmp_path / "out")
+
+    assert (tmp_path / "out" / "purelib" / "sha512_demo.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+@pytest.mark.parametrize("replacement", ["", "sha1=invalid"])
+def test_wheel_rejects_missing_or_insecure_record_hashes(tmp_path: Path, wheel_factory, replacement: str) -> None:
+    wheel = wheel_factory("record-demo", "1.0", {"record_demo.py": "VALUE = 1\n"})
+    with zipfile.ZipFile(wheel) as archive:
+        members = {info.filename: archive.read(info) for info in archive.infolist()}
+        record_name = "record_demo-1.0.dist-info/RECORD"
+        rows = list(csv.reader(members[record_name].decode("utf-8").splitlines()))
+    next(row for row in rows if row[0] == "record_demo.py")[1] = replacement
+    stream = io.StringIO()
+    csv.writer(stream, lineterminator="\n").writerows(rows)
+    members[record_name] = stream.getvalue().encode()
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+    with pytest.raises(IntegrityError, match="missing its RECORD hash|Unsupported or insecure"):
+        extract_wheel(wheel, tmp_path / "out")
+
+
+def test_wheel_link_metadata_is_safely_materialized_as_regular_file(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "link-metadata-demo",
+        "1.0",
+        {"link_metadata_demo.py": "link_metadata_target.py", "link_metadata_target.py": "VALUE = 1\n"},
+    )
+    rewritten = tmp_path / "rewritten.zip"
+    with zipfile.ZipFile(wheel) as source, zipfile.ZipFile(rewritten, "w") as destination:
+        for source_info in source.infolist():
+            data = source.read(source_info)
+            if source_info.filename == "link_metadata_demo.py":
+                target_info = zipfile.ZipInfo(source_info.filename)
+                target_info.create_system = 3
+                target_info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                destination.writestr(target_info, data)
+            else:
+                destination.writestr(source_info, data)
+    rewritten.replace(wheel)
+
+    extract_wheel(wheel, tmp_path / "out")
+
+    materialized = tmp_path / "out" / "purelib" / "link_metadata_demo.py"
+    assert materialized.read_text(encoding="utf-8") == "link_metadata_target.py"
+    assert materialized.is_file()
+    assert not materialized.is_symlink()
 
 
 def test_wheel_promotion_keeps_staging_root_writable_for_darwin(

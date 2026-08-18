@@ -18,6 +18,9 @@
 - Tests must not depend on the developer's ambient packages, cache, or credentials.
 - Network-free fixtures are preferred; explicitly marked live checks belong in release or CI boundaries.
 - Live PyPI checks require `DEPFIX_RUN_LIVE_TESTS=1`; CI owns their connected execution.
+- Source-archive regressions cover real `tinysegmenter==0.3`, contained tar/ZIP links and hard links, forward/nested/chained
+  references, executable targets, portable namespace collisions, unsafe targets and special members, and expanded-size
+  accounting without persisting filesystem links.
 - Regressions should assert observable public behavior or a named safety invariant.
 - Standard-import tests reset the dispatcher, persistent defaults, context scopes, runtimes, and configuration.
 - Requirements-default tests cover canonical nested parsing, constraints, markers, relative paths, contextual rejection,

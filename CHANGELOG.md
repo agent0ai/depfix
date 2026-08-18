@@ -2,6 +2,15 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## Unreleased
+
+- Restored pip/uv-compatible source builds for archives such as `tinysegmenter==0.3` by validating contained tar and ZIP
+  links against the complete archive namespace and materializing their resolved regular-file contents without creating
+  filesystem links. Unsafe paths, targets, collisions, special files, and extraction-limit violations remain rejected.
+- Accepted omitted Simple API artifact sizes through bounded hash-verified streaming, exact yanked selections already
+  chosen by uv, wheel link mode bits as ordinary RECORD-verified ZIP payloads, and strong SHA-2/SHA-3/BLAKE2 wheel RECORD
+  hashes while retaining immutable whole-artifact SHA-256 identity and complete installed-payload verification.
+
 ## 0.11.1 - 2026-08-18
 
 - Supported safe dynamic `importlib` children with non-identifier filename components, including Rich 15 Unicode data

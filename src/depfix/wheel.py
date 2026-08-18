@@ -26,6 +26,9 @@ _DRIVE = re.compile(r"^[A-Za-z]:")
 _READ_ONLY_DIRECTORY_MODE = stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
 _PROMOTABLE_DIRECTORY_MODE = _READ_ONLY_DIRECTORY_MODE | stat.S_IWUSR
 _READ_ONLY_FILE_MODE = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+_SUPPORTED_RECORD_HASHES = frozenset(
+    {"sha256", "sha384", "sha512", "sha3_256", "sha3_384", "sha3_512", "blake2s", "blake2b"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,9 +342,6 @@ def _validate_members(
             or any(":" in part for part in path.parts)
         ):
             raise CacheError("Unsafe path in wheel", remediation=name)
-        mode = info.external_attr >> 16
-        if stat.S_ISLNK(mode):
-            raise CacheError("Symbolic links are not accepted in wheels", remediation=name)
         normalized = str(path)
         if normalized in seen or normalized.casefold() in folded:
             raise CacheError("Duplicate or case-folding-colliding wheel member", remediation=name)
@@ -373,13 +373,16 @@ def _verify_record(archive: zipfile.ZipFile, names: list[str]) -> None:
         data = archive.read(name)
         if size_field and int(size_field) != len(data):
             raise IntegrityError("Wheel RECORD size mismatch", remediation=name)
-        if hash_field:
-            algorithm, separator, encoded = hash_field.partition("=")
-            if separator != "=" or algorithm != "sha256":
-                raise IntegrityError("Only SHA-256 wheel RECORD hashes are supported", remediation=name)
-            actual = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
-            if actual != encoded:
-                raise IntegrityError("Wheel RECORD hash mismatch", remediation=name)
+        if not hash_field:
+            if name != records[0]:
+                raise IntegrityError("Wheel member is missing its RECORD hash", remediation=name)
+            continue
+        algorithm, separator, encoded = hash_field.partition("=")
+        if separator != "=" or algorithm not in _SUPPORTED_RECORD_HASHES:
+            raise IntegrityError("Unsupported or insecure wheel RECORD hash", remediation=name)
+        actual = base64.urlsafe_b64encode(hashlib.new(algorithm, data).digest()).rstrip(b"=").decode("ascii")
+        if actual != encoded:
+            raise IntegrityError("Wheel RECORD hash mismatch", remediation=name)
 
 
 def _installed_relative(name: str) -> str | None:

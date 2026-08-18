@@ -157,8 +157,6 @@ def test_simple_html_media_types_redirects_metadata_and_hash_filtering(
 
     def open_url(request: urllib.request.Request, **_kwargs: object) -> _Response:
         requests.append((request.full_url, request.get_method(), request.get_header("Accept")))
-        if request.get_method() == "HEAD":
-            return _Response("", "application/octet-stream", request.full_url, length=1234)
         return _Response(page, content_type, "https://mirror.example/redirected/torch/")
 
     monkeypatch.setattr(resolver_module, "_open_url", open_url)
@@ -176,9 +174,8 @@ def test_simple_html_media_types_redirects_metadata_and_hash_filtering(
     assert third["yanked"] is False and third["digests"] == {"sha256": digest_c}
     assert "3.0.0" in releases and releases["3.0.0"][0]["digests"] == {}
     candidate = resolver._select_pypi("torch", SpecifierSet("<3"), prefer_newest=True)
-    assert candidate.version == "2.9.0+cpu" and candidate.size == 1234
-    assert set(item[1] for item in requests) == {"GET", "HEAD"}
-    assert sum(item[1] == "HEAD" for item in requests) == 1
+    assert candidate.version == "2.9.0+cpu" and candidate.size == 0
+    assert set(item[1] for item in requests) == {"GET"}
     assert all("/torch/json" not in item[0] for item in requests)
 
 
@@ -374,6 +371,62 @@ def test_malformed_advertised_sha256_is_not_treated_as_hashless(
         resolver._select_pypi("setuptools", SpecifierSet(">=77.0.3"), prefer_newest=True)
 
     assert "malformed SHA-256" in str(error.value)
+
+
+def test_exact_pins_preserve_uv_selection_of_yanked_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    resolver = _resolver(tmp_path)
+    monkeypatch.setattr(
+        resolver,
+        "_project_artifact_payload",
+        lambda *_args: {
+            "releases": {
+                "1.0.0": [
+                    {
+                        "filename": "demo-1.0.0-py3-none-any.whl",
+                        "packagetype": "bdist_wheel",
+                        "url": "https://packages.example/demo.whl",
+                        "size": 10,
+                        "digests": {"sha256": "a" * 64},
+                        "requires_python": "",
+                        "yanked": True,
+                        "yanked_reason": "broken for unpinned consumers",
+                    }
+                ]
+            }
+        },
+    )
+
+    candidate = resolver._select_pypi("demo", SpecifierSet("==1.0.0"), prefer_newest=True)
+
+    assert candidate.version == "1.0.0"
+    assert candidate.yanked is True
+
+
+def test_unpinned_selection_still_rejects_yanked_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    resolver = _resolver(tmp_path)
+    monkeypatch.setattr(
+        resolver,
+        "_project_artifact_payload",
+        lambda *_args: {
+            "releases": {
+                "1.0.0": [
+                    {
+                        "filename": "demo-1.0.0-py3-none-any.whl",
+                        "packagetype": "bdist_wheel",
+                        "url": "https://packages.example/demo.whl",
+                        "size": 10,
+                        "digests": {"sha256": "a" * 64},
+                        "requires_python": "",
+                        "yanked": True,
+                        "yanked_reason": "broken for unpinned consumers",
+                    }
+                ]
+            }
+        },
+    )
+
+    with pytest.raises(ResolutionError, match="No compatible artifact"):
+        resolver._select_pypi("demo", SpecifierSet(">=1"), prefer_newest=True)
 
 
 def test_conflicting_advertised_sha256_remains_a_hard_integrity_failure(

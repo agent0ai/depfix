@@ -18,7 +18,9 @@ source model. Git parsing separates a suffix ref from HTTPS/SSH authentication w
 
 Relative `file:` values discovered by export are based on the containing source file. Direct runtime calls use the current
 working directory. Local projects and source archives are built through uv in a temporary directory and promoted by the
-resulting wheel hash. Source archives reject traversal, links/devices, duplicate paths, and extraction-limit violations.
+resulting wheel hash. Safe internal tar symlinks/hard links and ZIP symlink entries are resolved entirely within the
+normalized archive namespace and materialized as ordinary files. Source archives reject absolute or escaping paths,
+dangling or cyclic links, directory link targets, special files, colliding namespaces, and extraction-limit violations.
 
 Remote frozen artifacts require SHA-256. HTTPS is the supported remote artifact transport. Redirect origins are recorded
 without credentials. Single-file sources cannot fetch siblings; use a wheel for relative imports.

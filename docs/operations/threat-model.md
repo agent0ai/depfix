@@ -9,7 +9,9 @@ Controls include:
 - SHA-256 content addressing, size checks, wheel identity/Core Metadata checks, and full wheel `RECORD` validation;
 - HTTPS-only remote artifact downloads, explicit frozen hashes, redirect provenance, bounded resumable retries, and secret
   redaction; exact size and SHA-256 checks still gate promotion after every retry;
-- traversal, absolute/drive path, backslash, link/device, duplicate/case-collision, file-count, and expanded-size rejection;
+- traversal, absolute/drive path, backslash, special-file, duplicate/case/namespace-collision, file-count, and expanded-size
+  rejection; contained source-archive links resolve only to archive regular files and are materialized without filesystem
+  links, with copied contents included in the expanded-size bound;
 - canonical manifest/bundle identities and complete graph-reference validation;
 - no credential serialization, optional index/host allowlists, redirect validation, and first-index uv policy to reduce
   dependency-confusion exposure;

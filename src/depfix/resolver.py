@@ -7,13 +7,14 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
 import urllib.request
 import zipfile
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -51,6 +52,9 @@ _SIMPLE_JSON = "application/vnd.pypi.simple.v1+json"
 _SIMPLE_HTML = {"application/vnd.pypi.simple.v1+html", "text/html"}
 _SIMPLE_ACCEPT = "application/vnd.pypi.simple.v1+json, application/vnd.pypi.simple.v1+html;q=0.9, text/html;q=0.8"
 _WILDCARD_COMPARISON = re.compile(r"^(?P<operator><=|>=|<|>)(?P<release>\d+(?:\.\d+)*)\.\*$")
+_WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:")
+_SOURCE_ARCHIVE_MAX_FILES = 50_000
+_SOURCE_ARCHIVE_MAX_SIZE = 2 * 1024 * 1024 * 1024
 
 
 class _SimpleHTMLParser(HTMLParser):
@@ -717,6 +721,7 @@ class Resolver:
             inspection = self._inspect_installed(candidate)
             final_url = candidate.installed_artifact.final_url or candidate.url
         elif self.cache.has_package(candidate.sha256):
+            self._ensure_candidate_size(candidate)
             blob = self.cache.blob_path(candidate.sha256)
             final_url = candidate.url
             self.progress.emit("inspect", f"{candidate.distribution}=={candidate.version} stored metadata")
@@ -728,11 +733,12 @@ class Resolver:
                 blob, final_url = self.cache.fetch_url_with_final(
                     candidate.url,
                     candidate.sha256,
-                    expected_size=candidate.size,
+                    expected_size=candidate.size or None,
                     allowed_hosts=self._allowed_hosts,
                     allow_insecure=self._allow_insecure,
                     _lock_held=True,
                 )
+                candidate.size = blob.stat().st_size
                 self.progress.emit("inspect", f"{candidate.distribution}=={candidate.version} artifact metadata")
                 inspection = self._inspect_artifact(blob, candidate)
         if inspection.distribution != candidate.distribution or not _versions_equivalent(
@@ -1188,10 +1194,11 @@ class Resolver:
         blob, final_url = self.cache.fetch_url_with_final(
             candidate.url,
             candidate.sha256,
-            expected_size=candidate.size,
+            expected_size=candidate.size or None,
             allowed_hosts=self._allowed_hosts,
             allow_insecure=self._allow_insecure,
         )
+        candidate.size = blob.stat().st_size
         observed = replace(
             source,
             url=candidate.url,
@@ -1200,6 +1207,38 @@ class Resolver:
             mutable=False,
         )
         return self._build_source_candidate(blob, observed)
+
+    def _ensure_candidate_size(self, candidate: _Candidate) -> None:
+        if candidate.size > 0:
+            return
+        blob = self.cache.blob_path(candidate.sha256)
+        if blob.is_file():
+            candidate.size = blob.stat().st_size
+            return
+        metadata_path = self.cache.root / "metadata" / "packages" / f"{candidate.sha256}.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            artifact = metadata["artifact"]
+            recorded_size = artifact["size"]
+            if (
+                not isinstance(artifact, dict)
+                or artifact.get("sha256") != candidate.sha256
+                or not isinstance(recorded_size, int)
+                or isinstance(recorded_size, bool)
+                or recorded_size <= 0
+            ):
+                raise ValueError("invalid cached artifact size")
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            blob, _final_url = self.cache.fetch_url_with_final(
+                candidate.url,
+                candidate.sha256,
+                expected_size=None,
+                allowed_hosts=self._allowed_hosts,
+                allow_insecure=self._allow_insecure,
+            )
+            candidate.size = blob.stat().st_size
+        else:
+            candidate.size = recorded_size
 
     def _build_git(self, source: SourceInfo) -> tuple[Path, SourceInfo]:
         assert source.url is not None
@@ -1343,6 +1382,9 @@ class Resolver:
         tag_rank = {tag: index for index, tag in enumerate(sys_tags())}
         candidates: list[tuple[int, Version, int, int, int, _Candidate]] = []
         rejections: list[str] = []
+        exact_pin = any(
+            specifier.operator in {"==", "==="} and not specifier.version.endswith(".*") for specifier in constraint
+        )
         for raw_version, files in payload.get("releases", {}).items():
             try:
                 version = Version(raw_version)
@@ -1352,7 +1394,7 @@ class Resolver:
                 continue
             for item in files:
                 filename = item.get("filename", "")
-                if item.get("yanked", False) and not self.allow_yanked:
+                if item.get("yanked", False) and not self.allow_yanked and not exact_pin:
                     rejections.append(f"{filename}: yanked ({item.get('yanked_reason') or 'no reason'})")
                     continue
                 requires_python = _normalize_requires_python(str(item.get("requires_python") or ""))
@@ -1416,8 +1458,6 @@ class Resolver:
                 reverse=True,
             )
         selected = candidates[0][5]
-        if selected.size <= 0 and selected.sha256:
-            selected.size = self._remote_size(selected.url)
         self._candidate_cache[key] = selected
         return selected
 
@@ -1546,19 +1586,6 @@ class Resolver:
             )
         return releases
 
-    def _remote_size(self, url: str) -> int:
-        request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "depfix/0.1"})
-        with _open_url(
-            request,
-            timeout=self.cache.timeout,
-            allowed_hosts=self._allowed_hosts,
-            allow_insecure=self._allow_insecure,
-        ) as response:
-            value = response.headers.get("Content-Length")
-        if not value:
-            raise ResolutionError("Package index did not provide an artifact size", source=redact(url))
-        return int(value)
-
 
 def _node_id(path: str, artifact_id: str) -> str:
     return "node_" + hashlib.sha256(f"{path}\0{artifact_id}".encode()).hexdigest()[:24]
@@ -1618,28 +1645,61 @@ def _policy_strings(value: object) -> tuple[str, ...]:
     raise ResolutionError("Policy values must be strings or arrays of strings")
 
 
+@dataclass(frozen=True)
+class _SourceArchiveEntry:
+    path: PurePosixPath
+    kind: str
+    size: int = 0
+    link_target: PurePosixPath | None = None
+    executable: bool = False
+
+
 def _extract_source_archive(path: Path, destination: Path) -> None:
-    max_files = 50_000
-    max_size = 2 * 1024 * 1024 * 1024
+    max_files = _SOURCE_ARCHIVE_MAX_FILES
+    max_size = _SOURCE_ARCHIVE_MAX_SIZE
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as archive:
             infos = archive.infolist()
             if len(infos) > max_files or sum(item.file_size for item in infos) > max_size:
                 raise SourceError("Source archive exceeds extraction safety limits", source=str(path))
+            entries: list[_SourceArchiveEntry] = []
+            info_by_path: dict[PurePosixPath, zipfile.ZipInfo] = {}
             seen_paths: set[str] = set()
             for info in infos:
                 relative = _safe_archive_path(info.filename, path)
                 _reject_archive_path_collision(relative, info.filename, seen_paths)
                 mode = info.external_attr >> 16
-                if (mode & 0o170000) == 0o120000:
-                    raise SourceError("Source archives may not contain symbolic links", source=info.filename)
-                target = destination.joinpath(*relative.parts)
                 if info.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
+                    entry = _SourceArchiveEntry(relative, "directory")
+                elif stat.S_IFMT(mode) == stat.S_IFLNK:
+                    try:
+                        linkname = archive.read(info).decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise SourceError("Source archive link target is not UTF-8", source=info.filename) from exc
+                    entry = _SourceArchiveEntry(
+                        relative,
+                        "link",
+                        link_target=_safe_link_target(relative, linkname, path, relative_to_parent=True),
+                    )
+                elif stat.S_IFMT(mode) in {0, stat.S_IFREG}:
+                    entry = _SourceArchiveEntry(relative, "file", size=info.file_size, executable=bool(mode & 0o111))
+                else:
+                    raise SourceError("Source archives may not contain special files", source=info.filename)
+                entries.append(entry)
+                info_by_path[relative] = info
+            resolved_links = _validate_source_archive_plan(entries, path, max_size=max_size)
+            for entry in entries:
+                if entry.kind == "directory":
+                    destination.joinpath(*entry.path.parts).mkdir(parents=True, exist_ok=True)
+            for entry in entries:
+                if entry.kind != "file":
                     continue
+                target = destination.joinpath(*entry.path.parts)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(info) as source, target.open("wb") as output:
+                with archive.open(info_by_path[entry.path]) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output, length=1024 * 1024)
+                _make_archive_file_executable(target, entry)
+            _materialize_archive_links(destination, entries, resolved_links)
         return
     try:
         tar_archive = tarfile.open(path, mode="r:*")
@@ -1647,26 +1707,54 @@ def _extract_source_archive(path: Path, destination: Path) -> None:
         raise SourceError("Unsupported or malformed source archive", source=str(path)) from exc
     with tar_archive:
         members = tar_archive.getmembers()
-        if len(members) > max_files or sum(item.size for item in members) > max_size:
+        if len(members) > max_files:
             raise SourceError("Source archive exceeds extraction safety limits", source=str(path))
-        seen_paths = set()
+        entries = []
+        member_by_path: dict[PurePosixPath, tarfile.TarInfo] = {}
+        tar_seen_paths: set[str] = set()
         for member in members:
             relative = _safe_archive_path(member.name, path)
-            _reject_archive_path_collision(relative, member.name, seen_paths)
-            if member.issym() or member.islnk() or member.isdev():
-                raise SourceError("Source archives may not contain links or devices", source=member.name)
-            target = destination.joinpath(*relative.parts)
+            _reject_archive_path_collision(relative, member.name, tar_seen_paths)
             if member.isdir():
-                target.mkdir(parents=True, exist_ok=True)
+                entry = _SourceArchiveEntry(relative, "directory")
+            elif member.isfile():
+                entry = _SourceArchiveEntry(
+                    relative,
+                    "file",
+                    size=member.size,
+                    executable=bool(member.mode & 0o111),
+                )
+            elif member.issym() or member.islnk():
+                entry = _SourceArchiveEntry(
+                    relative,
+                    "link",
+                    link_target=_safe_link_target(
+                        relative,
+                        member.linkname,
+                        path,
+                        relative_to_parent=member.issym(),
+                    ),
+                )
+            else:
+                raise SourceError("Source archives may not contain special files", source=member.name)
+            entries.append(entry)
+            member_by_path[relative] = member
+        resolved_links = _validate_source_archive_plan(entries, path, max_size=max_size)
+        for entry in entries:
+            if entry.kind == "directory":
+                destination.joinpath(*entry.path.parts).mkdir(parents=True, exist_ok=True)
+        for entry in entries:
+            if entry.kind != "file":
                 continue
-            if not member.isfile():
-                continue
+            target = destination.joinpath(*entry.path.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
-            tar_source = tar_archive.extractfile(member)
+            tar_source = tar_archive.extractfile(member_by_path[entry.path])
             if tar_source is None:
-                raise SourceError("Unable to read source archive member", source=member.name)
+                raise SourceError("Unable to read source archive member", source=entry.path.as_posix())
             with tar_source, target.open("wb") as output:
                 shutil.copyfileobj(tar_source, output, length=1024 * 1024)
+            _make_archive_file_executable(target, entry)
+        _materialize_archive_links(destination, entries, resolved_links)
 
 
 def _safe_archive_path(name: str, archive: Path) -> PurePosixPath:
@@ -1675,12 +1763,129 @@ def _safe_archive_path(name: str, archive: Path) -> PurePosixPath:
         not name
         or "\x00" in name
         or "\\" in name
+        or _WINDOWS_DRIVE_PATH.match(name)
         or relative.is_absolute()
         or not relative.parts
         or ".." in relative.parts
     ):
         raise SourceError("Unsafe path in source archive", source=str(archive), remediation=name)
     return relative
+
+
+def _safe_link_target(
+    link_path: PurePosixPath,
+    linkname: str,
+    archive: Path,
+    *,
+    relative_to_parent: bool,
+) -> PurePosixPath:
+    raw_target = PurePosixPath(linkname)
+    if (
+        not linkname
+        or "\x00" in linkname
+        or "\\" in linkname
+        or _WINDOWS_DRIVE_PATH.match(linkname)
+        or raw_target.is_absolute()
+    ):
+        raise SourceError("Unsafe link target in source archive", source=str(archive), remediation=linkname)
+    parts = list(link_path.parent.parts) if relative_to_parent else []
+    for part in raw_target.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise SourceError("Unsafe link target in source archive", source=str(archive), remediation=linkname)
+            parts.pop()
+            continue
+        parts.append(part)
+    if not parts:
+        raise SourceError("Unsafe link target in source archive", source=str(archive), remediation=linkname)
+    return PurePosixPath(*parts)
+
+
+def _validate_source_archive_plan(
+    entries: list[_SourceArchiveEntry],
+    archive: Path,
+    *,
+    max_size: int,
+) -> dict[PurePosixPath, PurePosixPath]:
+    by_path = {entry.path: entry for entry in entries}
+    namespace: dict[str, tuple[str, str]] = {}
+    for entry in entries:
+        for index in range(1, len(entry.path.parts) + 1):
+            part_path = PurePosixPath(*entry.path.parts[:index]).as_posix()
+            kind = entry.kind if index == len(entry.path.parts) else "directory"
+            folded = part_path.casefold()
+            previous = namespace.get(folded)
+            if previous is not None and (previous[0] != part_path or previous[1] != kind):
+                raise SourceError("Source archive contains a colliding path namespace", source=entry.path.as_posix())
+            namespace[folded] = (part_path, kind)
+
+    resolved: dict[PurePosixPath, PurePosixPath] = {}
+
+    def resolve(link: _SourceArchiveEntry) -> PurePosixPath:
+        existing = resolved.get(link.path)
+        if existing is not None:
+            return existing
+        chain: list[_SourceArchiveEntry] = []
+        chain_paths: set[PurePosixPath] = set()
+        current = link
+        while True:
+            existing = resolved.get(current.path)
+            if existing is not None:
+                final = existing
+                break
+            if current.path in chain_paths:
+                raise SourceError("Source archive contains a cyclic link", source=current.path.as_posix())
+            chain.append(current)
+            chain_paths.add(current.path)
+            target_path = current.link_target
+            target = by_path.get(target_path) if target_path is not None else None
+            if target is None:
+                raise SourceError("Source archive contains a dangling link", source=current.path.as_posix())
+            if target.kind == "directory":
+                raise SourceError("Source archive links may not target directories", source=current.path.as_posix())
+            if target.kind == "file":
+                final = target.path
+                break
+            current = target
+        for item in chain:
+            resolved[item.path] = final
+        return final
+
+    total_size = sum(entry.size for entry in entries if entry.kind == "file")
+    for entry in entries:
+        if entry.kind != "link":
+            continue
+        final = resolve(entry)
+        total_size += by_path[final].size
+        if total_size > max_size:
+            raise SourceError("Source archive exceeds extraction safety limits", source=str(archive))
+    if total_size > max_size:
+        raise SourceError("Source archive exceeds extraction safety limits", source=str(archive))
+    return resolved
+
+
+def _materialize_archive_links(
+    destination: Path,
+    entries: list[_SourceArchiveEntry],
+    resolved_links: dict[PurePosixPath, PurePosixPath],
+) -> None:
+    by_path = {entry.path: entry for entry in entries}
+    for entry in entries:
+        if entry.kind != "link":
+            continue
+        source = destination.joinpath(*resolved_links[entry.path].parts)
+        target = destination.joinpath(*entry.path.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with source.open("rb") as input_file, target.open("wb") as output:
+            shutil.copyfileobj(input_file, output, length=1024 * 1024)
+        _make_archive_file_executable(target, by_path[resolved_links[entry.path]])
+
+
+def _make_archive_file_executable(path: Path, entry: _SourceArchiveEntry) -> None:
+    if entry.executable:
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
 def _reject_archive_path_collision(relative: PurePosixPath, original: str, seen_paths: set[str]) -> None:

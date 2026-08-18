@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import io
 import json
 import shutil
 import stat
 import subprocess
 import sys
 import sysconfig
+import tarfile
 import warnings
 import zipfile
 from dataclasses import replace
@@ -20,6 +22,7 @@ from conftest import build_index, file_spec
 from packaging.version import Version
 
 import depfix
+import depfix.resolver as resolver_module
 from depfix.cache import Cache, _validate_network_url
 from depfix.cli import main as cli_main
 from depfix.config import ImportDeclaration, ProjectConfig
@@ -1164,6 +1167,186 @@ def test_source_archives_reject_duplicate_and_case_colliding_paths(
             archive.writestr(members[1], "second")
     with pytest.raises(SourceError, match="duplicate or case-colliding"):
         _extract_source_archive(source, tmp_path / "out")
+
+
+def test_tar_source_archive_materializes_safe_forward_links_as_regular_files(tmp_path: Path) -> None:
+    source = tmp_path / "linked.tar.gz"
+    with tarfile.open(source, "w:gz") as archive:
+        for name, linkname, link_type in [
+            ("pkg/README", "README.rst", tarfile.SYMTYPE),
+            ("pkg/HARD_README", "pkg/README.rst", tarfile.LNKTYPE),
+            ("pkg/docs/NESTED_README", "../README.rst", tarfile.SYMTYPE),
+            ("pkg/CHAIN", "README", tarfile.SYMTYPE),
+        ]:
+            member = tarfile.TarInfo(name)
+            member.type = link_type
+            member.linkname = linkname
+            archive.addfile(member)
+        data = b"safe archive contents\n"
+        member = tarfile.TarInfo("pkg/README.rst")
+        member.size = len(data)
+        member.mode = 0o755
+        archive.addfile(member, io.BytesIO(data))
+
+    destination = tmp_path / "out"
+    _extract_source_archive(source, destination)
+
+    for name in ["README", "HARD_README", "docs/NESTED_README", "CHAIN"]:
+        materialized = destination / "pkg" / name
+        assert materialized.read_bytes() == data
+        assert materialized.is_file()
+        assert not materialized.is_symlink()
+        assert materialized.stat().st_mode & stat.S_IXUSR
+
+
+def test_zip_source_archive_materializes_safe_forward_symlink_as_regular_file(tmp_path: Path) -> None:
+    source = tmp_path / "linked.zip"
+    link = zipfile.ZipInfo("pkg/README")
+    link.create_system = 3
+    link.external_attr = (stat.S_IFLNK | 0o777) << 16
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr(link, "README.rst")
+        archive.writestr("pkg/README.rst", "safe zip contents\n")
+
+    destination = tmp_path / "out"
+    _extract_source_archive(source, destination)
+
+    materialized = destination / "pkg" / "README"
+    assert materialized.read_text(encoding="utf-8") == "safe zip contents\n"
+    assert materialized.is_file()
+    assert not materialized.is_symlink()
+
+
+@pytest.mark.parametrize("linkname", ["/outside", "../../../outside", "missing", "C:/outside", "sub\\target"])
+def test_source_archives_reject_unsafe_or_dangling_link_targets_before_extraction(
+    tmp_path: Path,
+    linkname: str,
+) -> None:
+    source = tmp_path / "unsafe.tar"
+    with tarfile.open(source, "w") as archive:
+        member = tarfile.TarInfo("pkg/link")
+        member.type = tarfile.SYMTYPE
+        member.linkname = linkname
+        archive.addfile(member)
+        data = b"content"
+        member = tarfile.TarInfo("pkg/target")
+        member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+    destination = tmp_path / "out"
+    outside = tmp_path / "outside"
+
+    with pytest.raises(SourceError, match="Unsafe link target|dangling link"):
+        _extract_source_archive(source, destination)
+
+    assert not outside.exists()
+    assert not destination.exists() or not tuple(destination.iterdir())
+
+
+@pytest.mark.parametrize("name", ["../outside", "/outside", "C:/outside", "pkg\\outside"])
+def test_source_archives_reject_nonportable_member_paths_without_external_writes(tmp_path: Path, name: str) -> None:
+    source = tmp_path / "unsafe.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr(name, "content")
+
+    with pytest.raises(SourceError, match="Unsafe path"):
+        _extract_source_archive(source, tmp_path / "out")
+
+    assert not (tmp_path / "outside").exists()
+
+
+def test_source_archives_reject_link_cycles_and_directory_targets(tmp_path: Path) -> None:
+    for filename, members, match in [
+        (
+            "cycle.tar",
+            [("pkg/one", "two", tarfile.SYMTYPE), ("pkg/two", "one", tarfile.SYMTYPE)],
+            "cyclic link",
+        ),
+        (
+            "directory.tar",
+            [("pkg/link", "directory", tarfile.SYMTYPE), ("pkg/directory", "", tarfile.DIRTYPE)],
+            "target directories",
+        ),
+    ]:
+        source = tmp_path / filename
+        with tarfile.open(source, "w") as archive:
+            for name, linkname, member_type in members:
+                member = tarfile.TarInfo(name)
+                member.type = member_type
+                member.linkname = linkname
+                archive.addfile(member)
+        with pytest.raises(SourceError, match=match):
+            _extract_source_archive(source, tmp_path / f"out-{filename}")
+
+
+@pytest.mark.parametrize("member_type", [tarfile.CHRTYPE, tarfile.FIFOTYPE, b"s"])
+def test_source_archives_reject_device_fifo_and_socket_members(tmp_path: Path, member_type: bytes) -> None:
+    source = tmp_path / "special.tar"
+    with tarfile.open(source, "w") as archive:
+        member = tarfile.TarInfo("pkg/special")
+        member.type = member_type
+        archive.addfile(member)
+
+    with pytest.raises(SourceError, match="special files"):
+        _extract_source_archive(source, tmp_path / "out")
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        (("pkg", "file"), ("pkg/child", "file")),
+        (("Pkg/first", "file"), ("pkg/second", "file")),
+    ],
+)
+def test_source_archives_reject_file_directory_and_implicit_case_collisions(
+    tmp_path: Path,
+    members: tuple[tuple[str, str], tuple[str, str]],
+) -> None:
+    source = tmp_path / "collision.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        for name, value in members:
+            archive.writestr(name, value)
+
+    with pytest.raises(SourceError, match="colliding path namespace"):
+        _extract_source_archive(source, tmp_path / "out")
+
+
+def test_source_archive_limits_include_materialized_link_contents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "amplified.tar"
+    with tarfile.open(source, "w") as archive:
+        data = b"1234"
+        member = tarfile.TarInfo("pkg/data")
+        member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+        member = tarfile.TarInfo("pkg/copy")
+        member.type = tarfile.SYMTYPE
+        member.linkname = "data"
+        archive.addfile(member)
+    monkeypatch.setattr(resolver_module, "_SOURCE_ARCHIVE_MAX_SIZE", 7)
+
+    with pytest.raises(SourceError, match="safety limits"):
+        _extract_source_archive(source, tmp_path / "out")
+
+
+def test_source_archive_resolves_long_link_chains_without_recursion(tmp_path: Path) -> None:
+    source = tmp_path / "chain.tar"
+    with tarfile.open(source, "w") as archive:
+        for index in range(1_100):
+            member = tarfile.TarInfo(f"pkg/link-{index}")
+            member.type = tarfile.SYMTYPE
+            member.linkname = f"link-{index + 1}"
+            archive.addfile(member)
+        data = b"final"
+        member = tarfile.TarInfo("pkg/link-1100")
+        member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+
+    _extract_source_archive(source, tmp_path / "out")
+
+    assert (tmp_path / "out" / "pkg" / "link-0").read_bytes() == data
+    assert not (tmp_path / "out" / "pkg" / "link-0").is_symlink()
 
 
 def test_network_policy_rejects_insecure_and_unlisted_artifact_hosts() -> None:

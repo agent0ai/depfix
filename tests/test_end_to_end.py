@@ -104,6 +104,23 @@ def test_setuptools_75_imports_both_public_modules_explicitly_and_by_default(tmp
         reset_configuration()
 
 
+@pytest.mark.live
+@pytest.mark.skipif(
+    os.environ.get("DEPFIX_RUN_LIVE_TESTS") != "1",
+    reason="set DEPFIX_RUN_LIVE_TESTS=1 to exercise published PyPI artifacts",
+)
+def test_tinysegmenter_source_archive_builds_without_persisting_its_symlink(tmp_path: Path) -> None:
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    try:
+        tinysegmenter = depfix.import_module("tinysegmenter==0.3")
+        assert tinysegmenter.__depfix_version__ == "0.3"
+        assert tinysegmenter.TinySegmenter().tokenize("私の名前は中野です")
+        assert not any(path.is_symlink() for path in (tmp_path / "cache").rglob("*"))
+    finally:
+        reset_runtime_state()
+        reset_configuration()
+
+
 def test_reload_failure_cleanup_and_thread_identity(tmp_path: Path, wheel_factory) -> None:
     good = wheel_factory("reload-demo", "1.0.0", {"reloadable/__init__.py": "VALUE = 1\n"})
     bad = wheel_factory("failure-demo", "1.0.0", {"failure/__init__.py": "raise RuntimeError('boom')\n"})

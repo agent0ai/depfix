@@ -101,6 +101,13 @@
 - Legacy index and wheel `Requires-Python` metadata may normalize numeric ordering wildcards to their exact release-prefix
   interval bounds. Valid PEP 440 remains unchanged, and unrelated or ambiguous malformed specifiers remain hard failures;
   graph and inspection-cache records use the canonical repaired bound.
+- Source archives validate their complete portable namespace before extraction. Contained tar symlinks/hard links and ZIP
+  symlink entries may resolve through forward or chained references only to regular files; Depfix copies the final contents
+  and executable state without creating filesystem links. Link copies count toward extraction limits, while escaping,
+  dangling, cyclic, directory, colliding, and special-file entries remain hard failures.
+- Missing Simple API artifact sizes are learned during bounded hash-verified download. Exact pins may retain uv's yanked
+  selection, while range selection excludes yanked files. Wheel ZIP link attributes are materialized as ordinary payloads,
+  and complete RECORD verification accepts Python-guaranteed secure SHA-2, SHA-3, and BLAKE2 algorithms.
 - `depfix pip install` and `project.install_packages()` resolve package/requirement-file roots as one store-only group,
   persist an exact cache manifest, materialize verified targets, and never invoke environment installation or import
   activation. Requirement constraints apply to matching roots and dependency edges across every selected graph. The CLI
