@@ -43,6 +43,21 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.11.1 — 2026-08-18
+
+- PyPI: `https://pypi.org/project/depfix/0.11.1/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.11.1`
+- Wheel SHA-256: `0f7ddbbb8fc56b59e5ca28426bf3e5e54bbd4d587dc899ff5f4635102cd6aaf4`
+- Sdist SHA-256: `7309782d250045702735f6845b5b09e5d6e2df781bea793706ad87fb2633ec64`
+- Published from commit `3f91c3cf09e3d6b4b7ffb737e4e8550644a0d8dc` by protected workflow run
+  `https://github.com/agent0ai/depfix/actions/runs/32147276913` after its tag-bound request, complete quality and platform
+  matrix, distribution, hidden-draft staging, OIDC publication, public-index verification, and release finalization gates
+  passed on attempt 1.
+- PyPI and GitHub expose exactly the wheel and source archive byte for byte. Both PyPI attestations bind their artifact
+  subjects and digests to `agent0ai/depfix`, `publish-pypi.yml`, annotated `v0.11.1`, the release commit, the protected
+  `pypi` environment, and the workflow attempt. A credential-free no-cache public-index installation verified version and
+  import identity, then loaded Rich 15's dynamic Unicode table and returned `cell_len("👍") == 2`.
+
 ### 0.11.0 — 2026-08-18
 
 - PyPI: `https://pypi.org/project/depfix/0.11.0/`
