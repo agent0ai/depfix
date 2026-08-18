@@ -43,6 +43,27 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.11.3 — 2026-08-18
+
+- PyPI: `https://pypi.org/project/depfix/0.11.3/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.11.3`
+- Wheel SHA-256: `65d1010aa0aec5f612170fd4a57311a2f3f8b5cb8727aee479cbd7a9b74add53`
+- Sdist SHA-256: `92c51ad112fcdcea566c227f9ba60d2b6280cf8ac14e8f9fecd350e06c0a7257`
+- Published from commit `c6f2a4b19eac7a1101677a63a6327d29562f9bd3` by protected workflow run
+  `https://github.com/agent0ai/depfix/actions/runs/32165460875` after its tag-bound request, complete quality and platform
+  matrix, distribution, hidden-draft staging, OIDC publication, public-index verification, and release finalization gates
+  passed on attempt 1.
+- PyPI and GitHub expose exactly the wheel and source archive byte for byte. Both PyPI attestations bind their artifact
+  subjects and digests to `agent0ai/depfix`, `publish-pypi.yml`, annotated `v0.11.3`, the release commit, the protected
+  `pypi` environment, and workflow attempt 1. A credential-free no-cache public-index installation verified 0.11.3,
+  built and imported `tinysegmenter==0.3`, and found no filesystem links in the fresh Depfix cache.
+
+### 0.11.2 — 2026-08-18 (superseded before PyPI publication)
+
+- Tag CI exposed Windows-specific ZIP backslash-name normalization and a POSIX-only executable-bit assertion. Validation
+  failed before distribution staging, OIDC, or PyPI publication; 0.11.3 contains the correction without moving the
+  immutable tag.
+
 ### 0.11.1 — 2026-08-18
 
 - PyPI: `https://pypi.org/project/depfix/0.11.1/`
