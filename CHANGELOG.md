@@ -4,6 +4,8 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.11.2 - 2026-08-18
+
 - Restored pip/uv-compatible source builds for archives such as `tinysegmenter==0.3` by validating contained tar and ZIP
   links against the complete archive namespace and materializing their resolved regular-file contents without creating
   filesystem links. Unsafe paths, targets, collisions, special files, and extraction-limit violations remain rejected.
