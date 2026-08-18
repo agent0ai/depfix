@@ -1,7 +1,7 @@
 # pip and uv compatibility-gate audit
 
 This bounded audit was performed on 2026-08-18 against pip 26.2, uv 0.12.5, the current PyPA specifications, and the
-Depfix 0.11.1 acquisition, source-build, wheel-inspection, requirement-normalization, and materialization paths. It does
+Depfix acquisition, source-build, wheel-inspection, requirement-normalization, and materialization paths. It does
 not extend Depfix to new VCS backends or distribution formats.
 
 The triggering `tinysegmenter==0.3` source archive contains `tinysegmenter-0.3/README` as a tar symlink to the internal
@@ -20,7 +20,8 @@ regular file `README.rst`. Clean pip and uv wheel builds both succeed. Depfix 0.
 | Archive absolute/traversal/drive/backslash paths, duplicate or case-folding collisions, and file/directory namespace collisions rejected | pip and uv enforce containment but can differ by platform on separator and case behavior. | Required Depfix invariant | Retain and strengthen pre-write namespace validation because one immutable target must be safe and deterministic on Linux, macOS, and Windows. |
 | Device, FIFO, socket, unknown special members, and directory link targets rejected | pip's data filter rejects dangerous special entries; no supported package build needs them. | Equivalent security expressed differently | Retain. Depfix source staging accepts only directories, regular files, and links provably resolving to regular files. |
 | File-count and expanded-size limits | pip/uv extraction is bounded by host resources rather than Depfix's fixed limits. | Required Depfix invariant | Retain for the shared service/store threat model. Materialized link copies now count toward the expanded-size limit. |
-| Complete wheel RECORD coverage, size/hash matching, artifact SHA-256, filename/metadata identity, and compatible tags required | pip and uv accept some malformed RECORD details in practice, while the wheel specification requires hash verification. | Required Depfix invariant | Retain. Depfix promotes immutable, content-addressed targets and later trusts their verified payload inventory. |
+| Complete wheel RECORD coverage required | The wheel specification requires every archive file other than `RECORD`, `RECORD.jws`, and `RECORD.p7s` to be listed and hashed. pip installs archive members missing from `RECORD` and writes them into the installed inventory; uv installs the same incomplete wheels through its repaired installed inventory. | Unnecessary overrestriction after artifact authentication | Require the expected enclosing artifact SHA-256, validate the complete archive namespace, and derive the immutable payload manifest and directory namespace from every materialized archive member. Missing rows and missing hash/size claims are tolerated, but every supplied secure hash or size claim for an archived member must match. |
+| Missing, duplicate, unsafe, or malformed RECORD inventory | A wheel must contain `RECORD`; incomplete coverage is distinct from an inventory that cannot be parsed unambiguously. pip/uv tolerance does not replace Depfix's portable immutable-store constraints. | Required Depfix invariant | Require exactly one top-level UTF-8 CSV `RECORD`; reject duplicate or malformed rows, unsafe paths, insecure/unknown hashes, and invalid sizes. Safe stale extra rows and arbitrary row ordering do not affect the archive-derived payload identity. |
 | HTTPS defaults, redirect checks, allowlists, exact frozen hashes, and provenance | pip/uv allow broader operator configuration. | Required Depfix invariant | Retain as explicit network and prepared/offline guarantees; controlled HTTP remains an opt-in development policy. |
 | Strict wheel/archive path portability and native-package loading policy | pip/uv install into one environment and do not provide Depfix's cross-platform store or multiversion runtime guarantees. | Required Depfix invariant | Retain cross-platform namespace restrictions and one compatible process owner for native imports. |
 | PEP 508/440 parsing plus narrow legacy `Requires-Python` repair | Current pip/uv reject unrelated malformed requirements; Depfix already limits repair to unambiguous historical numeric ordering wildcards. | Equivalent security expressed differently | Retain. No additional requirement-normalization incompatibility was reproduced. |
@@ -34,11 +35,14 @@ regular file `README.rst`. Clean pip and uv wheel builds both succeed. Depfix 0.
   expansion limits.
 - Synthetic wheels: SHA-512 RECORD rows and link mode bits were installed with pip 26.2 and uv 0.12.5, then exercised
   through Depfix's stricter RECORD and immutable-target path.
+- Real incomplete wheel: Agent Zero's `liteparse==2.0.3` Linux AArch64 wheel
+  (`sha256:1dd3816c7fadd20f77a7697e8511707033caadceb13d9452cf784e9b0626a2cc`) contains 12 archive members but 11
+  `RECORD` rows. Both pip and uv install the omitted `liteparse/libpdfium.so`; Depfix materializes it under the same
+  archive-derived policy as synthetic unlisted Python, native, and supported `.data` payloads.
 - Authoritative references: [pip archive extraction](https://github.com/pypa/pip/blob/main/src/pip/_internal/utils/unpacking.py),
   [Simple repository API](https://packaging.python.org/en/latest/specifications/simple-repository-api/),
   [file yanking](https://packaging.python.org/en/latest/specifications/file-yanking/), and
   [wheel format](https://packaging.python.org/en/latest/specifications/binary-distribution-format/).
 
-The audit did not find another unnecessary compatibility rejection within the supported acquisition/build/materialization
-boundary. It intentionally did not treat unsupported package formats, additional VCS backends, resolver semantics,
+The audit intentionally does not treat unsupported package formats, additional VCS backends, resolver semantics,
 execution sandboxing, or native multiversion isolation as pip-compatibility work.

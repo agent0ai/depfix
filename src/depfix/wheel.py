@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -330,6 +332,7 @@ def _validate_members(
     names: list[str] = []
     seen: set[str] = set()
     folded: set[str] = set()
+    member_kinds: dict[str, bool] = {}
     for info in infos:
         name = info.filename
         path = PurePosixPath(name)
@@ -347,7 +350,14 @@ def _validate_members(
             raise CacheError("Duplicate or case-folding-colliding wheel member", remediation=name)
         seen.add(normalized)
         folded.add(normalized.casefold())
+        member_kinds[normalized.casefold()] = info.is_dir()
         names.append(normalized)
+    for name in names:
+        parts = PurePosixPath(name).parts
+        for index in range(1, len(parts)):
+            parent = str(PurePosixPath(*parts[:index])).casefold()
+            if parent in member_kinds and not member_kinds[parent]:
+                raise CacheError("Wheel contains a file/directory namespace collision", remediation=name)
     return names
 
 
@@ -355,34 +365,70 @@ def _verify_record(archive: zipfile.ZipFile, names: list[str]) -> None:
     records = [name for name in names if name.endswith(".dist-info/RECORD") and len(PurePosixPath(name).parts) == 2]
     if len(records) != 1:
         raise IntegrityError("Wheel must contain exactly one top-level RECORD file")
-    rows = csv.reader(archive.read(records[0]).decode("utf-8").splitlines())
+    try:
+        record_text = archive.read(records[0]).decode("utf-8")
+        rows = list(csv.reader(io.StringIO(record_text, newline=""), strict=True))
+    except (UnicodeDecodeError, csv.Error) as exc:
+        raise IntegrityError("Malformed wheel RECORD encoding") from exc
     record: dict[str, tuple[str, str]] = {}
     for row in rows:
         if len(row) != 3:
             raise IntegrityError("Malformed wheel RECORD row")
+        _validate_record_path(row[0])
         if row[0] in record:
             raise IntegrityError("Duplicate wheel RECORD path", remediation=row[0])
+        _validate_record_fields(row[0], row[1], row[2])
         record[row[0]] = (row[1], row[2])
     directories = {str(PurePosixPath(info.filename)) for info in archive.infolist() if info.is_dir()}
     for name in names:
         if name in directories:
             continue
         if name not in record:
-            raise IntegrityError("Wheel member is absent from RECORD", remediation=name)
+            # The wheel is noncompliant, but the authenticated enclosing artifact
+            # and Depfix's complete extracted-payload manifest still cover it.
+            continue
         hash_field, size_field = record[name]
         data = archive.read(name)
         if size_field and int(size_field) != len(data):
             raise IntegrityError("Wheel RECORD size mismatch", remediation=name)
         if not hash_field:
-            if name != records[0]:
-                raise IntegrityError("Wheel member is missing its RECORD hash", remediation=name)
             continue
         algorithm, separator, encoded = hash_field.partition("=")
-        if separator != "=" or algorithm not in _SUPPORTED_RECORD_HASHES:
-            raise IntegrityError("Unsupported or insecure wheel RECORD hash", remediation=name)
+        assert separator == "=" and algorithm in _SUPPORTED_RECORD_HASHES
         actual = base64.urlsafe_b64encode(hashlib.new(algorithm, data).digest()).rstrip(b"=").decode("ascii")
         if actual != encoded:
             raise IntegrityError("Wheel RECORD hash mismatch", remediation=name)
+
+
+def _validate_record_path(name: str) -> None:
+    path = PurePosixPath(name)
+    if (
+        not name
+        or "\\" in name
+        or path.is_absolute()
+        or ".." in path.parts
+        or _DRIVE.match(name)
+        or any(":" in part for part in path.parts)
+        or str(path) != name
+    ):
+        raise IntegrityError("Unsafe or malformed wheel RECORD path", remediation=name)
+
+
+def _validate_record_fields(name: str, hash_field: str, size_field: str) -> None:
+    if size_field and re.fullmatch(r"[0-9]+", size_field) is None:
+        raise IntegrityError("Malformed wheel RECORD size", remediation=name)
+    if not hash_field:
+        return
+    algorithm, separator, encoded = hash_field.partition("=")
+    if separator != "=" or algorithm not in _SUPPORTED_RECORD_HASHES:
+        raise IntegrityError("Unsupported or insecure wheel RECORD hash", remediation=name)
+    try:
+        padding = "=" * (-len(encoded) % 4)
+        decoded = base64.b64decode(encoded + padding, altchars=b"-_", validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise IntegrityError("Malformed wheel RECORD hash", remediation=name) from exc
+    if len(decoded) != hashlib.new(algorithm).digest_size:
+        raise IntegrityError("Malformed wheel RECORD hash", remediation=name)
 
 
 def _installed_relative(name: str) -> str | None:

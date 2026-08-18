@@ -6,7 +6,10 @@ import contextlib
 import dataclasses
 import hashlib
 import http.client
+import importlib.util
+import io
 import json
+import marshal
 import math
 import os
 import platform
@@ -174,6 +177,94 @@ class UsageHandle:
             _unregister_usage(key)
 
 
+def _target_payload_files(target: Path, manifested: set[str] | None = None) -> set[str] | None:
+    """Return regular payload files, rejecting unexpected filesystem entries."""
+    try:
+        if not stat.S_ISDIR(target.lstat().st_mode):
+            return None
+    except OSError:
+        return None
+    files: set[str] = set()
+    directories: set[str] = set()
+    derived_bytecode_directories: set[str] = set()
+    pending = [target]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = tuple(os.scandir(directory))
+        except OSError:
+            return None
+        for entry in entries:
+            path = Path(entry.path)
+            relative = path.relative_to(target).as_posix()
+            try:
+                mode = entry.stat(follow_symlinks=False).st_mode
+            except OSError:
+                return None
+            if stat.S_ISDIR(mode):
+                directories.add(relative)
+                pending.append(path)
+            elif not stat.S_ISREG(mode):
+                return None
+            elif relative != ".complete":
+                if (
+                    manifested is not None
+                    and relative not in manifested
+                    and _is_derived_bytecode(target, path, relative, manifested)
+                ):
+                    derived_bytecode_directories.add(Path(*relative.split("/")).parent.as_posix())
+                else:
+                    files.add(relative)
+    if manifested is not None:
+        expected_directories = {
+            parent.as_posix()
+            for relative in manifested
+            for parent in Path(*relative.split("/")).parents
+            if parent.as_posix() != "."
+        }
+        expected_directories.update(derived_bytecode_directories)
+        if directories != expected_directories:
+            return None
+    return files
+
+
+def _is_derived_bytecode(target: Path, bytecode: Path, relative: str, manifested: set[str]) -> bool:
+    """Accept only bytecode whose complete body recompiles from manifested source."""
+    relative_path = Path(*relative.split("/"))
+    if relative_path.suffix != ".pyc" or relative_path.parent.name != "__pycache__":
+        return False
+    try:
+        source_relative = Path(importlib.util.source_from_cache(str(relative_path))).as_posix()
+        source = target / source_relative
+        bytecode_data = bytecode.read_bytes()
+        source_data = source.read_bytes()
+        source_stat = source.stat()
+        bytecode_body = io.BytesIO(bytecode_data[16:])
+        actual_code = marshal.load(bytecode_body)
+        expected_code = compile(source_data, str(source), "exec", dont_inherit=True, optimize=sys.flags.optimize)
+    except (EOFError, NotImplementedError, OSError, SyntaxError, TypeError, ValueError):
+        return False
+    if source_relative not in manifested or len(bytecode_data) < 16:
+        return False
+    header = bytecode_data[:16]
+    if (
+        header[:4] != importlib.util.MAGIC_NUMBER
+        or bytecode_body.tell() != len(bytecode_data) - 16
+        or actual_code != expected_code
+    ):
+        return False
+    flags = int.from_bytes(header[4:8], "little")
+    if flags & ~0x03:
+        return False
+    if flags & 0x01:
+        return header[8:16] == importlib.util.source_hash(source_data)
+    recorded_mtime = int.from_bytes(header[8:12], "little")
+    recorded_size = int.from_bytes(header[12:16], "little")
+    return (
+        recorded_mtime == int(source_stat.st_mtime) & 0xFFFFFFFF and recorded_size == source_stat.st_size & 0xFFFFFFFF
+    )
+
+
 class Cache:
     def __init__(
         self,
@@ -225,22 +316,29 @@ class Cache:
             return False
         file_hashes = data.get("file_hashes")
         if isinstance(file_hashes, dict) and file_hashes:
+            if not all(
+                isinstance(relative, str) and isinstance(expected, str) for relative, expected in file_hashes.items()
+            ):
+                return False
+            present_files = _target_payload_files(target, set(file_hashes))
+            if present_files is None:
+                return False
+            if present_files != set(file_hashes):
+                return False
             for relative, expected in file_hashes.items():
-                if not isinstance(relative, str) or not isinstance(expected, str):
-                    return False
                 path = target / relative
-                if not path.is_file() or _hash_file(path) != expected:
+                try:
+                    mode = path.lstat().st_mode
+                except OSError:
+                    return False
+                if not stat.S_ISREG(mode) or _hash_file(path) != expected:
                     return False
             return True
         installed_files = data.get("installed_files")
         if not isinstance(installed_files, int) or installed_files < 1:
             return False
-        present = sum(
-            1
-            for path in target.rglob("*")
-            if path.is_file() and path.name != ".complete" and path.suffix != ".pyc" and "__pycache__" not in path.parts
-        )
-        return present >= installed_files
+        present_files = _target_payload_files(target)
+        return present_files is not None and len(present_files) >= installed_files
 
     def verify_blob(self, sha256: str, *, size: int | None = None) -> Path:
         path = self.blob_path(sha256)

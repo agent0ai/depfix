@@ -6,7 +6,8 @@ the normal Python process authority.
 
 Controls include:
 
-- SHA-256 content addressing, size checks, wheel identity/Core Metadata checks, and full wheel `RECORD` validation;
+- SHA-256 content addressing, size checks, wheel identity/Core Metadata checks, complete archive-derived payload
+  manifests, and verification of every secure hash or size assertion supplied by wheel `RECORD`;
 - HTTPS-only remote artifact downloads, explicit frozen hashes, redirect provenance, bounded resumable retries, and secret
   redaction; exact size and SHA-256 checks still gate promotion after every retry;
 - traversal, absolute/drive path, backslash, special-file, duplicate/case/namespace-collision, file-count, and expanded-size
@@ -16,6 +17,9 @@ Controls include:
 - no credential serialization, optional index/host allowlists, redirect validation, and first-index uv policy to reduce
   dependency-confusion exposure;
 - temporary construction, cross-process locks, read-only immutable targets, and atomic promotion;
+- exact warm-reuse comparison against the complete payload file and directory namespace, rejecting mutation, omission,
+  or unmanifested paths, links, and special entries; unmanifested interpreter bytecode is excluded only when its header
+  and complete executable body exactly match deterministic recompilation of manifested source;
 - no `sys.path` changes or ambient third-party fallback for in-process realms;
 - guarded shared mode prepends only verified cache targets, owns public/requested roots exactly, rejects incompatible
   replacement, and treats private top-level helpers as conventional process-global best effort;

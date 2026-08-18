@@ -4,6 +4,13 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.11.4 - 2026-08-18
+
+- Tolerated safe wheel members omitted from an upstream `RECORD` after authenticating the complete wheel archive, while
+  continuing to reject every invalid supplied hash or size claim. Depfix's own immutable payload manifest now covers the
+  complete materialized file and directory namespace, including omitted native members, and warm/offline verification
+  rejects unmanifested importable content, links, special entries, forged bytecode, and other payload mutations.
+
 ## 0.11.3 - 2026-08-18
 
 - Restored pip/uv-compatible source builds for archives such as `tinysegmenter==0.3` by validating contained tar and ZIP

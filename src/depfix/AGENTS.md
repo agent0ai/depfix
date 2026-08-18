@@ -106,8 +106,13 @@
   and executable state without creating filesystem links. Link copies count toward extraction limits, while escaping,
   dangling, cyclic, directory, colliding, and special-file entries remain hard failures.
 - Missing Simple API artifact sizes are learned during bounded hash-verified download. Exact pins may retain uv's yanked
-  selection, while range selection excludes yanked files. Wheel ZIP link attributes are materialized as ordinary payloads,
-  and complete RECORD verification accepts Python-guaranteed secure SHA-2, SHA-3, and BLAKE2 algorithms.
+  selection, while range selection excludes yanked files. Wheel ZIP link attributes are materialized as ordinary payloads.
+  The expected enclosing SHA-256 and a complete Depfix-owned payload manifest cover every materialized wheel member;
+  parseable incomplete RECORD inventories may omit safe members or claims, while supplied secure SHA-2, SHA-3, and BLAKE2
+  hashes and sizes remain mandatory consistency checks. Warm reuse requires the exact manifested file and directory
+  namespace, including wheel-owned bytecode, and rejects links, special entries, and unmanifested paths except
+  source-backed `__pycache__` bytecode whose complete executable body exactly matches deterministic recompilation of
+  manifested source.
 - `depfix pip install` and `project.install_packages()` resolve package/requirement-file roots as one store-only group,
   persist an exact cache manifest, materialize verified targets, and never invoke environment installation or import
   activation. Requirement constraints apply to matching roots and dependency edges across every selected graph. The CLI

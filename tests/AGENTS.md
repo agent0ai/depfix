@@ -21,6 +21,11 @@
 - Source-archive regressions cover real `tinysegmenter==0.3`, contained tar/ZIP links and hard links, forward/nested/chained
   references, executable targets, portable namespace collisions, unsafe targets and special members, and expanded-size
   accounting without persisting filesystem links.
+- Wheel regressions cover archive-derived manifests for safe unlisted Python, native, signature, and supported `.data`
+  members; missing claims and safe stale rows; malformed, duplicate, insecure, and mismatched RECORD claims; namespace
+  collisions; and warm-reuse rejection of mutation, omission, unmanifested payload files or directories, links, and
+  special entries. Wheel-owned bytecode remains manifested; source-backed interpreter bytecode is accepted only when its
+  complete body matches deterministic recompilation, with forged-header bytecode and trailing bytes rejected.
 - Regressions should assert observable public behavior or a named safety invariant.
 - Standard-import tests reset the dispatcher, persistent defaults, context scopes, runtimes, and configuration.
 - Requirements-default tests cover canonical nested parsing, constraints, markers, relative paths, contextual rejection,

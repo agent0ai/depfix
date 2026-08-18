@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.machinery
 import json
 import os
+import py_compile
 import shlex
 import shutil
 import sqlite3
@@ -1132,6 +1134,135 @@ def test_package_verification_detects_deleted_materialized_payload(tmp_path: Pat
     write_manifest(graph, manifest)
     with pytest.raises(CacheError, match="not completely materialized"):
         verify_manifest(manifest, cache_dir=cache_dir)
+
+
+@pytest.mark.parametrize("filename", ["injected.py", "evil.pyc"])
+def test_package_verification_detects_unmanifested_materialized_payload(
+    tmp_path: Path, wheel_factory, filename: str
+) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    purelib = cache.unpacked_path(artifact.id) / "purelib"
+
+    purelib.chmod(stat.S_IRWXU)
+    injected = purelib / filename
+    injected.write_text("INJECTED = True\n", encoding="utf-8")
+
+    assert not cache.has_package(artifact.sha256)
+    with pytest.raises(CacheError, match="incomplete"):
+        cache.verify_packages()
+
+
+def test_package_verification_rejects_unmanifested_namespace_directory(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    purelib = cache.unpacked_path(artifact.id) / "purelib"
+
+    purelib.chmod(stat.S_IRWXU)
+    (purelib / "injected_namespace").mkdir()
+
+    injected = importlib.machinery.PathFinder.find_spec("injected_namespace", [str(purelib)])
+    assert injected is not None and injected.submodule_search_locations is not None
+    assert not cache.has_package(artifact.sha256)
+
+
+def test_package_verification_accepts_authenticated_interpreter_bytecode(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    purelib = cache.unpacked_path(artifact.id) / "purelib"
+
+    purelib.chmod(stat.S_IRWXU)
+    bytecode = purelib / "__pycache__" / "cache_demo.cpython-311.pyc"
+    bytecode.parent.mkdir()
+    py_compile.compile(str(purelib / "cache_demo.py"), cfile=str(bytecode), doraise=True)
+
+    assert cache.has_package(artifact.sha256)
+    assert cache.verify_packages() == 1
+
+
+def test_package_verification_rejects_bytecode_with_forged_source_header(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    purelib = cache.unpacked_path(artifact.id) / "purelib"
+
+    purelib.chmod(stat.S_IRWXU)
+    bytecode = purelib / "__pycache__" / "cache_demo.cpython-311.pyc"
+    bytecode.parent.mkdir()
+    py_compile.compile(str(purelib / "cache_demo.py"), cfile=str(bytecode), doraise=True)
+    trusted_header = bytecode.read_bytes()[:16]
+
+    forged_source = tmp_path / "forged.py"
+    forged_bytecode = tmp_path / "forged.pyc"
+    forged_source.write_text("VALUE = 9\n", encoding="utf-8")
+    py_compile.compile(str(forged_source), cfile=str(forged_bytecode), doraise=True)
+    bytecode.write_bytes(trusted_header + forged_bytecode.read_bytes()[16:])
+
+    assert not cache.has_package(artifact.sha256)
+
+
+def test_package_verification_rejects_derived_bytecode_with_trailing_bytes(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    purelib = cache.unpacked_path(artifact.id) / "purelib"
+
+    purelib.chmod(stat.S_IRWXU)
+    bytecode = purelib / "__pycache__" / "cache_demo.cpython-311.pyc"
+    bytecode.parent.mkdir()
+    py_compile.compile(str(purelib / "cache_demo.py"), cfile=str(bytecode), doraise=True)
+    bytecode.write_bytes(bytecode.read_bytes() + b"unauthenticated trailer")
+
+    assert not cache.has_package(artifact.sha256)
+
+
+def test_package_verification_counts_manifested_wheel_bytecode(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "cache-bytecode",
+        "1.2.3",
+        {"cache_bytecode.py": "VALUE = 7\n", "cache_bytecode.pyc": b"wheel-owned bytecode"},
+    )
+    cache = Cache(tmp_path / "cache")
+    graph = Resolver(cache).resolve(
+        ProjectConfig(
+            tmp_path / ".depfix" / "config.toml",
+            (ImportDeclaration("demo", file_spec(wheel), "cache_bytecode"),),
+            {},
+        )
+    )
+    sync_graph(graph, cache, offline=True)
+    artifact = graph.artifacts[0]
+    bytecode = cache.unpacked_path(artifact.id) / "purelib" / "cache_bytecode.pyc"
+
+    assert cache.has_package(artifact.sha256)
+    bytecode.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    bytecode.write_bytes(b"mutated wheel-owned bytecode")
+    assert not cache.has_package(artifact.sha256)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not generally available on Windows")
+def test_package_verification_rejects_unmanifested_symlinked_package(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    purelib = cache.unpacked_path(artifact.id) / "purelib"
+    external = tmp_path / "evil_package"
+    external.mkdir()
+    (external / "__init__.py").write_text("INJECTED = True\n", encoding="utf-8")
+
+    purelib.chmod(stat.S_IRWXU)
+    (purelib / "evil_package").symlink_to(external, target_is_directory=True)
+
+    assert not cache.has_package(artifact.sha256)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are not available on this platform")
+def test_package_verification_rejects_unmanifested_special_file(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    purelib = cache.unpacked_path(artifact.id) / "purelib"
+
+    purelib.chmod(stat.S_IRWXU)
+    os.mkfifo(purelib / "injected.fifo")
+
+    assert not cache.has_package(artifact.sha256)
 
 
 def test_cache_verify_reports_corrupt_target_omitted_from_inventory(

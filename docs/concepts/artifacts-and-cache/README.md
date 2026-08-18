@@ -7,7 +7,8 @@ materializes verified, environment-specific targets for the import runtime.
 source or index
   → size-bounded artifact download with bounded resume/retry
   → SHA-256 blob
-  → wheel identity, metadata, path, and RECORD checks
+  → wheel identity, metadata, portable path, and supplied RECORD-claim checks
+  → complete archive-derived payload hashes
   → temporary extraction
   → atomic target promotion
   → read-only completed target
@@ -76,6 +77,18 @@ an offline cache. Online manifest repair and bundle creation reacquire and hash-
 Integrity failures never promote partial state. See the
 [threat model](../../operations/threat-model.md) for hostile-input assumptions and
 [deployment modes](../deployment/) for cache preparation and bundles.
+
+Wheel `RECORD` is an upstream consistency input, not Depfix's immutable payload identity. Depfix requires one parseable
+top-level `RECORD`, verifies every secure hash and size that it supplies for an archived member, and rejects malformed,
+duplicate, unsafe, or insecure claims. A standards-noncompliant wheel may omit a safe member, its hash/size, or a stale
+extra row without weakening the store: the expected SHA-256 still authenticates the enclosing wheel, and Depfix hashes
+every materialized member into its own complete manifest. Reuse requires the target's exact payload file and directory
+namespace and every file hash to match that manifest, so a later mutation, omission, or injected path invalidates the
+target.
+Manifested wheel bytecode remains payload. Unmanifested interpreter-generated `__pycache__` bytecode is excluded only
+when both its cache header and complete executable body match deterministic recompilation of a manifested source file;
+a source-matching header alone is insufficient. Its required `__pycache__` directory is the only derived directory;
+other unmanifested files or directories, links, and non-regular filesystem entries invalidate a completed target.
 
 The default per-artifact download limit and per-wheel expanded-size limit are each 1 GiB. A truncated transfer may resume
 up to the bounded attempt count, but only exact expected size and SHA-256 content are promoted.

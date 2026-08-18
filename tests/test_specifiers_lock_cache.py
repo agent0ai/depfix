@@ -217,6 +217,80 @@ def test_malicious_wheel_path_is_rejected(tmp_path: Path) -> None:
     assert not (tmp_path / "escape.py").exists()
 
 
+def _rewrite_record(
+    wheel: Path,
+    transform,
+    *,
+    added_members: dict[str, bytes] | None = None,
+) -> None:  # type: ignore[no-untyped-def]
+    with zipfile.ZipFile(wheel) as archive:
+        members = {info.filename: archive.read(info) for info in archive.infolist()}
+    record_name = next(name for name in members if name.endswith(".dist-info/RECORD"))
+    rows = list(csv.reader(members[record_name].decode("utf-8").splitlines()))
+    transformed = transform(rows)
+    stream = io.StringIO()
+    csv.writer(stream, lineterminator="\n").writerows(transformed)
+    members[record_name] = stream.getvalue().encode()
+    members.update(added_members or {})
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+
+
+@pytest.mark.parametrize(
+    ("archive_path", "installed_path"),
+    [
+        ("record_coverage.py", "purelib/record_coverage.py"),
+        ("record_coverage/native.so", "purelib/record_coverage/native.so"),
+        ("record_coverage-1.0.data/purelib/extra.py", "purelib/extra.py"),
+        ("record_coverage-1.0.data/platlib/extra.so", "platlib/extra.so"),
+        ("record_coverage-1.0.data/data/resource.bin", "data/resource.bin"),
+    ],
+)
+def test_wheel_safe_unlisted_members_use_depfix_payload_manifest(
+    tmp_path: Path,
+    wheel_factory,
+    archive_path: str,
+    installed_path: str,
+) -> None:
+    wheel = wheel_factory("record-coverage", "1.0", {archive_path: b"payload"})
+    _rewrite_record(wheel, lambda rows: [row for row in rows if row[0] != archive_path])
+
+    target = tmp_path / "out"
+    extract_wheel(wheel, target)
+
+    assert (target / installed_path).read_bytes() == b"payload"
+    marker = json.loads((target / ".complete").read_text(encoding="utf-8"))
+    assert marker["artifact_sha256"] == sha256(wheel)
+    assert marker["file_hashes"][installed_path] == hashlib.sha256(b"payload").hexdigest()
+
+
+def test_wheel_tolerates_unhashed_rows_stale_rows_signatures_and_reordering(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory("record-tolerance", "1.0", {"record_tolerance.py": "VALUE = 1\n"})
+
+    def transform(rows: list[list[str]]) -> list[list[str]]:
+        next(row for row in rows if row[0] == "record_tolerance.py")[1] = ""
+        rows.append(["stale-but-safe.py", "sha256=" + "A" * 43, "999"])
+        return list(reversed(rows))
+
+    _rewrite_record(
+        wheel,
+        transform,
+        added_members={
+            "record_tolerance-1.0.dist-info/RECORD.jws": b"legacy signature",
+            "record_tolerance-1.0.dist-info/RECORD.p7s": b"legacy signature",
+        },
+    )
+
+    target = tmp_path / "out"
+    extract_wheel(wheel, target)
+
+    assert (target / "purelib" / "record_tolerance.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    marker = json.loads((target / ".complete").read_text(encoding="utf-8"))
+    assert "purelib/record_tolerance-1.0.dist-info/RECORD.jws" in marker["file_hashes"]
+    assert "purelib/record_tolerance-1.0.dist-info/RECORD.p7s" in marker["file_hashes"]
+
+
 def test_wheel_sha512_record_hashes_are_verified(tmp_path: Path, wheel_factory) -> None:
     wheel = wheel_factory("sha512-demo", "1.0", {"sha512_demo.py": "VALUE = 1\n"})
     with zipfile.ZipFile(wheel) as archive:
@@ -240,14 +314,13 @@ def test_wheel_sha512_record_hashes_are_verified(tmp_path: Path, wheel_factory) 
     assert (tmp_path / "out" / "purelib" / "sha512_demo.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
-@pytest.mark.parametrize("replacement", ["", "sha1=invalid"])
-def test_wheel_rejects_missing_or_insecure_record_hashes(tmp_path: Path, wheel_factory, replacement: str) -> None:
+def test_wheel_rejects_insecure_record_hashes(tmp_path: Path, wheel_factory) -> None:
     wheel = wheel_factory("record-demo", "1.0", {"record_demo.py": "VALUE = 1\n"})
     with zipfile.ZipFile(wheel) as archive:
         members = {info.filename: archive.read(info) for info in archive.infolist()}
         record_name = "record_demo-1.0.dist-info/RECORD"
         rows = list(csv.reader(members[record_name].decode("utf-8").splitlines()))
-    next(row for row in rows if row[0] == "record_demo.py")[1] = replacement
+    next(row for row in rows if row[0] == "record_demo.py")[1] = "sha1=invalid"
     stream = io.StringIO()
     csv.writer(stream, lineterminator="\n").writerows(rows)
     members[record_name] = stream.getvalue().encode()
@@ -255,7 +328,90 @@ def test_wheel_rejects_missing_or_insecure_record_hashes(tmp_path: Path, wheel_f
         for name, data in members.items():
             archive.writestr(name, data)
 
-    with pytest.raises(IntegrityError, match="missing its RECORD hash|Unsupported or insecure"):
+    with pytest.raises(IntegrityError, match="Unsupported or insecure"):
+        extract_wheel(wheel, tmp_path / "out")
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        (1, "sha256=invalid!", "Malformed wheel RECORD hash"),
+        (2, "not-a-size", "Malformed wheel RECORD size"),
+    ],
+)
+def test_wheel_rejects_malformed_record_fields(
+    tmp_path: Path,
+    wheel_factory,
+    field: int,
+    replacement: str,
+    message: str,
+) -> None:
+    wheel = wheel_factory("malformed-record", "1.0", {"malformed_record.py": "VALUE = 1\n"})
+
+    def transform(rows: list[list[str]]) -> list[list[str]]:
+        next(row for row in rows if row[0] == "malformed_record.py")[field] = replacement
+        return rows
+
+    _rewrite_record(wheel, transform)
+    with pytest.raises(IntegrityError, match=message):
+        extract_wheel(wheel, tmp_path / "out")
+
+
+@pytest.mark.parametrize("mismatch", ("hash", "size"))
+def test_wheel_rejects_recorded_member_mismatches(tmp_path: Path, wheel_factory, mismatch: str) -> None:
+    wheel = wheel_factory("record-mismatch", "1.0", {"record_mismatch.py": "VALUE = 1\n"})
+
+    def transform(rows: list[list[str]]) -> list[list[str]]:
+        row = next(row for row in rows if row[0] == "record_mismatch.py")
+        row[1 if mismatch == "hash" else 2] = "sha256=" + "A" * 43 if mismatch == "hash" else "999"
+        return rows
+
+    _rewrite_record(wheel, transform)
+    with pytest.raises(IntegrityError, match=f"RECORD {mismatch} mismatch"):
+        extract_wheel(wheel, tmp_path / "out")
+
+
+def test_wheel_rejects_missing_record(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory("missing-record", "1.0", {"missing_record.py": "VALUE = 1\n"})
+    with zipfile.ZipFile(wheel) as archive:
+        members = {
+            info.filename: archive.read(info)
+            for info in archive.infolist()
+            if not info.filename.endswith(".dist-info/RECORD")
+        }
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    with pytest.raises(IntegrityError, match="exactly one top-level RECORD"):
+        extract_wheel(wheel, tmp_path / "out")
+
+
+def test_wheel_rejects_duplicate_record_rows(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory("duplicate-record", "1.0", {"duplicate_record.py": "VALUE = 1\n"})
+    _rewrite_record(wheel, lambda rows: [*rows, rows[0]])
+    with pytest.raises(IntegrityError, match="Duplicate wheel RECORD path"):
+        extract_wheel(wheel, tmp_path / "out")
+
+
+def test_wheel_rejects_malformed_record_encoding(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory("encoded-record", "1.0", {"encoded_record.py": "VALUE = 1\n"})
+    with zipfile.ZipFile(wheel) as archive:
+        members = {info.filename: archive.read(info) for info in archive.infolist()}
+    record_name = next(name for name in members if name.endswith(".dist-info/RECORD"))
+    members[record_name] = b"\xff"
+    with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    with pytest.raises(IntegrityError, match="Malformed wheel RECORD encoding"):
+        extract_wheel(wheel, tmp_path / "out")
+
+
+def test_wheel_rejects_file_directory_namespace_collision(tmp_path: Path) -> None:
+    wheel = tmp_path / "collision-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("collision", b"file")
+        archive.writestr("collision/child.py", b"child")
+    with pytest.raises(CacheError, match="file/directory namespace collision"):
         extract_wheel(wheel, tmp_path / "out")
 
 
