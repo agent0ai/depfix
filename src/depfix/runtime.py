@@ -45,6 +45,16 @@ _SHARED_ROOT_OWNERS: dict[str, dict[tuple[str, str, str], tuple[bool, int]]] = {
 _SHARED_PATH_STATE: dict[str, tuple[int, int | None]] = {}
 
 
+def _is_safe_logical_module_name(name: str) -> bool:
+    """Accept importlib-only child names without permitting path syntax."""
+    parts = name.split(".")
+    return bool(
+        parts
+        and parts[0].isidentifier()
+        and all(part and "/" not in part and "\\" not in part and "\x00" not in part for part in parts)
+    )
+
+
 def _module_locations(module: object) -> tuple[Path, ...]:
     locations: list[Path] = []
     filename = getattr(module, "__file__", None)
@@ -586,9 +596,9 @@ class DepfixRuntime:
         return runtime.import_for_node(alias.node, alias.module)
 
     def import_for_node(self, caller_node_id: str, logical_name: str) -> ModuleType:
-        if not logical_name or not all(part.isidentifier() for part in logical_name.split(".")):
+        if not _is_safe_logical_module_name(logical_name):
             raise RealmImportError(
-                "Logical module name is not a valid dotted Python name",
+                "Logical module name contains unsafe path syntax",
                 module=logical_name,
                 referrer=caller_node_id,
                 realm=caller_node_id,

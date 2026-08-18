@@ -58,7 +58,9 @@
   remain immutable while installed inventory filters removed targets; `cache remove` remains the advanced artifact-hash
   compatibility path with the same protection.
 - Decode local `file:` URLs with platform-native rules, including Windows drive-letter and UNC path forms.
-- Realm imports preserve module identity and prevent undeclared cross-realm leakage.
+- Realm imports preserve module identity and prevent undeclared cross-realm leakage. Dynamic `importlib` children may use
+  non-identifier filename components supported by CPython, but logical names must retain an identifier root and exclude
+  empty components, path separators, NULs, and any path syntax that could escape verified artifact roots.
 - `boundaries.py` owns opt-in provenance inspection, exact graph/node assertions, and sync/async boundary decorators.
   Guards inspect direct managed types and nested builtin containers, report typed producer/consumer diagnostics, accept
   unmanaged values, and never claim automatic conversion or arbitrary object-graph coverage.

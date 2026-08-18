@@ -23,6 +23,7 @@ from depfix.errors import (
     DefaultImportConflictError,
     FrozenManifestError,
     ImportDispatcherConflictError,
+    RealmImportError,
     ScopeModuleNotProvidedError,
     SharedImportConflictError,
 )
@@ -550,6 +551,50 @@ def test_importlib_compatibility_uses_active_selection(tmp_path: Path, wheel_fac
 
     assert selected.VALUE == "old-child"
     assert spec is not None and spec.name.startswith("_depfix.")
+
+
+def test_importlib_compatibility_loads_verified_non_identifier_child(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "dynamic-child-demo",
+        "1.0.0",
+        {
+            "dynamic_child_demo/__init__.py": (
+                "import importlib\n"
+                "dynamic = importlib.import_module('.unicode17-0-0', __name__)\n"
+                "def load(name):\n return importlib.import_module(name)\n"
+            ),
+            "dynamic_child_demo/unicode17-0-0.py": "VALUE = 17\n",
+        },
+    )
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+
+    with depfix.using(file_spec(wheel)):
+        import dynamic_child_demo
+
+        assert dynamic_child_demo.dynamic.VALUE == 17
+        assert dynamic_child_demo.dynamic.__depfix_logical_name__ == "dynamic_child_demo.unicode17-0-0"
+        for unsafe_name in (
+            "dynamic_child_demo..outside",
+            "dynamic_child_demo.child/name",
+            "dynamic_child_demo.child\\name",
+            "/absolute",
+        ):
+            with pytest.raises(RealmImportError, match="unsafe path syntax"):
+                dynamic_child_demo.load(unsafe_name)
+
+
+@pytest.mark.live
+@pytest.mark.skipif(
+    os.environ.get("DEPFIX_RUN_LIVE_TESTS") != "1",
+    reason="set DEPFIX_RUN_LIVE_TESTS=1 to exercise published PyPI artifacts",
+)
+def test_rich_15_loads_dynamic_unicode_table(tmp_path: Path) -> None:
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    depfix.default("rich==15.0.0")
+
+    from rich.cells import cell_len
+
+    assert cell_len("👍") == 2
 
 
 def test_realm_standard_library_and_metadata_facade_with_dispatcher(tmp_path: Path, wheel_factory) -> None:

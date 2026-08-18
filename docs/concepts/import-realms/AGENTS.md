@@ -18,6 +18,8 @@
 - The opt-in installed-store fallback runs only after ordinary resolution misses a root and preserves exact graph,
   configured-manifest priority, compatibility, native ownership, and no-network boundaries.
 - Pure managed versions stay under synthetic identities; the dispatcher delegates unrelated imports unchanged.
+- Dynamic `importlib` children may contain non-identifier filename components, while empty components and filesystem path
+  syntax remain invalid and lookup stays beneath the selected verified artifact.
 - Native request closures use logical process-global identities in `auto` mode, with one compatible public owner per root;
   private helpers follow conventional best-effort import behavior.
 - Native isolation and compatibility claims must remain conservative, evidence-based, and explicit about process-global

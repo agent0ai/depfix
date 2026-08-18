@@ -2,6 +2,11 @@
 
 All notable changes use this file. The project follows semantic versioning after its first public release.
 
+## 0.11.1 - 2026-08-18
+
+- Supported safe dynamic `importlib` children with non-identifier filename components, including Rich 15 Unicode data
+  tables, while retaining identifier import roots, verified-artifact ownership, and path-escape rejection.
+
 ## 0.11.0 - 2026-08-18
 
 - Reused verified compatible installed distributions by canonical name and version before index discovery, regardless of

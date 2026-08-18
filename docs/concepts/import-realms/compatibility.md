@@ -13,6 +13,11 @@ In-process realms support pure-Python wheels, modules, namespace packages, resou
 isolated across threads and asynchronous tasks through context-local state. Code that compares synthetic `__name__`
 values to hard-coded logical names should instead use `__depfix_logical_name__`.
 
+Dynamic `importlib.import_module()` lookups may address packaged children whose filename components are not valid Python
+identifiers, such as `package.unicode17-0-0`. These names cannot appear in an `import` statement but CPython supports them
+through `importlib`. Depfix resolves them only below an identifier import root in the selected, hash-verified artifact;
+empty components, path separators, NULs, absolute paths, and traversal syntax remain invalid.
+
 ## Objects crossing version boundaries
 
 Import isolation does not make library-defined objects interoperable. A class loaded in one realm has a different Python
@@ -61,6 +66,14 @@ Keep creation and consumption of library-owned objects in the same realm. When c
 application-owned boundary and reconstruct the object in the receiving realm from a documented primitive form. Process
 separation strengthens runtime isolation but still needs the same serialization contract; arbitrary pickle data is not a
 safe compatibility or trust boundary.
+
+Rich `Segment` values illustrate two separate boundaries. In Rich 15, `Console.render(Segment("hello"))` raises
+`NotRenderableError` even in one ordinary environment: a segment is rendering output, not an accepted input renderable
+(the exception text mentioning `Segment` is misleading). Pass a string or an object implementing `__rich_console__`, or
+consume a segment sequence through Rich's segment/output APIs. Rich objects from different Depfix graphs remain a second,
+independent nominal boundary even when both graphs select the exact same Rich wheel. Recreate the receiving Rich object
+from application-owned text/style data instead of passing it between scopes; selecting the same version does not merge
+realm identities.
 
 Explicit `inprocess` mode is strict by default. Mixed wheels may execute a pure-Python root, and optional accelerators may
 fall back when the package handles `ImportError`, but loading a required native extension raises
