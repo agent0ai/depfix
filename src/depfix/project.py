@@ -49,6 +49,7 @@ from .settings import Settings, resolve_settings
 from .sources import parse_source
 from .sync import sync_graph
 from .target_permissions import (
+    PROMOTABLE_DIRECTORY_MODE,
     harden_runtime_target,
     runtime_target_modes_safely_repairable,
     runtime_target_permissions_valid,
@@ -761,8 +762,17 @@ def _materialize_local(graph: LockedGraph, cache: Cache, destination: Path) -> N
                 if not cache._target_contents_are_complete(temporary, artifact.sha256):
                     raise CacheError("Local package replacement failed content validation")
                 had_target = target.exists() or target.is_symlink()
+                original_target_mode: int | None = None
                 if had_target:
-                    os.replace(target, backup)
+                    try:
+                        if target.is_dir() and not target.is_symlink():
+                            original_target_mode = stat.S_IMODE(target.lstat().st_mode)
+                            target.chmod(PROMOTABLE_DIRECTORY_MODE)
+                        os.replace(target, backup)
+                    except BaseException:
+                        if original_target_mode is not None and target.is_dir() and not target.is_symlink():
+                            target.chmod(original_target_mode)
+                        raise
                 try:
                     os.replace(temporary, target)
                     harden_runtime_target(target)
@@ -773,6 +783,8 @@ def _materialize_local(graph: LockedGraph, cache: Cache, destination: Path) -> N
                         if target.exists() or target.is_symlink():
                             _remove_path(target)
                         os.replace(backup, target)
+                        if original_target_mode is not None:
+                            target.chmod(original_target_mode)
                     elif target.exists() or target.is_symlink():
                         _remove_path(target)
                     raise

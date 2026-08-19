@@ -34,7 +34,7 @@
   locked repair of legacy non-writable targets without a retained artifact blob, refusal to repair writable manifested or
   authenticated derived payloads or writable directories, verified rematerialization of writable cache and local targets,
   rollback-safe warm local replacement, warm local legacy-mode repair, closure-scoped installed-store repair, and Windows
-  native read-only semantics without POSIX execute-mode assumptions.
+  writable staging followed by native read-only publication semantics without POSIX execute-mode assumptions.
 - Standard-import tests reset the dispatcher, persistent defaults, context scopes, runtimes, and configuration.
 - Requirements-default tests cover canonical nested parsing, constraints, markers, relative paths, contextual rejection,
   idempotent offline reuse, and atomic default-conflict rollback.

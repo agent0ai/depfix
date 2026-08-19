@@ -1046,7 +1046,10 @@ def test_usage_renewal_does_not_mutate_read_only_image_origin_tree(tmp_path: Pat
 
     cache.record_usage({artifact.sha256})
 
-    assert not cache.has_package(artifact.sha256)
+    if os.name == "nt":
+        assert cache.has_package(artifact.sha256)
+    else:
+        assert not cache.has_package(artifact.sha256)
     assert all(not (path.stat().st_mode & stat.S_IWUSR) for path in original_modes)
 
 
@@ -1255,6 +1258,12 @@ def test_windows_runtime_permissions_preserve_supported_read_only_semantics(
     payload.write_text("runtime payload\n", encoding="utf-8")
     (target / ".complete").write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr(target_permissions.os, "name", "nt")
+
+    target_permissions.harden_runtime_target(target, writable_root=True)
+
+    assert payload.stat().st_mode & stat.S_IWRITE
+    assert all(path.stat().st_mode & stat.S_IWRITE for path in (target, payload.parent))
+    assert not target_permissions.runtime_target_permissions_valid(target)
 
     target_permissions.harden_runtime_target(target)
 

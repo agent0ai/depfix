@@ -869,8 +869,13 @@ def test_bundle_is_deterministic_and_installs_without_network(
     if sys.platform != "win32":
         original_replace = project_module.os.replace
         promotion_modes: list[int] = []
+        backup_modes: list[int] = []
 
         def inspect_promotion_mode(source: Path, destination: Path) -> None:
+            if Path(source) == local_payload.parents[2] and Path(destination).name.startswith(
+                local_payload.parents[2].name + ".backup-"
+            ):
+                backup_modes.append(stat.S_IMODE(Path(source).stat().st_mode))
             if Path(destination) == local_payload.parents[2] and Path(source).name.startswith(
                 local_payload.parents[2].name + "."
             ):
@@ -883,6 +888,7 @@ def test_bundle_is_deterministic_and_installs_without_network(
             patch.setattr(project_module.os, "replace", inspect_promotion_mode)
             install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
         assert promotion_modes == [0o755]
+        assert backup_modes == [0o755]
         assert local_payload.read_text(encoding="utf-8") == "VALUE = 7\n"
         assert stat.S_IMODE(local_payload.stat().st_mode) == 0o555
         failed_target = tmp_path / "failed-vendored"
@@ -916,6 +922,7 @@ def test_bundle_is_deterministic_and_installs_without_network(
                 install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
         assert local_payload.read_text(encoding="utf-8") == "VALUE = 99\n"
         assert stat.S_IMODE(local_payload.stat().st_mode) == 0o755
+        assert stat.S_IMODE(local_payload.parents[2].stat().st_mode) == 0o555
         failed_promotion = False
 
         def fail_first_promotion(source: Path, destination: Path) -> None:

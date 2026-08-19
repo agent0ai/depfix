@@ -33,7 +33,8 @@
   payloads, including authenticated interpreter-derived bytecode, require verified rematerialization. Warm local targets
   are validated then repaired or rollback-safely replaced from a fully validated adjacent copy. Shared imports suppress
   interpreter bytecode writes into immutable targets. Installed-store repair is limited to the requested dependency
-  closure. Windows preserves supported read-only file semantics without emulating POSIX execute modes.
+  closure. Windows keeps private staging descendants writable through atomic promotion, then validates supported read-only
+  file semantics on the published target without emulating POSIX execute modes.
 - Pinned downloads retry and resume bounded transient truncation, but exact size and SHA-256 verification remain mandatory
   before atomic target promotion. Downloads and build inputs are ephemeral, remain protected through materialization,
   and are removed afterward; completed unpacked targets are the cross-project cache. Completion metadata verifies the

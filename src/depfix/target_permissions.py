@@ -19,9 +19,12 @@ def harden_runtime_target(root: Path, *, writable_root: bool = False) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
         try:
             if path.is_dir():
-                path.chmod(READ_ONLY_DIRECTORY_MODE)
+                path.chmod(PROMOTABLE_DIRECTORY_MODE if os.name == "nt" and writable_root else READ_ONLY_DIRECTORY_MODE)
             elif path.is_file():
-                path.chmod(READ_ONLY_METADATA_MODE if os.name == "nt" or path == marker else READ_ONLY_PAYLOAD_MODE)
+                if os.name == "nt" and writable_root:
+                    path.chmod(stat.S_IREAD | stat.S_IWRITE)
+                else:
+                    path.chmod(READ_ONLY_METADATA_MODE if os.name == "nt" or path == marker else READ_ONLY_PAYLOAD_MODE)
         except OSError:
             pass
     try:

@@ -4,7 +4,7 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
-## 0.12.1 - 2026-08-19
+## 0.12.2 - 2026-08-19
 
 - Added deterministic size-weighted concurrency for planned remote metadata and exact wheel acquisition, with a default
   16-slot tiny-file budget, progressively heavier medium artifacts, exclusive large or unknown-size downloads, stable
@@ -12,10 +12,17 @@ All notable changes use this file. The project follows semantic versioning after
 - Hardened immutable runtime payload permissions so every verified POSIX payload is uniformly readable and executable but
   non-writable, with safe legacy repair or verified rematerialization and unchanged Windows read-only semantics.
 
+## 0.12.1 - 2026-08-19 (superseded before PyPI publication)
+
+- Hosted validation proved both sides of local atomic replacement must remain promotable: macOS could not rename an
+  existing immutable target root, while Windows could not promote a staging tree with read-only descendants. Version
+  0.12.2 keeps private Windows staging writable until promotion, temporarily makes only an existing local target root
+  promotable, and restores its original mode on rollback without moving the immutable tag.
+
 ## 0.12.0 - 2026-08-19 (superseded before PyPI publication)
 
 - Hosted macOS validation exposed that local vendoring hardened its staging directory before atomic promotion. The
-  corrected promotion boundary is released as 0.12.1 without moving the immutable tag.
+  first corrected promotion boundary was tagged as 0.12.1 without moving the immutable tag.
 
 ## 0.11.4 - 2026-08-18
 
