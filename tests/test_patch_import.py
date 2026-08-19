@@ -4,6 +4,7 @@ import importlib
 import importlib.abc
 import importlib.util
 import os
+import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -13,9 +14,12 @@ import pytest
 from conftest import file_spec
 
 import depfix
+from depfix import cache as cache_module
+from depfix.cache import Cache
 from depfix.dispatcher import dispatcher_installed
 from depfix.errors import StoreImportError
 from depfix.manager import reset_runtime_state
+from depfix.manifest import load_manifest
 from depfix.project import install_packages
 from depfix.settings import reset_configuration
 
@@ -79,9 +83,20 @@ def test_depfix_run_enables_the_installed_store_fallback_without_application_set
     command = [sys.executable, "-m", "depfix", "--cache-dir", str(tmp_path / "cache"), "run"]
     command.extend([str(application)] if entrypoint == "script" else ["-m", "runner_application"])
 
+    payloads = [
+        path
+        for path in (tmp_path / "cache" / "v1" / "targets").rglob("*")
+        if path.is_file() and path.name != ".complete"
+    ]
+    if os.name != "nt":
+        for path in payloads:
+            path.chmod(0o444)
+
     completed = subprocess.run(command, cwd=tmp_path, check=True, capture_output=True, text=True)
 
     assert completed.stdout.strip() == "runner-ok"
+    if os.name != "nt":
+        assert payloads and {stat.S_IMODE(path.stat().st_mode) for path in payloads} == {0o555}
 
 
 def test_patch_import_preserves_ordinary_precedence_and_internal_failures(
@@ -219,6 +234,30 @@ def test_patch_import_selects_newest_installed_version_and_explicit_scope_wins(t
     depfix.patch_import()
     depfix.default(file_spec(old))
     assert importlib.import_module("fallback_version").VERSION == "old"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="legacy POSIX payload modes do not apply on Windows")
+def test_patch_import_repairs_requested_closure_when_unrelated_artifact_is_missing(
+    tmp_path: Path, wheel_factory
+) -> None:
+    unrelated = wheel_factory("absent-unrelated", "1.0.0", {"absent_unrelated.py": "VALUE = 1\n"})
+    requested = wheel_factory("requested-repair", "1.0.0", {"requested_repair.py": "VALUE = 42\n"})
+    result = install_packages((file_spec(unrelated), file_spec(requested)), cache_dir=tmp_path / "cache")
+    graph = load_manifest(result.manifest)
+    cache = Cache(tmp_path / "cache")
+    artifacts = {node.distribution: graph.artifact_index[node.artifact] for node in graph.nodes}
+    cache_module._remove_path(cache.unpacked_path(artifacts["absent-unrelated"].id))
+    requested_target = cache.unpacked_path(artifacts["requested-repair"].id)
+    requested_payload = requested_target / "purelib" / "requested_repair.py"
+    requested_payload.chmod(0o444)
+    assert not cache.has_package(artifacts["requested-repair"].sha256)
+
+    depfix.configure(cache_dir=tmp_path / "cache", log_level="WARNING")
+    depfix.patch_import()
+
+    assert importlib.import_module("requested_repair").VALUE == 42
+    assert stat.S_IMODE(requested_payload.stat().st_mode) == 0o555
+    assert not cache.unpacked_path(artifacts["absent-unrelated"].id).exists()
 
 
 @pytest.mark.parametrize("entrypoint", ["api", "run"])

@@ -398,7 +398,9 @@ class DepfixRuntime:
             )
             self._usage_handle = usage
         try:
-            for artifact in self.graph.artifacts:
+            active_artifacts = dict.fromkeys(self._nodes[node_id].artifact for node_id in self._active_node_ids)
+            for artifact_id in active_artifacts:
+                artifact = self._artifacts[artifact_id]
                 root = self.cache.unpacked_path(artifact.id)
                 if not (root / ".complete").is_file():
                     raise CacheError(
@@ -615,7 +617,13 @@ class DepfixRuntime:
                     manifest=self.manifest,
                     remediation="declare the package or dependency before importing it",
                 )
-            module = _STANDARD_IMPORT_MODULE(logical_name)
+            with _SHARED_LOCK:
+                previous_bytecode_setting = sys.dont_write_bytecode
+                sys.dont_write_bytecode = True
+                try:
+                    module = _STANDARD_IMPORT_MODULE(logical_name)
+                finally:
+                    sys.dont_write_bytecode = previous_bytecode_setting
             providers = self._provider_nodes(caller, logical_name)
             if len(providers) == 1 and "__depfix_node_id__" not in module.__dict__:
                 provider = providers[0]

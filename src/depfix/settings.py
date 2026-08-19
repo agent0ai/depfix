@@ -22,6 +22,7 @@ class Settings:
     offline: bool = False
     allow_unsafe: bool = False
     prefer_newest: bool = False
+    max_io_workers: int = 16
     cache_dir: Path = user_cache_path("depfix")
     cache_retention_days: int = 30
     cache_auto_cleanup: bool = True
@@ -45,6 +46,7 @@ def configure(
     offline: bool | None = None,
     allow_unsafe: bool | None = None,
     prefer_newest: bool | None = None,
+    max_io_workers: int | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     cache_retention_days: int | None = None,
     cache_auto_cleanup: bool | None = None,
@@ -62,6 +64,7 @@ def configure(
         "offline": offline,
         "allow_unsafe": allow_unsafe,
         "prefer_newest": prefer_newest,
+        "max_io_workers": _validate_bounded_int("max_io_workers", max_io_workers, 1, 32),
         "cache_dir": Path(cache_dir).expanduser().resolve() if cache_dir is not None else None,
         "cache_retention_days": _validate_retention_days(cache_retention_days),
         "cache_auto_cleanup": cache_auto_cleanup,
@@ -100,6 +103,7 @@ def resolve_settings(
     offline: bool | None = None,
     allow_unsafe: bool | None = None,
     prefer_newest: bool | None = None,
+    max_io_workers: int | None = None,
     cache_dir: str | os.PathLike[str] | None = None,
     cache_retention_days: int | None = None,
     cache_auto_cleanup: bool | None = None,
@@ -121,6 +125,7 @@ def resolve_settings(
         "offline": _env_bool("DEPFIX_OFFLINE"),
         "allow_unsafe": _env_bool("DEPFIX_ALLOW_UNSAFE"),
         "prefer_newest": _env_bool("DEPFIX_PREFER_NEWEST"),
+        "max_io_workers": _env_bounded_int("DEPFIX_MAX_IO_WORKERS", 1, 32),
         "cache_dir": _env_path("DEPFIX_CACHE_DIR"),
         "cache_retention_days": _env_nonnegative_int("DEPFIX_CACHE_RETENTION_DAYS"),
         "cache_auto_cleanup": _env_bool("DEPFIX_CACHE_AUTO_CLEANUP"),
@@ -137,6 +142,7 @@ def resolve_settings(
         "offline": offline,
         "allow_unsafe": allow_unsafe,
         "prefer_newest": prefer_newest,
+        "max_io_workers": _validate_bounded_int("max_io_workers", max_io_workers, 1, 32),
         "cache_dir": Path(cache_dir).expanduser().resolve() if cache_dir is not None else None,
         "cache_retention_days": _validate_retention_days(cache_retention_days),
         "cache_auto_cleanup": cache_auto_cleanup,
@@ -178,6 +184,7 @@ def resolve_settings(
         offline=bool(choose("offline")),
         allow_unsafe=bool(choose("allow_unsafe")),
         prefer_newest=bool(choose("prefer_newest")),
+        max_io_workers=int(choose("max_io_workers")),
         cache_dir=Path(choose("cache_dir")),
         cache_retention_days=int(choose("cache_retention_days")),
         cache_auto_cleanup=bool(choose("cache_auto_cleanup")),
@@ -291,6 +298,13 @@ def _env_positive_int(name: str) -> int | None:
     return value
 
 
+def _env_bounded_int(name: str, minimum: int, maximum: int) -> int | None:
+    value = _env_nonnegative_int(name)
+    if value is not None and not minimum <= value <= maximum:
+        raise SpecifierError(f"{name} must be between {minimum} and {maximum}", source="environment")
+    return value
+
+
 def _validate_retention_days(value: int | None) -> int | None:
     if value is None:
         return None
@@ -311,6 +325,14 @@ def _validate_positive_int(name: str, value: int | None) -> int | None:
     value = _validate_nonnegative_int(name, value)
     if value == 0:
         raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _validate_bounded_int(name: str, value: int | None, minimum: int, maximum: int) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
 
 
@@ -367,6 +389,7 @@ def _config_file_values(path: Path) -> dict[str, Any]:
         "cache-renewal-seconds": "cache_renewal_seconds",
         "cache-deletion-grace-hours": "cache_deletion_grace_hours",
         "log-level": "log_level",
+        "max-io-workers": "max_io_workers",
     }
     values = {aliases.get(key, key.replace("-", "_")): value for key, value in selected.items()}
     result: dict[str, Any] = {}
@@ -386,12 +409,20 @@ def _config_file_values(path: Path) -> dict[str, Any]:
                 source=str(path),
             )
         result["cache_retention_days"] = value
-    for key in ("cache_renewal_seconds", "cache_deletion_grace_hours"):
+    for key in ("cache_renewal_seconds", "cache_deletion_grace_hours", "max_io_workers"):
         if key in values:
             value = values[key]
-            minimum = 1 if key == "cache_renewal_seconds" else 0
-            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            minimum = 0 if key == "cache_deletion_grace_hours" else 1
+            maximum = 32 if key == "max_io_workers" else None
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < minimum
+                or (maximum is not None and value > maximum)
+            ):
                 qualifier = "positive" if minimum else "non-negative"
+                if maximum is not None:
+                    qualifier = f"between {minimum} and {maximum}"
                 raise SpecifierError(
                     f"{key.replace('_', '-')} in .depfix/config.toml must be a {qualifier} integer",
                     source=str(path),

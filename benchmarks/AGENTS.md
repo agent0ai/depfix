@@ -7,6 +7,16 @@
 ## Ownership
 
 - `import_identity.py` measures repeated public `import_module()` identity and prepared warm-path timing.
+- `io_concurrency.py` replays retained exact-wheel traces through Depfix's shipped verified acquisition and inspection
+  boundaries at bounded worker counts; `--weighted` exercises the product size-weighted scheduler.
+- `io_scheduler_boundaries.py` deterministically measures exact size thresholds, missing-size exclusivity, mixed tiny/large
+  stable head-of-line admission, active-operation peaks, and temporary-file cleanup without network variance.
+- `generate_io_concurrency_trace.py` regenerates the bounded Agent Zero wheel-size population, 32-stratum replay,
+  three-largest-wheel cohort, and three-source-build cohort from retained exact requirements through uv's target-specific
+  pylock output.
+- `data/io-concurrency-medium.json` pins the public wheel identities for the representative connected benchmark graph.
+- `data/io-concurrency-agent-zero-requirements.txt` pins the exact Agent Zero input snapshot.
+- `data/io-concurrency-agent-zero-summary.json` retains the generated size-stratified wheel and source-build replays.
 - `native_compatibility.py` runs representative native-package operations in fresh processes; Torch is opt-in because its
   locked dependency graph requires multiple gigabytes.
 
@@ -23,6 +33,9 @@
 ## Verification
 
 - Run `python benchmarks/import_identity.py MANIFEST SPECIFIER` when runtime caching or module identity changes.
+- Run `python benchmarks/io_concurrency.py --help` before changing the I/O concurrency research evidence.
+- Run `python benchmarks/io_scheduler_boundaries.py` before changing weighted admission thresholds or queue ordering.
+- Run `python benchmarks/generate_io_concurrency_trace.py --help` before changing the Agent Zero replay generator.
 - Run `python benchmarks/native_compatibility.py --cache-dir CACHE` when native/shared compatibility changes; add
   `--include-torch` only on a host with sufficient disk and network capacity.
 

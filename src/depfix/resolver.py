@@ -15,6 +15,7 @@ import tempfile
 import urllib.request
 import zipfile
 from dataclasses import dataclass, fields, replace
+from functools import partial
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -40,6 +41,7 @@ from .errors import (
     SourceError,
     redact,
 )
+from .io_scheduler import METADATA_WEIGHT, IOWork, run_weighted_io
 from .manifest import computed_graph_id, current_environment
 from .models import Alias, Artifact, LockedGraph, Node
 from .progress import ProgressReporter
@@ -149,6 +151,7 @@ class Resolver:
         self._artifacts: dict[str, Artifact] = {}
         self._nodes: dict[str, Node] = {}
         self._candidate_cache: dict[tuple[str, str, bool], _Candidate] = {}
+        self._project_payload_cache: dict[str, dict[str, Any]] = {}
         self._uv_version = "not-required"
         self._policy: dict[str, object] = {}
         self._allowed_hosts: tuple[str, ...] = ()
@@ -174,6 +177,7 @@ class Resolver:
         self._allow_insecure = bool(self._policy.get("allow-insecure-transport", False))
         self._validate_index_policy()
         bulk_plans = self._bulk_plan(config)
+        self._prefetch_bulk_plan(bulk_plans)
         aliases: list[Alias] = []
         for declaration in config.imports:
             self._active_plan = bulk_plans.get(declaration.name, {})
@@ -505,6 +509,7 @@ class Resolver:
         self.settings = selected
         if policy_key != current_key:
             self._candidate_cache.clear()
+            self._project_payload_cache.clear()
         if not self._backend_supplied:
             self.backend = UvBackend(selected, self.cache, progress=self.progress)
         configured_index = selected.index_url
@@ -1461,7 +1466,93 @@ class Resolver:
         self._candidate_cache[key] = selected
         return selected
 
+    def _prefetch_bulk_plan(self, plans: dict[str, dict[str, str]]) -> None:
+        """Prefetch immutable metadata and exact wheels before graph mutation."""
+        if self.settings.offline or not plans:
+            return
+        selections = sorted({(name, version) for plan in plans.values() for name, version in plan.items()})
+        metadata_versions: dict[str, str] = {}
+        for distribution, version in selections:
+            if distribution not in self._project_payload_cache:
+                metadata_versions.setdefault(distribution, version)
+        missing_metadata = sorted(metadata_versions.items())
+        metadata_results = run_weighted_io(
+            tuple(
+                IOWork(
+                    position,
+                    None,
+                    partial(self._prefetch_metadata, distribution, version),
+                    unknown_size_weight=METADATA_WEIGHT,
+                )
+                for position, (distribution, version) in enumerate(missing_metadata)
+            ),
+            capacity=self.settings.max_io_workers,
+        )
+        for distribution, payload in metadata_results:
+            self._project_payload_cache[distribution] = payload
+
+        candidates: dict[str, _Candidate] = {}
+        for distribution, version in selections:
+            constraint = SpecifierSet(f"=={version}")
+            for prefer_newest in (False, True):
+                candidate = self._select_pypi(distribution, constraint, prefer_newest=prefer_newest)
+                if (
+                    candidate.sha256
+                    and candidate.filename.lower().endswith(".whl")
+                    and not self.cache.has_package(candidate.sha256)
+                    and not self.cache.has_blob(candidate.sha256)
+                ):
+                    candidates.setdefault(candidate.sha256, candidate)
+        ordered = sorted(candidates.values(), key=lambda item: (item.distribution, item.version, item.filename))
+        for candidate in ordered:
+            self.progress.emit("acquire", f"{candidate.distribution}=={candidate.version}")
+        run_weighted_io(
+            tuple(
+                IOWork(
+                    position,
+                    candidate.size,
+                    partial(self._prefetch_candidate, candidate),
+                )
+                for position, candidate in enumerate(ordered)
+            ),
+            capacity=self.settings.max_io_workers,
+        )
+
+    def _prefetch_candidate(self, candidate: _Candidate) -> None:
+        with self.cache._artifact_lock(candidate.sha256):
+            blob, _final_url = self.cache.fetch_url_with_final(
+                candidate.url,
+                candidate.sha256,
+                expected_size=candidate.size or None,
+                allowed_hosts=self._allowed_hosts,
+                allow_insecure=self._allow_insecure,
+                _lock_held=True,
+            )
+            inspection = self._inspect_artifact(blob, candidate)
+        if inspection.distribution != candidate.distribution or not _versions_equivalent(
+            inspection.version, candidate.version
+        ):
+            raise ResolutionError(
+                "Repository record and downloaded wheel metadata disagree",
+                artifact_hash=candidate.sha256,
+            )
+
+    def _prefetch_metadata(self, distribution: str, version: str) -> tuple[str, dict[str, Any]]:
+        return distribution, self._query_project_artifact_payload(distribution, SpecifierSet(f"=={version}"))
+
     def _project_artifact_payload(
+        self,
+        distribution: str,
+        constraint: SpecifierSet,
+    ) -> dict[str, Any]:
+        cached = self._project_payload_cache.get(distribution)
+        if cached is not None:
+            return cached
+        payload = self._query_project_artifact_payload(distribution, constraint)
+        self._project_payload_cache[distribution] = payload
+        return payload
+
+    def _query_project_artifact_payload(
         self,
         distribution: str,
         constraint: SpecifierSet,

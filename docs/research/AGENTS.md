@@ -7,6 +7,9 @@
 ## Ownership
 
 - `cpython-import-realms.md` owns the current CPython-level realm proposal draft.
+- `io-concurrency-proposal.md`, `io-concurrency-evidence.json`, `io-concurrency-implementation-evidence.json`, and
+  `io-scheduler-boundary-evidence.json` own the measured Depfix 0.11.4 I/O analysis, weighted implementation comparison,
+  exact threshold/mixed-order admission probe, and retained per-run observations.
 
 ## Local Contracts
 

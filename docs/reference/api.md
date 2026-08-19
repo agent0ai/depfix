@@ -247,11 +247,18 @@ decision. Loaded package code still has the normal authority of the Python proce
 
 `depfix.configure(...)` is the single process-wide Python configuration entry point, including for future global
 parameters. It accepts `manifest`, `frozen`, `offline`, `allow_unsafe`, `prefer_newest`, `cache_dir`, `cache_retention_days`,
-`cache_auto_cleanup`, `cache_renewal_seconds`, `cache_deletion_grace_hours`, `uv`, `index_url`, `extra_index_url`, and
-`log_level`. Precedence is per-call, `configure`, environment, project configuration, global user configuration, then
+`cache_auto_cleanup`, `cache_renewal_seconds`, `cache_deletion_grace_hours`, `max_io_workers`, `uv`, `index_url`,
+`extra_index_url`, and `log_level`. Precedence is per-call, `configure`, environment, project configuration, global user configuration, then
 defaults. The cleanup environment names are `DEPFIX_CACHE_RETENTION_DAYS`, `DEPFIX_CACHE_AUTO_CLEANUP`,
 `DEPFIX_CACHE_RENEWAL_SECONDS`, and `DEPFIX_CACHE_DELETION_GRACE_HOURS`; TOML uses the corresponding hyphenated names. An
 explicit per-call `False` therefore overrides a process-wide `True`.
+
+Remote metadata and exact wheel acquisition share a size-weighted I/O budget. `max_io_workers` defaults to 16, accepts
+1–32, and may also be set with `DEPFIX_MAX_IO_WORKERS` or `[resolver] max-io-workers`. The value is tiny-file capacity:
+sub-1 MB operations use one slot, progressively larger artifacts consume more, and artifacts at or above 100 MB consume
+the full budget and run alone. Artifacts whose index record omits a positive size also run alone until the verified
+download establishes their size; metadata queries use four slots. Set the capacity to `1` for serial rollback. Extraction,
+materialization, source builds, persistence, activation, and offline work remain ordered.
 
 Persistent project defaults live together in `.depfix/config.toml`. For example:
 
@@ -264,6 +271,7 @@ cache-auto-cleanup = true
 
 [resolver]
 prefer-newest = false
+max-io-workers = 16
 ```
 
 Unsafe loading can be enabled process-wide with `depfix.configure(allow_unsafe=True)`, persistently with
@@ -274,7 +282,7 @@ accept the reduced isolation guarantee.
 download, materialization, and ready lines to stderr. `WARNING`, `ERROR`, `CRITICAL`, and `OFF` suppress progress.
 
 Supported variables are `DEPFIX_MANIFEST`, `DEPFIX_FROZEN`, `DEPFIX_OFFLINE`, `DEPFIX_ALLOW_UNSAFE`,
-`DEPFIX_PREFER_NEWEST`, `DEPFIX_CACHE_DIR`, `DEPFIX_CACHE_RETENTION_DAYS`, `DEPFIX_CACHE_AUTO_CLEANUP`, `DEPFIX_UV`, `DEPFIX_INDEX_URL`,
+`DEPFIX_PREFER_NEWEST`, `DEPFIX_MAX_IO_WORKERS`, `DEPFIX_CACHE_DIR`, `DEPFIX_CACHE_RETENTION_DAYS`, `DEPFIX_CACHE_AUTO_CLEANUP`, `DEPFIX_UV`, `DEPFIX_INDEX_URL`,
 `DEPFIX_EXTRA_INDEX_URL`, and `DEPFIX_LOG_LEVEL`.
 
 `multiprocessing_initializer(manifest, cache_dir)` is a spawn-safe worker initializer for prepared graphs.

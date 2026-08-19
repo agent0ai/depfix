@@ -265,6 +265,29 @@ def test_wheel_safe_unlisted_members_use_depfix_payload_manifest(
     assert marker["file_hashes"][installed_path] == hashlib.sha256(b"payload").hexdigest()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX target modes do not apply on Windows")
+def test_wheel_materializes_every_payload_file_readable_executable_and_immutable(tmp_path: Path, wheel_factory) -> None:
+    wheel = wheel_factory(
+        "uniform-modes",
+        "1.0",
+        {
+            "uniform_modes.py": "VALUE = 1\n",
+            "uniform_modes/native.so": b"native",
+            "uniform_modes/driver/node": b"#!/bin/sh\nexit 0\n",
+        },
+    )
+    target = tmp_path / "out"
+
+    extract_wheel(wheel, target)
+
+    payloads = [path for path in target.rglob("*") if path.is_file() and path.name != ".complete"]
+    directories = [target, *(path for path in target.rglob("*") if path.is_dir())]
+    assert payloads
+    assert {stat.S_IMODE(path.stat().st_mode) for path in payloads} == {0o555}
+    assert stat.S_IMODE((target / ".complete").stat().st_mode) == 0o444
+    assert {stat.S_IMODE(path.stat().st_mode) for path in directories} == {0o555}
+
+
 def test_wheel_tolerates_unhashed_rows_stale_rows_signatures_and_reordering(tmp_path: Path, wheel_factory) -> None:
     wheel = wheel_factory("record-tolerance", "1.0", {"record_tolerance.py": "VALUE = 1\n"})
 

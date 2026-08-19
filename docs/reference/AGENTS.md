@@ -23,6 +23,8 @@
   effective defaults from inheriting per-call `None` values.
 - Keep compatible cache-first selection and the inherited `prefer_newest` override aligned across loading signatures,
   project export, environment/project configuration, and CLI help.
+- Keep `max_io_workers` aligned across the public configuration signature, environment/TOML names, bounded 1–32 range,
+  size-weight behavior, and serial rollback semantics.
 - Keep request-scoped index signatures aligned across sync, async, and standard-import APIs; document that a scoped
   primary suppresses inherited extras and that prepared manifests reject inapplicable live index arguments.
 - Define `depfix pip install` as grouped shared-store preparation, not a pip/uv environment passthrough, and keep its

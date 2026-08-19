@@ -27,10 +27,25 @@
 - `depfix run` enables the installed-store fallback after applying its process configuration and optional prepared state,
   before executing either a script or module; the launched application does not need its own Depfix setup call.
 - Resolved artifacts are hash-pinned and materialized outside ambient `site-packages`.
+- Immutable runtime targets use one platform-aware permission invariant: on POSIX every verified payload file is `0555`,
+  every directory is `0555`, and administrative completion metadata remains `0444`. Warm synchronization repairs legacy
+  non-writable payload modes under target and artifact locks without changing content identity. Writable directories or
+  payloads, including authenticated interpreter-derived bytecode, require verified rematerialization. Warm local targets
+  are validated then repaired or rollback-safely replaced from a fully validated adjacent copy. Shared imports suppress
+  interpreter bytecode writes into immutable targets. Installed-store repair is limited to the requested dependency
+  closure. Windows preserves supported read-only file semantics without emulating POSIX execute modes.
 - Pinned downloads retry and resume bounded transient truncation, but exact size and SHA-256 verification remain mandatory
   before atomic target promotion. Downloads and build inputs are ephemeral, remain protected through materialization,
   and are removed afterward; completed unpacked targets are the cross-project cache. Completion metadata verifies the
   installed payload rather than trusting a marker alone, while legacy targets retain a conservative file-count check.
+- Depfix-owned planned metadata and exact wheel I/O share one deterministic weighted capacity, defaulting to 16 tiny-file
+  slots. Metadata and 10–100 MB artifacts consume four slots, 1–10 MB artifacts consume two, and artifacts at or above
+  100 MB consume the full budget. Artifacts without an advertised positive size also consume the full budget until their
+  verified download records the observed size; only metadata work uses the explicit four-slot unknown-size policy. Workers
+  publish only immutable cache results; graph mutation, extraction, target
+  promotion, persistence, activation, local/source work, and offline paths remain ordered. `max_io_workers=1` is the
+  rollback path and configured capacities remain bounded from 1 through 32. Tiny work always consumes one slot, medium
+  work retains its deterministic two/four-slot weight, and 100 MB artifacts consume the full configured capacity.
 - Cross-process cache locks retry transient Windows permission races without masking permanent permission failures on
   other platforms.
 - Cache lifecycle metadata preserves first installation time and coalesces successful-import usage writes. Activated

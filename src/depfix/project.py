@@ -20,7 +20,7 @@ from packaging.markers import Marker, default_environment
 
 from ._version import __version__
 from .aliases import generate_aliases
-from .cache import Cache
+from .cache import Cache, _remove_path
 from .config import ImportDeclaration, ProjectConfig
 from .errors import (
     BundleError,
@@ -48,6 +48,11 @@ from .scanner import DynamicRequest, ScanGroup, scan_project
 from .settings import Settings, resolve_settings
 from .sources import parse_source
 from .sync import sync_graph
+from .target_permissions import (
+    harden_runtime_target,
+    runtime_target_modes_safely_repairable,
+    runtime_target_permissions_valid,
+)
 from .uv_backend import UvBackend
 
 BUNDLE_FORMAT_VERSION = 1
@@ -179,7 +184,7 @@ def export_project(
         destination = project_root / destination
     destination = destination.resolve()
     write_manifest(graph, destination)
-    sync_graph(graph, cache, offline=False, progress=progress)
+    sync_graph(graph, cache, offline=False, progress=progress, max_io_workers=settings.max_io_workers)
     _record_export_origins(cache, graph, destination)
     ide_path = cache.root / "ide" / graph.graph_id.removeprefix("sha256:")
     generate_aliases(graph, cache, ide_path)
@@ -239,6 +244,7 @@ def install_manifest(
                 allowed_hosts=allowed_hosts,
                 allow_insecure=allow_insecure,
             ),
+            max_io_workers=settings.max_io_workers,
         )
     except IntegrityError:
         raise
@@ -379,7 +385,13 @@ def install_packages(
                 ProjectConfig(config_path, declarations, policy)
             )
         cache.reserve_artifacts({artifact.sha256 for artifact in graph.artifacts})
-        sync_graph(graph, cache, offline=settings.offline, progress=progress)
+        sync_graph(
+            graph,
+            cache,
+            offline=settings.offline,
+            progress=progress,
+            max_io_workers=settings.max_io_workers,
+        )
         if not manifest.is_file() or refresh:
             write_manifest(graph, manifest)
         with cache.lock("canonical-resolution:" + canonical_identity):
@@ -722,8 +734,47 @@ def _materialize_local(graph: LockedGraph, cache: Cache, destination: Path) -> N
     for artifact in graph.artifacts:
         source = cache.unpacked_path(artifact.id)
         target = destination / artifact.sha256[:16]
-        if not target.exists():
-            shutil.copytree(source, target)
+        with (
+            cache.lock("target:" + artifact.id),
+            cache._artifact_lock(artifact.sha256),
+            cache.lock("local-target:" + str(target)),
+        ):
+            if not cache.has_package(artifact.sha256):
+                raise CacheError("Verified package target became unavailable during local materialization")
+            contents_valid = target.is_dir() and cache._target_contents_are_complete(target, artifact.sha256)
+            if contents_valid and runtime_target_permissions_valid(target):
+                continue
+            if contents_valid and runtime_target_modes_safely_repairable(target):
+                harden_runtime_target(target)
+                if runtime_target_permissions_valid(target):
+                    continue
+            temporary = Path(tempfile.mkdtemp(prefix=target.name + ".", dir=destination))
+            backup = Path(tempfile.mkdtemp(prefix=target.name + ".backup-", dir=destination))
+            try:
+                _remove_path(temporary)
+                _remove_path(backup)
+                shutil.copytree(source, temporary)
+                harden_runtime_target(temporary)
+                if not cache._target_contents_are_complete(temporary, artifact.sha256):
+                    raise CacheError("Local package replacement failed content validation")
+                if not runtime_target_permissions_valid(temporary):
+                    raise CacheError("Local package replacement failed permission validation")
+                had_target = target.exists() or target.is_symlink()
+                if had_target:
+                    os.replace(target, backup)
+                try:
+                    os.replace(temporary, target)
+                except BaseException:
+                    if had_target:
+                        if target.exists() or target.is_symlink():
+                            _remove_path(target)
+                        os.replace(backup, target)
+                    raise
+                if had_target:
+                    _remove_path(backup)
+            finally:
+                if temporary.exists():
+                    _remove_path(temporary)
 
 
 def _compile_graph_bytecode(graph: LockedGraph, cache: Cache) -> None:
@@ -739,15 +790,7 @@ def _compile_graph_bytecode(graph: LockedGraph, cache: Cache) -> None:
                 "Bytecode compilation failed for a prepared artifact",
                 artifact_hash=artifact.sha256,
             )
-        for path in sorted(root.rglob("*"), reverse=True):
-            try:
-                path.chmod(0o555 if path.is_dir() else 0o444)
-            except OSError:
-                pass
-        try:
-            root.chmod(0o555)
-        except OSError:
-            pass
+        harden_runtime_target(root)
 
 
 def _write_zip_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:

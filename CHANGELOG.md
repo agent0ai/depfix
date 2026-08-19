@@ -4,6 +4,14 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.12.0 - 2026-08-19
+
+- Added deterministic size-weighted concurrency for planned remote metadata and exact wheel acquisition, with a default
+  16-slot tiny-file budget, progressively heavier medium artifacts, exclusive large or unknown-size downloads, stable
+  publication ordering and failures, and a `max_io_workers=1` serial rollback setting.
+- Hardened immutable runtime payload permissions so every verified POSIX payload is uniformly readable and executable but
+  non-writable, with safe legacy repair or verified rematerialization and unchanged Windows read-only semantics.
+
 ## 0.11.4 - 2026-08-18
 
 - Tolerated safe wheel members omitted from an upstream `RECORD` after authenticating the complete wheel archive, while

@@ -22,12 +22,10 @@ from pathlib import Path, PurePosixPath
 from packaging.utils import canonicalize_name, parse_wheel_filename
 
 from .errors import CacheError, IntegrityError, ResolutionError
+from .target_permissions import harden_runtime_target
 
 _NATIVE_SUFFIXES = (".so", ".pyd", ".dll", ".dylib")
 _DRIVE = re.compile(r"^[A-Za-z]:")
-_READ_ONLY_DIRECTORY_MODE = stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
-_PROMOTABLE_DIRECTORY_MODE = _READ_ONLY_DIRECTORY_MODE | stat.S_IWUSR
-_READ_ONLY_FILE_MODE = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
 _SUPPORTED_RECORD_HASHES = frozenset(
     {"sha256", "sha384", "sha512", "sha3_256", "sha3_384", "sha3_512", "blake2s", "blake2b"}
 )
@@ -303,7 +301,7 @@ def extract_wheel(
             + "\n",
             encoding="utf-8",
         )
-        _make_read_only(temporary, writable_root=True)
+        harden_runtime_target(temporary, writable_root=True)
         promoted = False
         try:
             os.replace(temporary, destination)
@@ -312,7 +310,7 @@ def extract_wheel(
             if not destination.is_dir():
                 raise
         if promoted:
-            _make_root_read_only(destination)
+            harden_runtime_target(destination)
     finally:
         if temporary.exists():
             _remove_staging_tree(temporary)
@@ -448,28 +446,6 @@ def _category(name: str) -> str:
     if len(parts) >= 3 and parts[0].endswith(".data"):
         return parts[1] if parts[1] in {"purelib", "platlib", "data"} else "data"
     return "purelib"
-
-
-def _make_read_only(root: Path, *, writable_root: bool = False) -> None:
-    for path in sorted(root.rglob("*"), reverse=True):
-        try:
-            if path.is_dir():
-                path.chmod(_READ_ONLY_DIRECTORY_MODE)
-            else:
-                path.chmod(_READ_ONLY_FILE_MODE)
-        except OSError:
-            pass
-    try:
-        root.chmod(_PROMOTABLE_DIRECTORY_MODE if writable_root else _READ_ONLY_DIRECTORY_MODE)
-    except OSError:
-        pass
-
-
-def _make_root_read_only(root: Path) -> None:
-    try:
-        root.chmod(_READ_ONLY_DIRECTORY_MODE)
-    except OSError:
-        pass
 
 
 def _remove_staging_tree(root: Path) -> None:

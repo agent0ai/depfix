@@ -38,6 +38,7 @@ from platformdirs import user_cache_path
 from ._file_urls import file_url_to_path
 from .errors import CacheError, IntegrityError, SpecifierError, redact
 from .models import Artifact, LockedGraph
+from .target_permissions import runtime_target_permissions_valid
 
 _IS_WINDOWS = os.name == "nt"
 _DEFAULT_MAX_ARTIFACT_SIZE = 1024 * 1024 * 1024
@@ -304,6 +305,10 @@ class Cache:
 
     def _target_is_complete(self, target: Path, digest: str) -> bool:
         """Validate one unpacked target without relying on its directory name."""
+        return self._target_contents_are_complete(target, digest) and runtime_target_permissions_valid(target)
+
+    def _target_contents_are_complete(self, target: Path, digest: str) -> bool:
+        """Validate target identity and contents independently of repairable modes."""
         marker = target / ".complete"
         try:
             data = json.loads(marker.read_text(encoding="utf-8"))

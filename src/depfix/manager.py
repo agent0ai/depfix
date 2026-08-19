@@ -103,7 +103,7 @@ def prepare_request(
                 selected_isolation,
                 settings,
             )
-            _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
+            _sync_with_reservation(graph, cache, settings=settings, progress=progress)
             runtime = _runtime(
                 graph,
                 cache,
@@ -121,7 +121,7 @@ def prepare_request(
                 alias = graph.aliases[0]
                 # A warm resolution may refetch an evicted exact artifact, but
                 # it never asks uv to resolve the request again.
-                _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
+                _sync_with_reservation(graph, cache, settings=settings, progress=progress)
                 runtime = _runtime(
                     graph,
                     cache,
@@ -165,7 +165,7 @@ def prepare_request(
                     )
                 )
                 alias = graph.aliases[0]
-                _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
+                _sync_with_reservation(graph, cache, settings=settings, progress=progress)
                 resolution_path.parent.mkdir(parents=True, exist_ok=True)
                 write_manifest(graph, resolution_path)
                 runtime = _runtime(
@@ -278,7 +278,7 @@ def prepare_import_selection(
                 selected_isolation,
                 settings,
             )
-            _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
+            _sync_with_reservation(graph, cache, settings=settings, progress=progress)
             runtime = _runtime(
                 graph,
                 cache,
@@ -301,7 +301,7 @@ def prepare_import_selection(
                 graph = load_manifest(reusable_path)
                 assert_compatible_environment(graph, reusable_path)
                 aliases = _canonical_group_aliases(graph, normalized)
-                _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
+                _sync_with_reservation(graph, cache, settings=settings, progress=progress)
                 runtime = _runtime(
                     graph,
                     cache,
@@ -347,7 +347,7 @@ def prepare_import_selection(
                     )
                 )
                 aliases = graph.aliases
-                _sync_with_reservation(graph, cache, offline=settings.offline, progress=progress)
+                _sync_with_reservation(graph, cache, settings=settings, progress=progress)
                 resolution_path.parent.mkdir(parents=True, exist_ok=True)
                 write_manifest(graph, resolution_path)
                 with cache.lock("canonical-resolution:" + canonical_path.parent.name):
@@ -439,6 +439,17 @@ def prepare_store_import(root: str) -> ModuleBinding | None:
             rejected.append(f"{', '.join(sorted(f'{node.distribution}=={node.version}' for node in providers))}: {exc}")
             continue
         closure = _node_closure(graph, provider_ids)
+        closure_artifacts = frozenset(graph.node_index[node_id].artifact for node_id in closure)
+        try:
+            sync_graph(
+                graph,
+                cache,
+                offline=True,
+                artifact_ids=closure_artifacts,
+                max_io_workers=settings.max_io_workers,
+            )
+        except CacheError:
+            pass
         missing = [
             graph.artifact_index[graph.node_index[node_id].artifact].sha256
             for node_id in closure
@@ -544,6 +555,7 @@ def prepare_store_import(root: str) -> ModuleBinding | None:
         allow_unsafe=settings.allow_unsafe,
         root_nodes=node_ids,
         namespace_groups={root: node_ids} if namespace_group else None,
+        restrict_to_closure=True,
     )
     node_id = node_ids[0]
     node = graph.node_index[node_id]
@@ -593,14 +605,15 @@ def activate_manifest(path: Path, settings: Settings) -> DepfixRuntime:
     cache = Cache(settings.cache_dir)
     cache.renewal_interval_seconds = settings.cache_renewal_seconds
     cache.reserve_artifacts({artifact.sha256 for artifact in graph.artifacts})
-    for artifact in graph.artifacts:
-        if not cache.has_package(artifact.sha256):
-            raise CacheError(
-                "Prepared package is not materialized in the shared store",
-                artifact_hash=artifact.sha256,
-                remediation="install the exact manifest online or from a complete bundle",
-            )
-    sync_graph(graph, cache, offline=True)
+    try:
+        sync_graph(graph, cache, offline=True, max_io_workers=settings.max_io_workers)
+    except CacheError as exc:
+        missing = next((artifact for artifact in graph.artifacts if not cache.has_package(artifact.sha256)), None)
+        raise CacheError(
+            "Prepared package is not materialized in the shared store",
+            artifact_hash=missing.sha256 if missing is not None else "",
+            remediation="install the exact manifest online or from a complete bundle",
+        ) from exc
     runtime = _runtime(
         graph,
         cache,
@@ -651,11 +664,17 @@ def _sync_with_reservation(
     graph: LockedGraph,
     cache: Cache,
     *,
-    offline: bool,
+    settings: Settings,
     progress: ProgressReporter | None,
 ) -> None:
     cache.reserve_artifacts({artifact.sha256 for artifact in graph.artifacts})
-    sync_graph(graph, cache, offline=offline, progress=progress)
+    sync_graph(
+        graph,
+        cache,
+        offline=settings.offline,
+        progress=progress,
+        max_io_workers=settings.max_io_workers,
+    )
 
 
 def _schedule_cache_cleanup(cache: Cache, settings: Settings, graph: LockedGraph) -> None:
@@ -713,12 +732,15 @@ def _runtime(
     namespace_groups: dict[str, tuple[str, ...]] | None = None,
     enforce_unsafe: bool = True,
     register_active: bool = True,
+    restrict_to_closure: bool = False,
 ) -> DepfixRuntime:
     active_nodes = _node_closure(graph, root_nodes or tuple(node.id for node in graph.nodes))
     import_mode = _effective_import_mode(graph, isolation, active_nodes)
     if enforce_unsafe:
         _assert_unsafe_allowed(graph, active_nodes, allow_unsafe, manifest)
-    runtime_nodes = active_nodes if import_mode == "shared" else tuple(node.id for node in graph.nodes)
+    runtime_nodes = (
+        active_nodes if import_mode == "shared" or restrict_to_closure else tuple(node.id for node in graph.nodes)
+    )
     namespace_identity = tuple(sorted((root, node_ids) for root, node_ids in (namespace_groups or {}).items()))
     key = (graph.graph_id, str(cache.root.resolve()), import_mode, runtime_nodes, allow_unsafe, namespace_identity)
     with _guard:

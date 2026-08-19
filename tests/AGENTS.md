@@ -27,6 +27,14 @@
   special entries. Wheel-owned bytecode remains manifested; source-backed interpreter bytecode is accepted only when its
   complete body matches deterministic recompilation, with forged-header bytecode and trailing bytes rejected.
 - Regressions should assert observable public behavior or a named safety invariant.
+- Remote-I/O scheduler regressions assert stable result/error ordering, 16-way tiny-file activity, fixed medium weights,
+  exclusive 100 MB and missing-size artifacts, explicit four-slot metadata work, raised-capacity tiny slots, bounded configuration rollback, capacity-invariant resolver/sync
+  outputs and progress, and concurrent integrity cleanup and transient retry behavior at the real prefetch boundaries.
+- Runtime-target regressions cover uniform non-writable executable POSIX payloads, non-executable and writable rejection,
+  locked repair of legacy non-writable targets without a retained artifact blob, refusal to repair writable manifested or
+  authenticated derived payloads or writable directories, verified rematerialization of writable cache and local targets,
+  rollback-safe warm local replacement, warm local legacy-mode repair, closure-scoped installed-store repair, and Windows
+  native read-only semantics without POSIX execute-mode assumptions.
 - Standard-import tests reset the dispatcher, persistent defaults, context scopes, runtimes, and configuration.
 - Requirements-default tests cover canonical nested parsing, constraints, markers, relative paths, contextual rejection,
   idempotent offline reuse, and atomic default-conflict rollback.

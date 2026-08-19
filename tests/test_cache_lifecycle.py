@@ -20,6 +20,7 @@ from conftest import build_index, build_wheel, file_spec
 
 import depfix
 from depfix import cache as cache_module
+from depfix import target_permissions
 from depfix.cache import Cache
 from depfix.cli import main as cli_main
 from depfix.config import ImportDeclaration, ProjectConfig
@@ -1045,7 +1046,7 @@ def test_usage_renewal_does_not_mutate_read_only_image_origin_tree(tmp_path: Pat
 
     cache.record_usage({artifact.sha256})
 
-    assert cache.has_package(artifact.sha256)
+    assert not cache.has_package(artifact.sha256)
     assert all(not (path.stat().st_mode & stat.S_IWUSR) for path in original_modes)
 
 
@@ -1136,6 +1137,133 @@ def test_package_verification_detects_deleted_materialized_payload(tmp_path: Pat
         verify_manifest(manifest, cache_dir=cache_dir)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX target modes do not apply on Windows")
+def test_sync_repairs_legacy_nonexecutable_payload_modes_without_blob(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    target = cache.unpacked_path(artifact.id)
+    payloads = [path for path in target.rglob("*") if path.is_file() and path.name != ".complete"]
+    for path in payloads:
+        path.chmod(0o444)
+
+    assert not cache.has_package(artifact.sha256)
+    assert not cache.has_blob(artifact.sha256)
+
+    sync_graph(graph, cache, offline=True)
+
+    assert cache.has_package(artifact.sha256)
+    assert {stat.S_IMODE(path.stat().st_mode) for path in payloads} == {0o555}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX target modes do not apply on Windows")
+def test_concurrent_legacy_mode_repair_is_serialized(tmp_path: Path, wheel_factory) -> None:
+    cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    target = cache.unpacked_path(artifact.id)
+    payloads = [path for path in target.rglob("*") if path.is_file() and path.name != ".complete"]
+    for path in payloads:
+        path.chmod(0o444)
+    start = threading.Barrier(2)
+    failures: list[BaseException] = []
+
+    def repair() -> None:
+        try:
+            start.wait(timeout=5)
+            sync_graph(graph, Cache(cache_dir), offline=True)
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=repair) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert failures == []
+    assert cache.has_package(artifact.sha256)
+    assert {stat.S_IMODE(path.stat().st_mode) for path in payloads} == {0o555}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX target modes do not apply on Windows")
+def test_package_verification_rejects_writable_or_nonexecutable_payload_modes(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    payload = cache.unpacked_path(artifact.id) / "purelib" / "cache_demo.py"
+
+    payload.chmod(0o755)
+    assert not cache.has_package(artifact.sha256)
+
+    payload.chmod(0o444)
+    assert not cache.has_package(artifact.sha256)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX target modes do not apply on Windows")
+def test_sync_never_repairs_writable_payload_without_verified_artifact(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    payload = cache.unpacked_path(artifact.id) / "purelib" / "cache_demo.py"
+    payload.chmod(0o755)
+
+    assert not cache.has_blob(artifact.sha256)
+    with pytest.raises(CacheError, match="not cached"):
+        sync_graph(graph, cache, offline=True)
+
+    assert stat.S_IMODE(payload.stat().st_mode) == 0o755
+    assert not cache.has_package(artifact.sha256)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX target modes do not apply on Windows")
+def test_sync_rematerializes_writable_payload_from_verified_artifact(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    payload = cache.unpacked_path(artifact.id) / "purelib" / "cache_demo.py"
+    payload.chmod(0o755)
+
+    sync_graph(graph, cache, offline=False)
+
+    assert cache.has_package(artifact.sha256)
+    assert stat.S_IMODE(payload.stat().st_mode) == 0o555
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX target modes do not apply on Windows")
+def test_sync_never_repairs_writable_directory_without_verified_artifact(tmp_path: Path, wheel_factory) -> None:
+    _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
+    artifact = graph.artifacts[0]
+    directory = cache.unpacked_path(artifact.id) / "purelib"
+    directory.chmod(0o777)
+
+    assert not cache.has_blob(artifact.sha256)
+    with pytest.raises(CacheError, match="not cached"):
+        sync_graph(graph, cache, offline=True)
+
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o777
+    assert not cache.has_package(artifact.sha256)
+
+    sync_graph(graph, cache, offline=False)
+
+    assert cache.has_package(artifact.sha256)
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o555
+
+
+def test_windows_runtime_permissions_preserve_supported_read_only_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    payload = target / "purelib" / "bundled-node"
+    payload.parent.mkdir(parents=True)
+    payload.write_text("runtime payload\n", encoding="utf-8")
+    (target / ".complete").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(target_permissions.os, "name", "nt")
+
+    target_permissions.harden_runtime_target(target)
+
+    assert not (payload.stat().st_mode & stat.S_IWRITE)
+    assert target_permissions.runtime_target_permissions_valid(target)
+    payload.chmod(stat.S_IREAD | stat.S_IWRITE)
+    assert not target_permissions.runtime_target_permissions_valid(target)
+
+
 @pytest.mark.parametrize("filename", ["injected.py", "evil.pyc"])
 def test_package_verification_detects_unmanifested_materialized_payload(
     tmp_path: Path, wheel_factory, filename: str
@@ -1166,7 +1294,7 @@ def test_package_verification_rejects_unmanifested_namespace_directory(tmp_path:
     assert not cache.has_package(artifact.sha256)
 
 
-def test_package_verification_accepts_authenticated_interpreter_bytecode(tmp_path: Path, wheel_factory) -> None:
+def test_sync_rejects_writable_authenticated_bytecode_without_verified_artifact(tmp_path: Path, wheel_factory) -> None:
     _cache_dir, cache, graph = _installed_package(tmp_path, wheel_factory)
     artifact = graph.artifacts[0]
     purelib = cache.unpacked_path(artifact.id) / "purelib"
@@ -1176,8 +1304,17 @@ def test_package_verification_accepts_authenticated_interpreter_bytecode(tmp_pat
     bytecode.parent.mkdir()
     py_compile.compile(str(purelib / "cache_demo.py"), cfile=str(bytecode), doraise=True)
 
+    with pytest.raises(CacheError, match="not cached"):
+        sync_graph(graph, cache, offline=True)
+
+    assert bytecode.exists()
+    assert stat.S_IMODE(bytecode.stat().st_mode) & 0o222
+    assert not cache.has_package(artifact.sha256)
+
+    sync_graph(graph, cache, offline=False)
+
+    assert not bytecode.exists()
     assert cache.has_package(artifact.sha256)
-    assert cache.verify_packages() == 1
 
 
 def test_package_verification_rejects_bytecode_with_forged_source_header(tmp_path: Path, wheel_factory) -> None:

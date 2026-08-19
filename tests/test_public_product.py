@@ -22,6 +22,7 @@ from conftest import build_index, file_spec
 from packaging.version import Version
 
 import depfix
+import depfix.project as project_module
 import depfix.resolver as resolver_module
 from depfix.cache import Cache, _validate_network_url
 from depfix.cli import main as cli_main
@@ -499,6 +500,11 @@ def test_auto_mode_is_scoped_to_each_request_in_a_mixed_prepared_manifest(tmp_pa
     assert activated_old.VERSION == "old" and activated_new.VERSION == "new"
     assert activated_old is not activated_new
     assert activated_native.VALUE == "shared" and activated_native.__name__ == "prepared_native"
+    assert not any(
+        path.name == "__pycache__"
+        for artifact in graph.artifacts
+        for path in cache.unpacked_path(artifact.id).rglob("__pycache__")
+    )
 
     old = depfix.import_module(file_spec(first), module="prepared_target", manifest=manifest, frozen=True, offline=True)
     new = depfix.import_module(
@@ -838,7 +844,9 @@ def test_scanner_is_static_and_reports_dynamic_calls(tmp_path: Path) -> None:
     assert "safe static string" in result.dynamic_requests[0].reason
 
 
-def test_bundle_is_deterministic_and_installs_without_network(tmp_path: Path, wheel_factory) -> None:
+def test_bundle_is_deterministic_and_installs_without_network(
+    tmp_path: Path, wheel_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
     wheel = wheel_factory("bundle-demo", "1.0.0", {"bundle_demo/__init__.py": "VALUE = 7\n"})
     cache_dir = tmp_path / "cache"
     cache = Cache(cache_dir)
@@ -856,7 +864,44 @@ def test_bundle_is_deterministic_and_installs_without_network(tmp_path: Path, wh
     vendored = tmp_path / "vendored"
     local = install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
     assert local.target == vendored
-    assert (vendored / graph.artifacts[0].sha256[:16] / "purelib" / "bundle_demo" / "__init__.py").is_file()
+    local_payload = vendored / graph.artifacts[0].sha256[:16] / "purelib" / "bundle_demo" / "__init__.py"
+    assert local_payload.is_file()
+    if sys.platform != "win32":
+        local_payload.chmod(0o444)
+        install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
+        assert stat.S_IMODE(local_payload.stat().st_mode) == 0o555
+        local_payload.chmod(0o755)
+        local_payload.write_text("VALUE = 99\n", encoding="utf-8")
+        install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
+        assert local_payload.read_text(encoding="utf-8") == "VALUE = 7\n"
+        assert stat.S_IMODE(local_payload.stat().st_mode) == 0o555
+        local_payload.chmod(0o755)
+        local_payload.write_text("VALUE = 99\n", encoding="utf-8")
+        with monkeypatch.context() as patch:
+            patch.setattr(project_module.shutil, "copytree", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError()))
+            with pytest.raises(OSError):
+                install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
+        assert local_payload.read_text(encoding="utf-8") == "VALUE = 99\n"
+        assert stat.S_IMODE(local_payload.stat().st_mode) == 0o755
+        original_replace = project_module.os.replace
+        failed_promotion = False
+
+        def fail_first_promotion(source: Path, destination: Path) -> None:
+            nonlocal failed_promotion
+            if Path(destination) == local_payload.parents[2] and not failed_promotion:
+                failed_promotion = True
+                raise OSError("injected local promotion failure")
+            original_replace(source, destination)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(project_module.os, "replace", fail_first_promotion)
+            with pytest.raises(OSError, match="injected local promotion failure"):
+                install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
+        assert local_payload.read_text(encoding="utf-8") == "VALUE = 99\n"
+        assert stat.S_IMODE(local_payload.stat().st_mode) == 0o755
+        install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
+        assert local_payload.read_text(encoding="utf-8") == "VALUE = 7\n"
+        assert stat.S_IMODE(local_payload.stat().st_mode) == 0o555
     first = create_bundle(manifest, tmp_path / "first.depfixbundle", cache_dir=cache_dir)
     second = create_bundle(manifest, tmp_path / "second.depfixbundle", cache_dir=cache_dir)
     assert first.bundle.read_bytes() == second.bundle.read_bytes()
