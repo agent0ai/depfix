@@ -754,21 +754,27 @@ def _materialize_local(graph: LockedGraph, cache: Cache, destination: Path) -> N
                 _remove_path(temporary)
                 _remove_path(backup)
                 shutil.copytree(source, temporary)
-                harden_runtime_target(temporary)
+                # Keep the staging root owner-writable through atomic promotion.
+                # macOS can reject renaming a fully hardened directory even when
+                # its parent is writable; descendants are already immutable.
+                harden_runtime_target(temporary, writable_root=True)
                 if not cache._target_contents_are_complete(temporary, artifact.sha256):
                     raise CacheError("Local package replacement failed content validation")
-                if not runtime_target_permissions_valid(temporary):
-                    raise CacheError("Local package replacement failed permission validation")
                 had_target = target.exists() or target.is_symlink()
                 if had_target:
                     os.replace(target, backup)
                 try:
                     os.replace(temporary, target)
+                    harden_runtime_target(target)
+                    if not runtime_target_permissions_valid(target):
+                        raise CacheError("Local package replacement failed permission validation")
                 except BaseException:
                     if had_target:
                         if target.exists() or target.is_symlink():
                             _remove_path(target)
                         os.replace(backup, target)
+                    elif target.exists() or target.is_symlink():
+                        _remove_path(target)
                     raise
                 if had_target:
                     _remove_path(backup)

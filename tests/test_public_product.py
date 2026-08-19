@@ -867,6 +867,39 @@ def test_bundle_is_deterministic_and_installs_without_network(
     local_payload = vendored / graph.artifacts[0].sha256[:16] / "purelib" / "bundle_demo" / "__init__.py"
     assert local_payload.is_file()
     if sys.platform != "win32":
+        original_replace = project_module.os.replace
+        promotion_modes: list[int] = []
+
+        def inspect_promotion_mode(source: Path, destination: Path) -> None:
+            if Path(destination) == local_payload.parents[2] and Path(source).name.startswith(
+                local_payload.parents[2].name + "."
+            ):
+                promotion_modes.append(stat.S_IMODE(Path(source).stat().st_mode))
+            original_replace(source, destination)
+
+        local_payload.chmod(0o755)
+        local_payload.write_text("VALUE = 99\n", encoding="utf-8")
+        with monkeypatch.context() as patch:
+            patch.setattr(project_module.os, "replace", inspect_promotion_mode)
+            install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
+        assert promotion_modes == [0o755]
+        assert local_payload.read_text(encoding="utf-8") == "VALUE = 7\n"
+        assert stat.S_IMODE(local_payload.stat().st_mode) == 0o555
+        failed_target = tmp_path / "failed-vendored"
+        real_harden = project_module.harden_runtime_target
+        harden_calls = 0
+
+        def fail_final_hardening(root: Path, *, writable_root: bool = False) -> None:
+            nonlocal harden_calls
+            harden_calls += 1
+            if harden_calls == 1:
+                real_harden(root, writable_root=writable_root)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(project_module, "harden_runtime_target", fail_final_hardening)
+            with pytest.raises(CacheError, match="permission validation"):
+                install_manifest(manifest, local=True, target=failed_target, offline=True, cache_dir=cache_dir)
+        assert not (failed_target / graph.artifacts[0].sha256[:16]).exists()
         local_payload.chmod(0o444)
         install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
         assert stat.S_IMODE(local_payload.stat().st_mode) == 0o555
@@ -883,7 +916,6 @@ def test_bundle_is_deterministic_and_installs_without_network(
                 install_manifest(manifest, local=True, target=vendored, offline=True, cache_dir=cache_dir)
         assert local_payload.read_text(encoding="utf-8") == "VALUE = 99\n"
         assert stat.S_IMODE(local_payload.stat().st_mode) == 0o755
-        original_replace = project_module.os.replace
         failed_promotion = False
 
         def fail_first_promotion(source: Path, destination: Path) -> None:
