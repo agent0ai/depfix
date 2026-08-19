@@ -43,6 +43,32 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.12.2 — 2026-08-19
+
+- PyPI: `https://pypi.org/project/depfix/0.12.2/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.12.2`
+- Wheel SHA-256: `a8cf57061772965c1caca42811e6ade10ae0012c310e19e28b931d6a4555dd97`
+- Sdist SHA-256: `7d85121db3dbf3ec5acdd43144fa0f2a9fc4105e76814862fc9d50dae0e6b299`
+- Published from commit `b75f6f327b1283145e5163e6604319ada27cf50a` by protected workflow run
+  `https://github.com/agent0ai/depfix/actions/runs/32250974975` after its tag-bound request, complete quality and platform
+  matrix, distribution, hidden-draft staging, OIDC publication, public-index verification, and release finalization gates
+  passed on attempt 1.
+- PyPI and GitHub expose exactly the wheel and source archive byte for byte. Both PyPI attestations bind their artifact
+  subjects and digests to `agent0ai/depfix`, `publish-pypi.yml`, annotated `v0.12.2`, the release commit, protected `pypi`
+  environment, and workflow attempt 1. A credential-free no-cache CPython 3.13 installation verified 0.12.2, reproduced
+  weighted scheduler peaks of 16 tiny operations and one 100 MB operation, launched Playwright 1.54.0's managed Node
+  v22.17.0 from the Depfix cache at mode `0555`, and completed Playwright's bounded Chromium `--dry-run`.
+
+### 0.12.1 — 2026-08-19 (superseded before PyPI publication)
+
+- Hosted macOS and Windows validation exposed that both sides of local atomic replacement must remain promotable. The
+  corrected cross-platform promotion boundary is released as 0.12.2 without moving the immutable tag.
+
+### 0.12.0 — 2026-08-19 (superseded before PyPI publication)
+
+- Hosted macOS validation exposed premature hardening of the local staging root. Validation failed before distribution
+  staging, OIDC, or PyPI publication; the corrected boundary was advanced without moving the immutable tag.
+
 ### 0.11.4 — 2026-08-18
 
 - PyPI: `https://pypi.org/project/depfix/0.11.4/`
