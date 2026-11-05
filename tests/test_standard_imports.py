@@ -495,6 +495,77 @@ def test_async_tasks_and_threads_have_isolated_scopes(tmp_path: Path, wheel_fact
     assert results == ("old", "new")
 
 
+@pytest.mark.parametrize("bytecode_disabled", [False, True])
+@pytest.mark.parametrize("import_fails", [False, True])
+def test_shared_import_hooks_can_import_from_another_thread(
+    tmp_path: Path, wheel_factory, bytecode_disabled: bool, import_fails: bool
+) -> None:
+    wheel = wheel_factory(
+        "shared-hook-lock",
+        "1.0.0",
+        {
+            "shared_hook_outer.py": (
+                "import sys\n"
+                "coord = sys._depfix_test_coord\n"
+                "coord.entered.set()\n"
+                "with coord.lock: pass\n"
+                "assert sys.dont_write_bytecode\n"
+                "if coord.fail: raise ValueError('fixture import failed')\n"
+            ),
+            "shared_hook_inner.py": "import sys\nassert sys.dont_write_bytecode\nVALUE = 7\n",
+            "shared_hook_native.so": b"native marker",
+        },
+    )
+    script = """
+import importlib, sys, threading
+from types import SimpleNamespace
+import depfix
+depfix.configure(cache_dir=sys.argv[2], log_level='WARNING')
+depfix.default(sys.argv[1])
+original = sys.argv[3] == 'True'
+sys.dont_write_bytecode = original
+coord = SimpleNamespace(lock=threading.Lock(), entered=threading.Event(),
+                        ready=threading.Event(), fail=sys.argv[4] == 'True', errors=[])
+sys._depfix_test_coord = coord
+def import_from_hook():
+    try:
+        with coord.lock:
+            coord.ready.set()
+            assert coord.entered.wait(5)
+            assert importlib.import_module('shared_hook_inner').VALUE == 7
+            assert sys.dont_write_bytecode
+    except BaseException as error:
+        coord.errors.append(error)
+thread = threading.Thread(target=import_from_hook, daemon=True)
+thread.start()
+assert coord.ready.wait(5)
+try:
+    importlib.import_module('shared_hook_outer')
+except ValueError as error:
+    assert coord.fail and str(error) == 'fixture import failed'
+else:
+    assert not coord.fail
+thread.join(5)
+assert not thread.is_alive() and not coord.errors, coord.errors
+assert sys.dont_write_bytecode == original
+"""
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            file_spec(wheel),
+            str(tmp_path / "cache"),
+            str(bytecode_disabled),
+            str(import_fails),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+
 def test_package_dependencies_keep_their_realm_after_scope_exit(tmp_path: Path, wheel_factory) -> None:
     dependency_old = wheel_factory("realm-dependency", "1.0.0", {"realm_dependency.py": "VERSION = 'old'\n"})
     dependency_new = wheel_factory("realm-dependency", "2.0.0", {"realm_dependency.py": "VERSION = 'new'\n"})

@@ -34,7 +34,9 @@
   non-writable payload modes under target and artifact locks without changing content identity. Writable directories or
   payloads, including authenticated interpreter-derived bytecode, require verified rematerialization. Warm local targets
   are validated then repaired or rollback-safely replaced from a fully validated adjacent copy. Shared imports suppress
-  interpreter bytecode writes into immutable targets. Installed-store repair is limited to the requested dependency
+  interpreter bytecode writes into immutable targets across overlapping imports and restore the prior setting after the
+  last import finishes, including failures. Shared module execution, including finder/loader hooks, runs outside the
+  ownership lock. Installed-store repair is limited to the requested dependency
   closure. Windows keeps private staging descendants writable through atomic promotion, then validates supported read-only
   file semantics on the published target without emulating POSIX execute modes.
 - Pinned downloads retry and resume bounded transient truncation, but exact size and SHA-256 verification remain mandatory

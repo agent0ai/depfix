@@ -4,6 +4,12 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.12.7 - 2026-11-05
+
+- Avoid shared-import deadlocks with third-party import hooks by releasing the ownership lock during module execution.
+  Keep bytecode writes disabled across overlapping imports and restore the original setting after all imports finish,
+  including failed imports; artifact validation and shared-owner conflict checks remain unchanged.
+
 ## 0.12.6 - 2026-11-05
 
 - Coalesce identical installed import providers repeated across grouped dependency realms. Preserve ambiguity checks for

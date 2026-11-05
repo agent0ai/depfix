@@ -46,6 +46,8 @@
   whose dependency closures differ.
 - Shared-mode tests must clean up process-global import roots and paths, and cover compatible reuse, public-owner conflicts,
   private-helper and compatibility-alias best effort, namespace contribution merging, and scoped first-use/reuse behavior.
+- Shared-import concurrency tests cover lock inversion with third-party import hooks and bytecode suppression/restoration
+  across overlapping successful and failed imports.
 - Unsafe-loading tests must cover per-request/global precedence, deny-by-default remediation, manifest persistence, and a
   real compiled-extension path when the interpreter provides a suitable test extension.
 - Cache lifecycle tests must cover installation/use timestamps, total reclaimed targets, returning-graph reservations,

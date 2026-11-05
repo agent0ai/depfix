@@ -41,6 +41,8 @@ _COMPATIBILITY_IMPORT_ALIASES = {
 }
 _STANDARD_IMPORT_MODULE = importlib.import_module
 _SHARED_LOCK = threading.RLock()
+_SHARED_IMPORT_COUNT = 0
+_SHARED_BYTECODE_SETTING = False
 _SHARED_ROOT_OWNERS: dict[str, dict[tuple[str, str, str], tuple[bool, int]]] = {}
 _SHARED_PATH_STATE: dict[str, tuple[int, int | None]] = {}
 
@@ -598,6 +600,7 @@ class DepfixRuntime:
         return runtime.import_for_node(alias.node, alias.module)
 
     def import_for_node(self, caller_node_id: str, logical_name: str) -> ModuleType:
+        global _SHARED_IMPORT_COUNT, _SHARED_BYTECODE_SETTING
         if not _is_safe_logical_module_name(logical_name):
             raise RealmImportError(
                 "Logical module name contains unsafe path syntax",
@@ -618,12 +621,18 @@ class DepfixRuntime:
                     remediation="declare the package or dependency before importing it",
                 )
             with _SHARED_LOCK:
-                previous_bytecode_setting = sys.dont_write_bytecode
+                if not _SHARED_IMPORT_COUNT:
+                    _SHARED_BYTECODE_SETTING = sys.dont_write_bytecode
+                _SHARED_IMPORT_COUNT += 1
                 sys.dont_write_bytecode = True
-                try:
-                    module = _STANDARD_IMPORT_MODULE(logical_name)
-                finally:
-                    sys.dont_write_bytecode = previous_bytecode_setting
+            # Import hooks can hold their own locks while importing on another thread.
+            try:
+                module = _STANDARD_IMPORT_MODULE(logical_name)
+            finally:
+                with _SHARED_LOCK:
+                    _SHARED_IMPORT_COUNT -= 1
+                    if not _SHARED_IMPORT_COUNT:
+                        sys.dont_write_bytecode = _SHARED_BYTECODE_SETTING
             providers = self._provider_nodes(caller, logical_name)
             if len(providers) == 1 and "__depfix_node_id__" not in module.__dict__:
                 provider = providers[0]
