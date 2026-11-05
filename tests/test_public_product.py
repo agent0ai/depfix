@@ -673,26 +673,40 @@ def test_uv_bulk_plan_compiles_exact_versions_without_installing_a_target(
     assert not tuple((cache.root / "tmp").glob("uv-plan-*"))
 
 
-def test_uv_bulk_plan_uses_installed_metadata_override_offline(tmp_path: Path) -> None:
+@pytest.mark.parametrize("extras", ["", "[speed]"])
+@pytest.mark.parametrize("transitive", [False, True])
+def test_uv_bulk_plan_uses_only_requested_installed_extras_offline(
+    tmp_path: Path, extras: str, transitive: bool
+) -> None:
     cache = Cache(tmp_path / "cache")
     backend = UvBackend(Settings(cache_dir=tmp_path / "cache", offline=True), cache)
 
     plan = backend.resolve_requirements_plan(
-        ("custom-variant[speed]>=1",),
+        ("custom-root" if transitive else f"custom-variant{extras}>=1",),
         constraints=("custom-variant==1.1.0+cpu", "custom-leaf==2.0.0"),
         preferences=(
             PlanPreference(
                 "custom-variant",
                 "1.1.0+cpu",
                 ">=3.11",
-                ('custom-leaf>=2; extra == "speed"',),
-                ("speed",),
+                (
+                    'custom-leaf>=2; extra == "speed"',
+                    'missing-dev-tool; extra == "developer"',
+                    'missing-leaf; extra == "speed" and python_version < "2"',
+                ),
+                ("speed", "developer"),
             ),
             PlanPreference("custom-leaf", "2.0.0", ">=3.11", ()),
+            PlanPreference("custom-root", "1.0.0", ">=3.11", (f"custom-variant{extras}>=1",)),
         ),
     )
 
-    assert plan.distributions == {"custom-variant": "1.1.0+cpu", "custom-leaf": "2.0.0"}
+    expected = {"custom-variant": "1.1.0+cpu"}
+    if extras:
+        expected["custom-leaf"] = "2.0.0"
+    if transitive:
+        expected["custom-root"] = "1.0.0"
+    assert plan.distributions == expected
     assert not tuple((cache.root / "tmp").glob("uv-plan-*"))
 
 

@@ -135,7 +135,8 @@
   renders one compact, identity-deduplicated store summary by default and retains the complete result under `--json`.
 - Compatible multi-root registry groups use one `uv pip compile` exact-version plan without installing a duplicate closure;
   Depfix seeds cache-first planning with verified installed metadata, ingests artifacts through its own verified store, and
-  recursively bisects a conflicting group in stable order. Every successful half keeps its own exact plan and may retain
+  recursively bisects a conflicting group in stable order. Installed metadata uses URL constraints, never extras-expanding
+  overrides; only root or dependency requests activate extras, and their markers remain intact. Every successful half keeps its own exact plan and may retain
   dependency versions different from another successful half; only failed singleton roots use isolated resolution. The
   split tree is linear in the root count and does not search for a mathematically largest cross-half cohort. Before
   splitting, verified installed root metadata may stably move roots with locally proven installed-version mismatches to

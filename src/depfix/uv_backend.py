@@ -232,7 +232,7 @@ class UvBackend:
         output = work / "requirements.txt"
         constraint_path = work / "constraints.txt"
         preference_root = work / "installed"
-        override_path = work / "installed-overrides.txt"
+        preference_path = work / "installed-constraints.txt"
         source.write_text("\n".join(requirements) + "\n", encoding="utf-8")
         arguments = [
             "pip",
@@ -254,17 +254,16 @@ class UvBackend:
             arguments.extend(["--constraint", str(constraint_path)])
         if preferences:
             preference_root.mkdir()
-            override_path.write_text(
+            preference_path.write_text(
                 "\n".join(
-                    f"{_preference_requirement_name(preference)} @ "
-                    f"{_write_plan_preference(preference_root, preference).as_uri()}"
+                    f"{preference.distribution} @ {_write_plan_preference(preference_root, preference).as_uri()}"
                     for preference in preferences
                 )
                 + "\n",
                 encoding="utf-8",
             )
             arguments.extend(["--find-links", str(preference_root)])
-            arguments.extend(["--override", str(override_path)])
+            arguments.extend(["--constraint", str(preference_path)])
         if self.settings.offline:
             arguments.append("--offline")
         if self.settings.index_url:
@@ -453,12 +452,6 @@ def _write_plan_preference(root: Path, preference: PlanPreference) -> Path:
         archive.writestr(f"{metadata_dir}/WHEEL", wheel)
         archive.writestr(f"{metadata_dir}/RECORD", "")
     return path
-
-
-def _preference_requirement_name(preference: PlanPreference) -> str:
-    if not preference.provides_extra:
-        return preference.distribution
-    return f"{preference.distribution}[{','.join(preference.provides_extra)}]"
 
 
 def _installed_distributions(target: Path) -> dict[str, str]:

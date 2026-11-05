@@ -61,7 +61,8 @@
 - Bundle and online manifest-repair tests must cover exact hash-verified reacquisition of source-built artifacts after
   their ephemeral wheels are removed; offline repair must still fail clearly when no complete target or bundle exists.
 - Resolution tests must cover compatible cache reuse across separate and grouped roots, newest-first overrides, cached
-  top-level requests, public loading signatures, scanner preservation, and configuration precedence.
+  top-level requests, public loading signatures, scanner preservation, and configuration precedence. Real offline uv plans
+  must preserve requested root/transitive extras and markers without activating unrequested installed extras.
 - Scoped-index tests must cover primary-only precedence, grouped and async loading, concurrent isolation, graph identity,
   exact-manifest rejection, scanner preservation, native-package handling, refresh, and credential redaction.
 - `depfix pip install` tests must prove package arguments and nested requirement/constraint files use grouped Depfix

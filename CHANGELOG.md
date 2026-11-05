@@ -4,6 +4,11 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.12.3 - 2026-11-05
+
+- Keep cached package preferences from activating unrequested optional extras during bulk resolution, while preserving
+  explicitly requested root and transitive extras, dependency markers, and version constraints.
+
 ## 0.12.2 - 2026-08-19
 
 - Added deterministic size-weighted concurrency for planned remote metadata and exact wheel acquisition, with a default
