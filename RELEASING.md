@@ -43,6 +43,19 @@ authority for reviewed artifacts.
 
 ## Published releases
 
+### 0.12.7 — 2026-11-05
+
+- PyPI: `https://pypi.org/project/depfix/0.12.7/`
+- GitHub: `https://github.com/agent0ai/depfix/releases/tag/v0.12.7`
+- Wheel SHA-256: `e6b06d282b5e4a78d884649297d54d194b337d6c8fab72771009cb2fb925f990`
+- Sdist SHA-256: `bf2105caa0025a02986ba7a182525db54d6a8b64e041f77e949550a23b89957d`
+- Published from annotated tag commit `842fde2db61aa184fb2894a5302294f1d55f012a` through
+  `https://github.com/agent0ai/depfix/actions/runs/42067671950`. All required production checks, protected publication,
+  public-index verification and GitHub finalization passed.
+- Public PyPI and GitHub downloads contain exactly the wheel and sdist and match byte for byte and by SHA-256.
+  After regional index propagation, a fresh credential-free, no-cache public-index installation verified the Python
+  and CLI version as 0.12.7.
+
 ### 0.12.6 — 2026-11-05
 
 - PyPI: `https://pypi.org/project/depfix/0.12.6/`
