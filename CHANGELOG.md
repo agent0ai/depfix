@@ -4,10 +4,17 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
-## 0.12.4 - 2026-11-05
+## 0.12.5 - 2026-11-05
 
 - Keep cached package preferences from activating unrequested optional extras during bulk resolution, while preserving
   explicitly requested root and transitive extras, dependency markers, and version constraints.
+- Reuse verified installed custom-index versions during bulk prefetch without requiring those versions to exist on the
+  active index; normal graph resolution and artifact validation remain authoritative.
+
+## 0.12.4 - 2026-11-05 (superseded before PyPI publication)
+
+- Full application installation exposed the separate installed-variant prefetch failure after extras planning succeeded.
+  Version 0.12.5 includes both scoped repairs; the immutable candidate tag is retained.
 
 ## 0.12.3 - 2026-11-05 (superseded before PyPI publication)
 

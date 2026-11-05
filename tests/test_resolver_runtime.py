@@ -677,6 +677,41 @@ def test_bulk_plan_is_seeded_with_verified_installed_selection(
     assert PlanPreference("seeded-variant", "1.1.0+cpu", "", ("seed-leaf>=2",)) in backend.observed_preferences
 
 
+def test_bulk_prefetch_preserves_installed_variant_absent_from_active_index(tmp_path: Path, wheel_factory) -> None:
+    variant = wheel_factory("cached-variant", "1.0.0+cpu", {"cached_variant.py": "VALUE = 'cpu'\n"})
+    cache = Cache(tmp_path / "cache")
+    primed = Resolver(cache).resolve(
+        ProjectConfig(
+            tmp_path / "prime.toml", (ImportDeclaration("variant", file_spec(variant), "cached_variant"),), {}
+        )
+    )
+    sync_graph(primed, cache, offline=True)
+    roots = [
+        wheel_factory(name, "1.0.0", {name.replace("-", "_") + ".py": "VALUE = 1\n"}, requires=["cached-variant>=1"])
+        for name in ("root-one", "root-two")
+    ]
+
+    class Backend:
+        def version(self) -> str:
+            return "test"
+
+        def resolve_requirements_plan(self, requirements, *, constraints=(), preferences=()):  # type: ignore[no-untyped-def]
+            return ResolutionPlan({"root-one": "1.0.0", "root-two": "1.0.0", "cached-variant": "1.0.0+cpu"})
+
+    graph = Resolver(cache, index_url=build_index(tmp_path / "index", roots), backend=Backend()).resolve(
+        ProjectConfig(
+            tmp_path / "bulk.toml",
+            tuple(ImportDeclaration(name, name, api="load_package") for name in ("root-one", "root-two")),
+            {},
+        )
+    )
+    sync_graph(graph, cache, offline=True)
+    assert (
+        next(artifact for artifact in graph.artifacts if artifact.distribution == "cached-variant")
+        == primed.artifacts[0]
+    )
+
+
 def test_incompatible_installed_transitive_preference_does_not_isolate_compatible_roots(
     tmp_path: Path,
     wheel_factory,

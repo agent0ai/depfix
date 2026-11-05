@@ -105,7 +105,8 @@
   artifacts selected earlier in a grouped resolution. Every loading API accepts `prefer_newest`; process, environment,
   project, export, and CLI configuration inherit through `settings.py`, and resolution identities separate both modes.
   Each resolution verifies the installed inventory once and uses that deterministic snapshot for direct roots, transitive
-  edges, and bulk-plan preferences; repeated dependency edges must not rehash every installed target.
+  edges, and bulk-plan preferences; repeated dependency edges must not rehash every installed target. Bulk prefetch skips
+  verified installed exact versions, which may be absent from the active index; normal resolution still owns reuse policy.
 - Every loading API accepts request-scoped primary and extra index overrides. A scoped primary suppresses inherited extra
   indexes unless the same call explicitly supplies them; index policy is part of request and graph identity, never mutates
   process configuration, and is rejected when an exact prepared manifest is active.

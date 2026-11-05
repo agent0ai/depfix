@@ -1471,6 +1471,12 @@ class Resolver:
         if self.settings.offline or not plans:
             return
         selections = sorted({(name, version) for plan in plans.values() for name, version in plan.items()})
+        # Installed variants need not exist on the active index; normal resolution owns their reuse.
+        selections = [
+            (name, version)
+            for name, version in selections
+            if self._select_installed(name, SpecifierSet(f"=={version}"), emit_progress=False) is None
+        ]
         metadata_versions: dict[str, str] = {}
         for distribution, version in selections:
             if distribution not in self._project_payload_cache:
