@@ -4,10 +4,16 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
-## 0.12.3 - 2026-11-05
+## 0.12.4 - 2026-11-05
 
 - Keep cached package preferences from activating unrequested optional extras during bulk resolution, while preserving
   explicitly requested root and transitive extras, dependency markers, and version constraints.
+
+## 0.12.3 - 2026-11-05 (superseded before PyPI publication)
+
+- Hosted live validation exposed an existing test assumption that OpenAI 0.28 must use shared imports. Current transitive
+  artifacts also support isolated imports; 0.12.4 verifies module identity and the appropriate public-owner boundary
+  without changing runtime behavior or moving the immutable tag.
 
 ## 0.12.2 - 2026-08-19
 
