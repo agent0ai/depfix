@@ -24,6 +24,8 @@
   complete compatible graphs already recorded in the shared store, never performs resolution or network installation,
   keeps explicit scopes/defaults ahead of deterministic installed-store selection, and preserves an exact configured
   manifest's provider before considering unrelated stored graphs.
+- Installed-store fallback coalesces repeated providers only when their artifact and complete dependency closure match;
+  different artifacts, versions or dependency selections remain ambiguous.
 - `depfix run` enables the installed-store fallback after applying its process configuration and optional prepared state,
   before executing either a script or module; the launched application does not need its own Depfix setup call.
 - Resolved artifacts are hash-pinned and materialized outside ambient `site-packages`.

@@ -415,7 +415,11 @@ def prepare_store_import(root: str) -> ModuleBinding | None:
             continue
         providers = tuple(
             sorted(
-                (node for node in graph.nodes if root in {name.split(".", 1)[0] for name in node.provided_modules}),
+                {
+                    _closure_fingerprint(graph, (node.id,)): node
+                    for node in graph.nodes
+                    if root in {name.split(".", 1)[0] for name in node.provided_modules}
+                }.values(),
                 key=lambda node: (node.distribution, node.version, node.artifact),
             )
         )

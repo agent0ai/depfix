@@ -8,10 +8,11 @@ import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from conftest import file_spec
+from conftest import build_index, file_spec
 
 import depfix
 from depfix import cache as cache_module
@@ -19,7 +20,7 @@ from depfix.cache import Cache
 from depfix.dispatcher import dispatcher_installed
 from depfix.errors import StoreImportError
 from depfix.manager import reset_runtime_state
-from depfix.manifest import load_manifest
+from depfix.manifest import computed_graph_id, load_manifest, write_manifest
 from depfix.project import install_packages
 from depfix.settings import reset_configuration
 
@@ -385,6 +386,71 @@ def test_patch_import_rejects_ambiguous_same_version_artifacts(tmp_path: Path, w
 
     with pytest.raises(StoreImportError, match="several incompatible dependency graphs or artifacts"):
         importlib.import_module("ambiguous_fallback")
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_patch_import_coalesces_identical_providers_in_grouped_realms(
+    tmp_path: Path, wheel_factory, native: bool
+) -> None:
+    files: dict[str, str | bytes] = {"grouped_provider.py": "VALUE = 42\n"}
+    if native:
+        files["unused_grouped_native.so"] = b"native marker"
+    shared = wheel_factory("grouped-provider", "1.0.0", files)
+    roots = [
+        wheel_factory(name, "1.0.0", {f"{name}.py": ""}, requires=["grouped-provider==1.0.0"])
+        for name in ("first_root", "second_root")
+    ]
+    result = install_packages(
+        tuple(file_spec(root) for root in roots),
+        index_url=build_index(tmp_path / "index", [shared]),
+        cache_dir=tmp_path / "cache",
+    )
+    graph = load_manifest(result.manifest)
+    assert len([node for node in graph.nodes if node.distribution == "grouped-provider"]) == 2
+    depfix.configure(cache_dir=tmp_path / "cache", offline=True, log_level="WARNING")
+
+    depfix.patch_import()
+
+    assert importlib.import_module("grouped_provider").VALUE == 42
+
+
+def test_patch_import_keeps_distinct_dependency_closures_ambiguous(tmp_path: Path, wheel_factory) -> None:
+    leaves = [wheel_factory("grouped-leaf", version, {"grouped_leaf.py": ""}) for version in ("1.0.0", "2.0.0")]
+    shared = wheel_factory("grouped-provider", "1.0.0", {"grouped_provider.py": ""}, requires=["grouped-leaf>=1"])
+    roots = [
+        wheel_factory(
+            name,
+            "1.0.0",
+            {f"{name}.py": ""},
+            requires=["grouped-provider==1.0.0", f"grouped-leaf=={version}"],
+        )
+        for name, version in (("first_root", "1.0.0"), ("second_root", "2.0.0"))
+    ]
+    result = install_packages(
+        tuple(file_spec(root) for root in roots),
+        index_url=build_index(tmp_path / "index", [shared, *leaves]),
+        cache_dir=tmp_path / "cache",
+    )
+    graph = load_manifest(result.manifest)
+    providers = [node for node in graph.nodes if node.distribution == "grouped-provider"]
+    assert len(providers) == 2
+    newer = next(node for node in graph.nodes if node.distribution == "grouped-leaf" and node.version == "2.0.0")
+    # Both exact leaf selections satisfy the provider; retain different realm choices.
+    graph = replace(
+        graph,
+        nodes=tuple(
+            replace(node, dependencies={"grouped-leaf": newer.id}) if node.id == providers[-1].id else node
+            for node in graph.nodes
+        ),
+    )
+    graph = replace(graph, graph_id=computed_graph_id(graph))
+    manifest = tmp_path / "ambiguous.lock"
+    write_manifest(graph, manifest)
+    depfix.configure(manifest=manifest, cache_dir=tmp_path / "cache", offline=True, log_level="WARNING")
+    depfix.patch_import()
+
+    with pytest.raises(StoreImportError, match="multiple non-namespace providers"):
+        importlib.import_module("grouped_provider")
 
 
 def test_patch_and_unpatch_are_idempotent_and_preserve_unrelated_hooks(tmp_path: Path, wheel_factory) -> None:

@@ -42,6 +42,8 @@
   deterministic/ambiguous selection, namespaces, native mode, import semantics, concurrency, and reversible hooks without
   network resolution, exact-manifest precedence, plus automatic script/module activation through `depfix run` without
   application-side setup.
+- Grouped fallback tests cover duplicate pure/native providers with identical closures and reject identical root artifacts
+  whose dependency closures differ.
 - Shared-mode tests must clean up process-global import roots and paths, and cover compatible reuse, public-owner conflicts,
   private-helper and compatibility-alias best effort, namespace contribution merging, and scoped first-use/reuse behavior.
 - Unsafe-loading tests must cover per-request/global precedence, deny-by-default remediation, manifest persistence, and a

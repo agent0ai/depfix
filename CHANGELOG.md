@@ -4,6 +4,11 @@ All notable changes use this file. The project follows semantic versioning after
 
 ## Unreleased
 
+## 0.12.6 - 2026-11-05
+
+- Coalesce identical installed import providers repeated across grouped dependency realms. Preserve ambiguity checks for
+  different artifacts, versions and dependency closures, including native imports.
+
 ## 0.12.5 - 2026-11-05
 
 - Keep cached package preferences from activating unrequested optional extras during bulk resolution, while preserving
